@@ -12,6 +12,13 @@ _os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 if "QT_API" not in _os.environ and _importlib_util.find_spec("PyQt6") is not None:
     _os.environ["QT_API"] = "pyqt6"
 
+# napari's async slicing: a viewport reslice decodes on the slicer's pool instead of the Qt
+# thread, so rapid zoom keeps painting the previous rung. The env is the one NON-PERSISTING
+# channel and must precede the process's first napari get_settings(); see _async_slicing.
+from squidxplorer._async_slicing import configure as _configure_async_slicing
+
+_configure_async_slicing(_os.environ)
+
 from squidxplorer._engine import (
     MissingOperatorDependency,
     Operator,

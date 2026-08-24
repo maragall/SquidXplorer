@@ -13,6 +13,22 @@ import pytest
 pytest.importorskip("qtpy")
 pytest.importorskip("napari", reason="playback is napari's own dims playback")
 
+
+@pytest.fixture(autouse=True)
+def _sync_slicing_for_determinism(monkeypatch):
+    """This file's pump-conditions were written for SYNCHRONOUS slicing and flake under the
+    async default (three different tests across runs). Force each new viewer's slicer sync
+    via its own per-viewer knob — the global setting (and production) stays async."""
+    from napari.components import ViewerModel
+
+    orig = ViewerModel.__init__
+
+    def patched(self, *a, **k):
+        orig(self, *a, **k)
+        self._layer_slicer._force_sync = True
+
+    monkeypatch.setattr(ViewerModel, "__init__", patched)
+
 from squidxplorer import open_reader                                        # noqa: E402
 from squidxplorer._time_point import NoPlaybackError, TimePointBar          # noqa: E402
 from tests.conftest import (                                            # noqa: E402

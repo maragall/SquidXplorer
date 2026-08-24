@@ -750,6 +750,27 @@ The PR's own `PLAN-plate-navigation.md` is the source design; the port decisions
   re-check it; a hand check on this Mac is owed. Commit H (drag tabs BETWEEN windows) stays
   deferred, hooks in place (`dock_page`/`undock_page`, `_host`, `ViewerManager._decks`).
 
+## Viewport slicing is ASYNC (2026-08-24, branch async-slicing)
+
+Julio, live on the 900-FOV 20x set: "when I zoom in rapidly, it's not responsive." napari's
+own async slicing (NAP-4) is on process-wide; the canvas keeps the previous rung while the
+fine one computes on the slicer's pool. The rules:
+
+- **Enabled ONLY via env**: `squidxplorer/__init__` sets `NAPARI_ASYNC=1` before the first
+  `get_settings()` (`_async_slicing.configure`). NEVER assign the napari setting: any
+  settings assignment autosaves the user's global settings.yaml (measured), while
+  env-sourced values are excluded from every save. `SQUIDXPLORER_SYNC_SLICING=1` opts out;
+  a user's own `NAPARI_ASYNC` wins.
+- **napari's only ready-event consumer is QtViewer**, so production panes apply responses
+  already; `_napari_pane.attach_async_slice_apply` is the same apply half for the headless
+  ModelPane and test scenes — ALWAYS main-thread marshalled (an inline apply from the pool
+  reaches Qt-connected listeners and aborts the process; measured SIGABRT).
+- **`_reslice_hidden_layers` stays synchronous** through `_refresh_sync` with refresh's full
+  flag set (`force` alone refreshes nothing) — the 2026-08-06 thumbnail race must not reopen.
+- Tests whose pins are inherently sync-semantic (`test_time_point_playback`,
+  `test_roi_pitch`) force each viewer's slicer sync via the per-viewer `_force_sync` knob;
+  the suite otherwise runs the production (async) configuration.
+
 ## Squid's downsampled well mosaics are read, and written back when absent (2026-08-19)
 
 `squidxplorer/_wellimage.py` reads what Squid's SAVE_DOWNSAMPLED_WELL_IMAGES writes:

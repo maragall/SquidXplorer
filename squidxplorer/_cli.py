@@ -325,6 +325,11 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
         # One mosaic per region: fields ARE regions here, so no second wells count.
         line = ("%s (%d/%d region mosaic(s) written, fused Squid OME-TIFF)" % (
             manifest["path"], manifest["n_fields_written"], manifest["n_fields"]))
+    elif "plate" not in manifest:
+        # A save with NO writer manifest: the operator wrote its own artifact (register's
+        # stitched_ copy), already named in the run's own log lines.
+        line = ("the operator wrote its own artifact (see the run log); "
+                "%d target well(s)" % int(manifest.get("n_targets") or 0))
     else:
         line = ("%s (%d/%d fields written across %d/%d wells, %d pyramid level(s))%s" % (
             manifest["plate"], manifest["n_fields_written"], manifest["n_fields"],

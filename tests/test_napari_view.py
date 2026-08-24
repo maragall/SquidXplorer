@@ -30,7 +30,28 @@ napari = pytest.importorskip("napari")
 def layers():
     from napari.components import ViewerModel
 
-    return MosaicLayers(ViewerModel())
+    from squidxplorer._napari_pane import attach_async_slice_apply
+
+    viewer = ViewerModel()
+    # The apply half production panes get from QtViewer/ModelPane (main-thread marshalled;
+    # _settle pumps the queue). See _napari_pane.attach_async_slice_apply.
+    attach_async_slice_apply(viewer)
+    ml = MosaicLayers(viewer)
+    yield ml
+    try:
+        viewer._layer_slicer.shutdown()      # settle pending tasks: nothing bleeds forward
+    except Exception:                        # noqa: BLE001 - teardown must never mask a test
+        pass
+
+
+def _settle(ml) -> None:
+    """Wait for the async slicer's in-flight work, then drain the queued main-thread applies."""
+    from qtpy.QtWidgets import QApplication
+
+    ml.model._layer_slicer.wait_until_idle(timeout=10)
+    app = QApplication.instance() or QApplication([])
+    for _ in range(50):
+        app.processEvents()
 
 
 def _img(seed=0, shape=(32, 32)):
@@ -508,6 +529,7 @@ def test_adding_a_placed_mosaic_pulls_two_z_not_four(layers):
     layers.add_mosaic("raw", "488", data, multiscale=True,
                       bbox_um=(0.0, 0.0, 640.0, 640.0), z_scale_um=1.5)
 
+    _settle(layers)                 # async slicing: napari's own slice lands off-thread now
     assert set(pulls) == {0, opening_z(10)}, (
         f"a mosaic add materialised planes {sorted(set(pulls))}; every plane beyond "
         f"{{0, {opening_z(10)}}} is a whole region decoded and thrown away")
@@ -1798,6 +1820,7 @@ def test_raw_comes_back_after_a_mip_result_on_a_single_z_acquisition(layers):
     assert raw.visible is False, "the lit result must darken raw (one operator per channel)"
 
     raw.visible = True                                   # napari's eye / the tree checkbox
+    _settle(layers)                 # async slicing: the restored slice lands off-thread
 
     assert raw.visible is True
     assert layers.visible_op() == "raw"
@@ -1822,6 +1845,7 @@ def test_raw_z_stack_is_restored_after_a_mip_result(layers):
     assert int(layers.model.dims.ndim) == 2, "the z axis must drop while the flat result shows"
 
     raw.visible = True
+    _settle(layers)                 # async slicing: the restored stack's slice lands off-thread
 
     assert raw.visible is True
     assert layers.find("mip", "BF").visible is False

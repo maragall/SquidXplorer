@@ -556,6 +556,49 @@ class _VideoWorker(QThread):
         self.done.emit(path, int(n), float(seconds))
 
 
+class _PngWorker(QThread):
+    """Materialise, composite and write a view's visible layer to a PNG, off the GUI thread.
+
+    Materialising a raw layer's full-resolution plane decodes FOVs, which is exactly what may
+    not happen on the Qt thread; the render itself is one pass and is not interruptible —
+    ``stop()`` only keeps a torn-down window from receiving a late file.
+    """
+
+    done = Signal(str, int, int, int, float)   # (path, width px, height px, step, seconds)
+    problem = Signal(str)                      # a named failure, never a silent no-op
+
+    def __init__(self, channels, out_path, *, z_index=0, max_px=None, parent=None):
+        super().__init__(parent)
+        from squidxplorer._png import PNG_MAX_PX
+
+        self._channels = list(channels)
+        self._out_path = str(out_path)
+        self._z = int(z_index)
+        self._max_px = int(max_px) if max_px else PNG_MAX_PX
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):                                    # pragma: no cover - Qt thread
+        from squidxplorer._png import render_view_png, write_png
+
+        started = time.perf_counter()
+        try:
+            rgb, step = render_view_png(self._channels, z_index=self._z, max_px=self._max_px)
+            if self._stop.is_set():
+                return
+            path = write_png(rgb, self._out_path)
+        except Exception as exc:                      # noqa: BLE001 - NAMED, never swallowed
+            log.error("png export failed for %s: %s", self._out_path, exc)
+            self.problem.emit(f"{type(exc).__name__}: {exc}")
+            return
+        seconds = time.perf_counter() - started
+        h, w = rgb.shape[:2]
+        log.info("png: wrote %dx%d px (step %d) to %s in %.1fs", w, h, step, path, seconds)
+        self.done.emit(path, int(w), int(h), int(step), float(seconds))
+
+
 def _full_res_plane(data, z_index):
     """The full-resolution 2-D plane behind a napari layer's ``data``, whatever shape it is in."""
     # the one pyramid rule, shared with every reader of a layer's data (_napari_view.pyramid_levels)
