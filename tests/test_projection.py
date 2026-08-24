@@ -94,6 +94,39 @@ def test_project_well_shape_and_dtype(squid_dataset):
     assert out.dtype == np.uint16
 
 
+def test_a_keeps_depth_z_consumer_returns_every_processed_plane(squid_dataset):
+    """decon3d's shape: one call over the whole stack, the WHOLE processed stack back
+    (Julio 2026-08-21: decon output the same size as the input — the planes get examined)."""
+    root, arrays = squid_dataset
+    reader = open_reader(root)
+    meta = reader.metadata
+    nz = int(meta["n_z"])
+
+    def flipz(planes):
+        return np.asarray(list(planes))[::-1]
+
+    flipz.consumes = frozenset({"z"})
+    flipz.keeps_depth = True
+    out = project_well(reader, "B2", 0, reduce=flipz)
+    assert out.shape[2] == nz, "depth must survive a keeps_depth z-consumer"
+    for c_i, ch in enumerate(c["name"] for c in meta["channels"]):
+        for k, z in enumerate(reversed(meta["z_levels"])):
+            np.testing.assert_array_equal(out[0, c_i, k], arrays[("B2", 0, z, ch)])
+
+
+def test_a_keeps_depth_operator_owes_the_full_stack_shape(squid_dataset):
+    root, _ = squid_dataset
+    reader = open_reader(root)
+
+    def liar(planes):
+        return np.asarray(list(planes))[0]      # one plane where a stack is owed
+
+    liar.consumes = frozenset({"z"})
+    liar.keeps_depth = True
+    with pytest.raises(ValueError, match="keeps_depth"):
+        project_well(reader, "B2", 0, reduce=liar)
+
+
 def test_project_well_matches_np_max_per_channel(squid_dataset):
     root, arrays = squid_dataset
     reader = open_reader(root)

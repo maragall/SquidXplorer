@@ -271,6 +271,29 @@ def test_a_keep_z_save_keeps_the_declared_z_count_and_round_trips(squid_dataset,
     np.testing.assert_array_equal(plane, arrays[(REGIONS[0], 0, NZ - 1, CHANNELS[0])])
 
 
+def test_a_keeps_depth_z_consumer_saves_every_plane_same_size_as_input(squid_dataset, tmp_path):
+    """decon3d's save shape (Julio 2026-08-21): the output acquisition is the SAME SIZE as
+    the input — every processed z under its own index, nz untouched."""
+    from squidxplorer import add_operator
+
+    def flipz(planes):
+        return np.asarray(list(planes))[::-1]
+
+    flipz.keeps_depth = True
+    add_operator("acqtest_zdepth", flipz, consumes=frozenset({"z"}))
+    root, arrays = squid_dataset
+    dst = tmp_path / "out"
+    manifest = write_acquisition_planes(open_reader(root), "acqtest_zdepth", dst)
+    assert manifest["complete"]
+
+    out = open_reader(dst)
+    meta = out.metadata
+    assert meta["n_z"] == NZ, "the declared z count must survive a depth-keeping save"
+    for k, z in enumerate(reversed(list(range(NZ)))):
+        np.testing.assert_array_equal(out.read(REGIONS[0], 0, CHANNELS[0], k),
+                                      arrays[(REGIONS[0], 0, z, CHANNELS[0])])
+
+
 def test_a_labels_producer_is_refused_by_name(squid_dataset, tmp_path):
     from squidxplorer import add_operator
 

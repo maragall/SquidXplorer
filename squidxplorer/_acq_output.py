@@ -3,9 +3,11 @@
 One plane file per (FOV, channel, z), bit-exact, under ``<operator>_<acquisition-folder>``
 beside the source: the folder a user finds without knowing NGFF. The operator's ``consumes``
 declaration decides the depth: a z-reducer writes ``{region}_{fov}_0_{channel}.{ext}`` and the
-copied z count is rewritten to 1; a plane-op (decon-shaped) keeps every acquired z under its
-own index and the metadata untouched. Sidecars are copied (never image files) so the output
-round-trips through ``open_reader``. Everything else keeps the OME-Zarr writer.
+copied z count is rewritten to 1; a plane-op (decon-shaped) — and a z-consumer whose callable
+declares ``keeps_depth`` (decon3d: the whole deconvolved stack, same size as the input) —
+keeps every z under its own index and the metadata untouched. Sidecars are copied (never
+image files) so the output round-trips through ``open_reader``. Everything else keeps the
+OME-Zarr writer.
 
 A z-SELECTING reducer (the callable carries ``select_index`` — ``reference``) picks an EXISTING
 plane per (t, FOV) without touching a pixel, so when the source stores one file per plane its
@@ -313,9 +315,10 @@ def write_acquisition_planes(reader, operator: str, dst, *, regions=None,
                            key=int)
     time_names = src_time_dirs if len(src_time_dirs) == n_t else [str(i) for i in range(n_t)]
 
-    # The declaration decides the depth: a z-reducer collapses to one plane at z index 0, a
-    # plane-op keeps every acquired plane under its own z label.
-    collapses = "z" in operator_consumes(operator)
+    # The declaration decides the depth: a z-reducer collapses to one plane at z index 0; a
+    # plane-op — and a z-consumer declaring keeps_depth (decon3d: the whole deconvolved
+    # stack, same size as the input) — keeps every plane under its own z label.
+    collapses = "z" in operator_consumes(operator) and not getattr(fn, "keeps_depth", False)
     z_labels = [0] if collapses else list(z_levels)
 
     dst = Path(dst)
