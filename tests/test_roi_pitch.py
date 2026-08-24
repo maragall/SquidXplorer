@@ -16,6 +16,22 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 pytest.importorskip("qtpy")
+
+
+@pytest.fixture(autouse=True)
+def _sync_slicing_for_determinism(monkeypatch):
+    """The volume-push pins here were written for SYNCHRONOUS slicing and flake under the
+    async default (order-dependent, solo-green). Per-viewer sync knob; the global setting
+    (and production) stays async — same containment as test_time_point_playback."""
+    from napari.components import ViewerModel
+
+    orig = ViewerModel.__init__
+
+    def patched(self, *a, **k):
+        orig(self, *a, **k)
+        self._layer_slicer._force_sync = True
+
+    monkeypatch.setattr(ViewerModel, "__init__", patched)
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip(
         "PySide already loaded (napari/pytest-qt) — Qt binding conflict; run with "
