@@ -333,6 +333,7 @@ class RegionViewer(QMainWindow):
         self._spot_worker = None
         self._focus_worker = None
         self._video_worker = None
+        self._png_worker = None
         self._manager = manager
         if manager is not None:
             # A LATER region can prove the dataset holds bigger numbers than the one this window
@@ -629,6 +630,14 @@ class RegionViewer(QMainWindow):
             "⏺ movie", "Export what this window is showing as an .mp4, sweeping the acquisition's "
             "time axis (or its z axis when there is no time series). Runs off the UI thread; "
             "click again to cancel.", self._record_movie)
+        # The PNG export renders the DATA, never the canvas: a screenshot is screen resolution,
+        # this is the visible layer's own pixels at native pitch (Julio: "a high-resolution
+        # (i.e., zoom-able, high DPI) PNG for powerpoints").
+        self._btn_png = self._chip(
+            "⎙ png", "Save what this window is showing as a high-resolution PNG: the visible "
+            "layer's own full-resolution pixels (long side capped at 8192 px), with the channels "
+            "that are visible and the contrast that is set — not a screenshot of the canvas. "
+            "Runs off the UI thread.", self._save_png)
         # FOVs. The ROI chips beside it are for a box the user draws; this is for the boxes the
         # ACQUISITION already drew. On a sparse run — the AF sweep sets are 16 fields at 7x the
         # field pitch, so 3% of the mosaic is data — checking focus means visiting each field, and
@@ -651,7 +660,7 @@ class RegionViewer(QMainWindow):
         grid = QGridLayout(); grid.setSpacing(4)
         chips = [
             self._btn_2d, self._btn_3d, self._btn_focus,
-            self._btn_record,
+            self._btn_record, self._btn_png,
             self._chip("▭ new", "Draw an ROI rectangle inside the mosaic.", self._new_roi),
             self._chip("⊙ select", "Select ROIs: click one, then press Delete to remove it.",
                        self._select_rois),
@@ -1040,6 +1049,98 @@ class RegionViewer(QMainWindow):
     def _on_movie_cancelled(self) -> None:
         self._hide_progress()
         self._say("movie export cancelled.")
+
+    def _save_png(self) -> None:
+        """Save what this view is SHOWING as a high-resolution PNG — data pixels, never a
+        canvas screenshot. Every refusal is a named sentence, never a silent no-op."""
+        from squidxplorer._png import PNG_MAX_PX, PngChannel, png_problem
+
+        worker = self._png_worker
+        if worker is not None and worker.isRunning():
+            self._say("png: an export is already running — it will say when it lands.")
+            return
+        if self._reader is None or self._meta is None:
+            self._say("png: show a region in this view first, then save a PNG.")
+            return
+        if self._render_mode == "3d":
+            self._say("png: this view is showing a 3D volume — volume export is out of scope. "
+                      "Switch the view to 2D to save a PNG of a plane.")
+            return
+        mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
+        op = mosaic.visible_op() if mosaic is not None else None
+        if op is None:
+            self._say("png: no visible layer to export — every layer of this view is hidden.")
+            return
+        problem = png_problem()
+        if problem:
+            self._say(f"png: {problem}")
+            return
+
+        from squidxplorer._napari_view import colormap_hue_rgb, colormap_mid_rgb, full_res_level
+
+        channels = []
+        for c in (self._meta or {}).get("channels", []):
+            layer = mosaic.find(op, c["name"])
+            if layer is None or not bool(getattr(layer, "visible", False)):
+                continue
+            clim = getattr(layer, "contrast_limits", None)
+            if clim is None:                      # a labels layer has no contrast window
+                continue
+            rgb = colormap_hue_rgb(layer) or colormap_mid_rgb(layer) or (255, 255, 255)
+            channels.append(PngChannel(c["name"], layer.data, tuple(clim), tuple(rgb)))
+        if not channels:
+            self._say(f"png: the {op} layer has no visible intensity channel to export.")
+            return
+
+        region = self.current_region()
+        title = f"Save a PNG of {region} · {op}"
+        try:
+            shape = tuple(full_res_level(channels[0].data).shape)   # metadata, no decode
+            if max(int(shape[-2]), int(shape[-1])) > PNG_MAX_PX:
+                title += f" (long side capped at {PNG_MAX_PX} px)"
+        except Exception:                        # noqa: BLE001 - the cap note is best-effort
+            pass
+        src = getattr(self._reader, "source_id", None)
+        acq = Path(str(src)).name if src else region
+        path, _ = QFileDialog.getSaveFileName(self, title, f"{acq}_{op}.png",
+                                              "PNG image (*.png)")
+        if not path:
+            return
+        if not str(path).lower().endswith(".png"):
+            path = f"{path}.png"
+
+        from squidxplorer._workers import _PngWorker
+
+        w = _PngWorker(channels, path, z_index=self._z_slider_index(), parent=self)
+        self._say(f"png: rendering {region} · {op} at full resolution to {path}…")
+        _launch_worker(
+            self, w, slot="_png_worker",
+            on_done=self._on_png_done,
+            on_problem=self._on_png_failed,
+            on_finished=lambda: self._forget_png_worker(w))
+
+    def _forget_png_worker(self, worker) -> None:
+        if self._png_worker is worker:
+            self._png_worker = None
+        try:
+            worker.deleteLater()
+        except RuntimeError:
+            pass
+
+    def _on_png_done(self, path: str, width: int, height: int, step: int, seconds: float) -> None:
+        from squidxplorer._png import PNG_MAX_PX
+
+        size_mb = 0.0
+        try:
+            size_mb = Path(path).stat().st_size / 1e6
+        except OSError:
+            pass
+        note = ("" if int(step) <= 1 else
+                f" Long side capped at {PNG_MAX_PX} px: decimated {int(step)}x from native.")
+        self._say(f"png: {width}x{height} px -> {path} ({size_mb:.1f} MB) in {seconds:.1f}s.{note}")
+
+    def _on_png_failed(self, reason: str) -> None:
+        self._say(f"png export failed: {reason}")
 
     def _on_cursor_position(self, _event=None) -> None:
         """Name the FOV under the cursor, on the canvas, as it crosses a seam."""
@@ -2319,6 +2420,12 @@ class RegionViewer(QMainWindow):
             if self._video_worker is not None and self._video_worker.isRunning():
                 self._video_worker.stop()
                 self._video_worker.wait(2000)
+        except Exception:                            # noqa: BLE001
+            pass
+        try:
+            if self._png_worker is not None and self._png_worker.isRunning():
+                self._png_worker.stop()
+                self._png_worker.wait(2000)
         except Exception:                            # noqa: BLE001
             pass
         try:
