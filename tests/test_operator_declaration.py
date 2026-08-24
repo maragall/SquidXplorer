@@ -285,6 +285,7 @@ PARAMETER_PROBES = {
     "registration_channel": 1,
     "registration_t": 1,
     "correct_illumination": False,
+    "iterations": 1,   # RL at 1 vs the shipped 3: semi-convergence guarantees different pixels
 }
 
 
