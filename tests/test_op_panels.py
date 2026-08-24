@@ -788,3 +788,161 @@ def test_an_operator_with_no_parameters_still_builds_and_says_so(qapp):
     assert p.kwargs() == {}
 
 
+# =======================================================================================
+# THE QC SWEEP STEPPER + the session optics row (2026-08-24)
+# =======================================================================================
+# Julio: "When I do decon, I would like to see the turbo colormap result with the xz, yz
+# as I click iteration by iteration." The sweep captures every iteration of ONE solve; the
+# view steps them; 'use k iterations' writes k into the run's ONE iterations parameter.
+
+@pytest.fixture()
+def clean_decon_session():
+    """The panel installs session NI/NA process-wide on purpose; tests must not leak it."""
+    from squidxplorer._decon import set_session_na, set_session_ni
+
+    yield
+    set_session_ni(None)
+    set_session_na(None)
+
+
+def _sweep_into(view, ks=(1, 2, 3)):
+    """Feed *view* one distinct captured iteration per k, the way the worker's done signal does."""
+    from squidxplorer._decon_qc import qc_composite
+
+    volumes = {}
+    for k in ks:
+        volume = np.zeros((5, 20, 20), dtype=np.float32)
+        volume[2, 10, 10] = 100.0 * k               # genuinely different pixels per iteration
+        volumes[k] = volume
+        view.show_iteration(k, qc_composite(volume, (2, 10, 10)), 0.5 - 0.1 * k,
+                            "improving", "still tightening", volume=volume,
+                            centre=(2, 10, 10), delta=None if k == 1 else float(k))
+    return volumes
+
+
+def test_the_view_steps_iteration_by_iteration_without_a_re_solve(qapp, clean_decon_session):
+    pytest.importorskip("matplotlib")
+    view = DeconQCResultView("A1/0/c0")
+    volumes = _sweep_into(view)
+
+    assert "ITERATION 3 of 3" in view.caption_label.text()
+    view.prev_btn.click()
+    assert "ITERATION 2 of 3" in view.caption_label.text()
+    assert np.array_equal(view._volume, volumes[2]), (
+        "stepping back did not swap the click-resection volume with the picture")
+    view.iter_slider.setValue(1)
+    assert "ITERATION 1 of 3" in view.caption_label.text()
+    view.next_btn.click()
+    assert "ITERATION 2 of 3" in view.caption_label.text()
+    assert [k for k, _ in view.history] == [1, 2, 3], "stepping polluted the history"
+    view.close()
+
+
+def test_the_per_step_change_is_shown_beside_the_ratio(qapp, clean_decon_session):
+    """mean |Δ| vs the previous iteration is the honest 'is it still moving' number; the first
+    iteration has no previous and must not invent one."""
+    pytest.importorskip("matplotlib")
+    view = DeconQCResultView("A1/0/c0")
+    _sweep_into(view, ks=(1, 2))
+    assert "mean |Δ| vs k-1: 2" in view.caption_label.text()
+    view.prev_btn.click()
+    assert "mean |Δ|" not in view.caption_label.text(), "iteration 1 shows a delta against nothing"
+    view.close()
+
+
+def test_use_k_iterations_writes_the_displayed_count_into_the_run(qapp, clean_decon_session):
+    """THE point of the preview: the displayed k lands in the panel's run-iterations control,
+    which is what kwargs() -> operator_kwargs_for feeds every decon run. One source of truth."""
+    pytest.importorskip("matplotlib")
+    from squidxplorer._decon import DEFAULT_ITERATIONS
+
+    panel = DeconQCPanel(_Host())
+    assert panel.kwargs() == {"iterations": DEFAULT_ITERATIONS}
+    view = DeconQCResultView("A1/0/c0")
+    view.useIterations.connect(panel._adopt_iterations)
+    _sweep_into(view)
+    view.prev_btn.click()                          # judge by eye: iteration 2 looks right
+    assert "Use 2 iteration" in view.use_btn.text()
+    view.use_btn.click()
+    assert panel.run_iter_spin.value() == 2
+    assert panel.kwargs() == {"iterations": 2}
+    assert any("2 iteration" in s for s in panel.host.said)
+    view.close()
+
+
+def test_the_result_view_lives_inline_in_the_panel_never_published(qapp, clean_decon_session):
+    """The whole choose-the-iteration loop travels WITH the panel (into the operator dock);
+    publish_qc_result — the plate-tab seam — is deliberately not called any more."""
+    host = _Host()
+    panel = DeconQCPanel(host)
+    panel.run()                                    # dataset is bogus; the view exists anyway
+    try:
+        assert panel._view is not None
+        assert panel.isAncestorOf(panel._view), "the view is not inside the panel"
+        assert host.published == [], "the panel still throws the picture to another window"
+    finally:
+        panel.shutdown()
+
+
+def test_the_panel_assumes_air_and_a_pick_reaches_the_session(qapp, clean_decon_session):
+    from squidxplorer._decon import session_ni, set_session_ni
+
+    set_session_ni(None)
+    p = DeconQCPanel(_Host())
+    assert p.ni_combo.currentText() == "1.000 (air)", "value first, medium in parentheses"
+    assert session_ni() == pytest.approx(1.000), "opening the panel did not install air"
+    p.ni_combo.setCurrentIndex(1)
+    assert p.ni_combo.currentText() == "1.333 (water)"
+    assert session_ni() == pytest.approx(1.333)
+
+
+def test_a_rebuilt_panel_keeps_the_session_medium(qapp, clean_decon_session):
+    """Session-scoped means a re-opened panel shows the medium already chosen, not air again."""
+    from squidxplorer._decon import set_session_ni
+
+    set_session_ni(1.515)
+    p = DeconQCPanel(_Host())
+    assert p.ni_combo.currentText() == "1.515 (oil)"
+
+
+def test_an_impossible_na_is_flagged_by_name_in_the_panel(qapp, clean_decon_session):
+    p = DeconQCPanel(_Host())                      # air installed
+    p.na_spin.setValue(1.40)
+    assert any("impossible in air" in s for s in p.host.said), (
+        "NA 1.40 under air went unflagged")
+
+
+def test_the_worker_sweeps_a_real_stack_emitting_every_iteration(qapp, clean_decon_session,
+                                                                 squid_dataset, monkeypatch):
+    """End to end on the real fixture: iterations=2 must deliver k=1 AND k=2 (each with its
+    volume and a delta from k >= 2) and then sweep_done — off the Qt thread."""
+    pytest.importorskip("matplotlib")
+    monkeypatch.setenv("SQUIDXPLORER_DECON_DEVICE", "cpu")
+    from squidxplorer import open_reader
+    from squidxplorer._op_panels import _DeconQCWorker
+
+    root, _ = squid_dataset
+    meta = open_reader(str(root)).metadata
+    region, channel = meta["regions"][0], meta["channels"][0]["name"]
+    got, finished, failures = [], [], []
+    worker = _DeconQCWorker(str(root), region, 0, channel, 2, False, 8, 8)
+    worker.done.connect(lambda k, frame, ratio: got.append((k, frame, ratio)))
+    worker.sweep_done.connect(lambda n: finished.append(n))
+    worker.failed.connect(lambda m: failures.append(m))
+    worker.start()
+    import time
+    deadline = time.monotonic() + 60
+    while not (finished or failures) and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    worker.wait(5000)
+    assert not failures, f"the sweep failed: {failures}"
+    assert finished == [2]
+    assert [k for k, _, _ in got] == [1, 2]
+    for k, frame, ratio in got:
+        assert frame.volume is not None and frame.centre is not None
+        assert frame.delta is not None, "every capture carries its mean |Δ|"
+    assert not np.array_equal(got[0][1].volume, got[1][1].volume), (
+        "iteration 1 and 2 delivered the same volume")
+
+

@@ -4,11 +4,13 @@ Every other operator's panel is built from its ``params`` declaration by
 :mod:`squidxplorer._param_panel`. These two stay hand-written because they do things a
 parameter form cannot: :class:`StitcherPanel` converts a percentage to a fraction, greys out
 knobs that do nothing with registration off, and refuses a labels operator before the run
-starts; :class:`DeconQCPanel` runs an iterative semi-convergence loop and publishes a picture
-as a tab of its own. ``_viewer._activate_operator`` prefers a hand-written panel and falls
-back to the generic one.
+starts; :class:`DeconQCPanel` runs a semi-convergence SWEEP (one RL solve capturing every
+iteration) and shows the turbo x-z / y-z stepper INLINE, so the whole choose-the-iteration
+loop lives wherever the panel is hosted — since 2026-08-24 that is the views window's
+operator dock, never the plate window. ``_viewer._activate_operator`` prefers a hand-written
+panel and falls back to the generic one.
 
-This module never touches a tab bar; it calls ``host.publish_qc_result(widget, title)``.
+This module never touches a tab bar or a dock; the host places the panel.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from qtpy.QtGui import QImage, QPixmap
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -28,6 +31,7 @@ from qtpy.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -443,19 +447,27 @@ class StitcherPanel(_Panel):
 
 
 class QCFrame(NamedTuple):
-    """One finished QC run, as the panel receives it. The volume travels with the composite
-    because the picture is clickable: re-sectioning is qc_composite again on this same array."""
+    """One captured QC iteration, as the panel receives it. The volume travels with the
+    composite because the picture is clickable: re-sectioning is qc_composite again on this
+    same array. ``delta`` defaults so the older four-field construction still stands."""
 
     composite: object          # (H, W) float, what qc_composite returned at `centre`
     volume: object             # (Z, Y, X) the deconvolved crop the sections were cut from
     centre: tuple              # (z, y, x) in `volume`: the brightest structure RL was judged at
     view_half: object          # the lateral half-width the composite was cut to, or None
+    delta: object = None       # mean |Δ| against the previous iteration's volume, or None
 
 
 class _DeconQCWorker(QThread):
-    """Run RL at ONE iteration count on ONE FOV's z-stack and measure the halo (threaded)."""
+    """ONE RL solve on ONE FOV's z-stack, capturing EVERY iteration up to the count
+    (petakit's ``snapshot_iters``) and measuring the halo per capture (threaded).
 
-    done = Signal(int, object, float)        # (iterations, QCFrame, halo/core ratio)
+    One solve, not one solve per count: stepping k back and forth afterwards is a repaint of
+    the captured crops. The captures are of the QC CROP (crop_half around the brightest
+    structure), so a sweep's memory is iterations × one small volume, never the full stack."""
+
+    done = Signal(int, object, float)        # per captured iteration: (k, QCFrame, halo/core)
+    sweep_done = Signal(int)                 # the sweep finished; how many iterations landed
     failed = Signal(str)
 
     def __init__(self, dataset, region, fov, channel, iterations, gpu, crop_half, view_half):
@@ -467,7 +479,7 @@ class _DeconQCWorker(QThread):
         if self.isInterruptionRequested():
             return          # a close/shutdown beat us to the start
         try:
-            from squidxplorer._decon import OpticsParams, _run, make_psf
+            from squidxplorer._decon import OpticsParams, _run, make_psf, optics_for_channel
             from squidxplorer._decon_qc import (
                 brightest_structure,
                 crop_around,
@@ -478,7 +490,9 @@ class _DeconQCWorker(QThread):
             )
 
             stack, region, channel, _meta = load_stack(dataset, region, fov, channel)
-            optics = OpticsParams.from_acquisition(dataset, channel=channel)
+            # Through optics_for_channel, never from_acquisition directly: the session's
+            # immersion / NA choices must reach the QC's PSF exactly as they reach a run's.
+            optics = optics_for_channel(dataset, channel)
             optics = OpticsParams(optics.na, optics.wavelength_um, optics.dxy_um,
                                   optics.dz_um, int(stack.shape[0]), optics.ni)
             core_um = 0.61 * optics.wavelength_um / optics.na
@@ -487,13 +501,24 @@ class _DeconQCWorker(QThread):
             centre_full = brightest_structure(stack, optics.dxy_um, optics.dz_um, core_um,
                                               z_margin=z_margin, xy_margin=crop_half)
             crop, centre = crop_around(stack, centre_full, crop_half)
-            volume = _run(crop, make_psf(optics), int(iterations), gpu=gpu)
-            ratio = halo_core_ratio(volume, centre, optics.dxy_um, optics.dz_um,
-                                    core_um, window_um)
-            self.done.emit(int(iterations),
-                           QCFrame(qc_composite(volume, centre, view_half=view_half),
-                                   volume, tuple(int(v) for v in centre), view_half),
-                           float(ratio))
+            snaps = list(range(1, int(iterations) + 1))
+            volumes = _run(crop, make_psf(optics), int(iterations), gpu=gpu,
+                           snapshot_iters=snaps)
+            centre_t = tuple(int(v) for v in centre)
+            previous = np.ascontiguousarray(crop, dtype=np.float32)
+            for k in snaps:
+                if self.isInterruptionRequested():
+                    return
+                volume = volumes[k]
+                ratio = halo_core_ratio(volume, centre, optics.dxy_um, optics.dz_um,
+                                        core_um, window_um)
+                delta = float(np.mean(np.abs(volume - previous)))
+                previous = volume
+                self.done.emit(int(k),
+                               QCFrame(qc_composite(volume, centre, view_half=view_half),
+                                       volume, centre_t, view_half, delta),
+                               float(ratio))
+            self.sweep_done.emit(len(snaps))
         except Exception as exc:                  # reported as a sentence, never swallowed
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
@@ -519,12 +544,22 @@ class _ClickableImage(QLabel):
 class DeconQCResultView(QWidget):
     """The deconvolved 2-D image in turbo with the x-z and y-z strips attached. Renders what
     :func:`squidxplorer._decon_qc.qc_composite` / ``turbo_rgb`` produced. Clicking the image
-    re-sections the same in-memory volume through the clicked point; no RL run happens."""
+    re-sections the same in-memory volume through the clicked point; no RL run happens.
+
+    Every shown iteration is KEPT (Julio, 2026-08-24: "as I click iteration by iteration") so
+    the stepper below the picture is a repaint of a cached capture, never a re-solve; the
+    "use k iterations" button emits :attr:`useIterations` with the DISPLAYED count — the
+    whole preview exists so the user can decide how many iterations the real run gets."""
+
+    useIterations = Signal(int)            # the displayed k, adopted as the run's iterations
 
     def __init__(self, subject: str):
         super().__init__()
         self.setStyleSheet(f"background:{_BG};color:#e6edf3;")
         self.history: list = []
+        #: k -> the record show_iteration stored; the stepper repaints from these.
+        self._records: dict = {}
+        self._shown_k = None
         # The volume behind the current picture, kept so a click can re-section it.
         self._volume = None
         self._centre = None
@@ -578,24 +613,107 @@ class DeconQCResultView(QWidget):
         self.trail_label.setStyleSheet(_SUB)
         v.addWidget(self.trail_label)
 
+        # -- the iteration stepper: prev/next + a slider over the CAPTURED iterations, and the
+        # -- adoption button. Hidden until a second iteration exists to step between. ----------
+        self.prev_btn = QPushButton("◂")
+        self.prev_btn.setToolTip("Show the previous captured iteration.")
+        self.next_btn = QPushButton("▸")
+        self.next_btn.setToolTip("Show the next captured iteration.")
+        for b in (self.prev_btn, self.next_btn):
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedWidth(28)
+        self.iter_slider = QSlider(Qt.Horizontal)
+        self.iter_slider.setRange(1, 1)
+        self.iter_slider.setToolTip(
+            "Every iteration of the sweep is kept; stepping repaints a capture, nothing is "
+            "re-deconvolved.")
+        self.prev_btn.clicked.connect(lambda *_: self._step(-1))
+        self.next_btn.clicked.connect(lambda *_: self._step(+1))
+        self.iter_slider.valueChanged.connect(self._on_slider)
+        self._stepper_row = QWidget()
+        sr = QHBoxLayout(self._stepper_row)
+        sr.setContentsMargins(0, 0, 0, 0)
+        sr.setSpacing(6)
+        sr.addWidget(self.prev_btn)
+        sr.addWidget(self.iter_slider, 1)
+        sr.addWidget(self.next_btn)
+        self._stepper_row.setVisible(False)
+        v.addWidget(self._stepper_row)
+
+        self.use_btn = QPushButton("Use these iterations")
+        self.use_btn.setCursor(Qt.PointingHandCursor)
+        self.use_btn.setToolTip(
+            "Adopt the DISPLAYED iteration count as the decon run's iterations parameter — "
+            "the whole preview exists to make this choice.")
+        self.use_btn.setVisible(False)
+        self.use_btn.clicked.connect(self._on_use)
+        v.addWidget(self.use_btn)
+
     def show_iteration(self, iterations: int, composite, ratio: float,
                        kind: str, verdict: str, volume=None, centre=None,
-                       view_half=None, gap: int = 2) -> None:
-        """Display one iteration's composite and remember it, so the loop can be compared.
-        Passing volume/centre/view_half makes the picture clickable; omitting them leaves it
-        static (the older three-argument call shape)."""
-        self._volume = None if volume is None else np.asarray(volume)
-        self._centre = None if centre is None else tuple(int(v) for v in centre)
-        self._view_half = view_half
-        self._gap = int(gap)
-        self._paint(composite)
-        self.history.append((int(iterations), float(ratio)))
-        self.caption_label.setText(
-            f"{iterations} iteration" + ("s" if iterations != 1 else "")
-            + f"  ·  halo/core {ratio:.3f}")
+                       view_half=None, gap: int = 2, delta=None) -> None:
+        """Display one iteration's composite and remember it, so the loop can be compared and
+        the stepper can revisit it. Passing volume/centre/view_half makes the picture
+        clickable; omitting them leaves it static (the older three-argument call shape)."""
+        k = int(iterations)
+        self._records[k] = {
+            "composite": composite, "ratio": float(ratio), "verdict": verdict,
+            "volume": None if volume is None else np.asarray(volume),
+            "centre": None if centre is None else tuple(int(v) for v in centre),
+            "view_half": view_half, "gap": int(gap), "delta": delta,
+        }
+        self.history.append((k, float(ratio)))
+        self.trail_label.setText("  ".join(f"k={kk}: {r:.3f}" for kk, r in self.history))
+        ks = sorted(self._records)
+        self.iter_slider.blockSignals(True)      # a range change must not re-enter _display
+        self.iter_slider.setRange(ks[0], ks[-1])
+        self.iter_slider.blockSignals(False)
+        self._stepper_row.setVisible(len(ks) > 1)
+        self.use_btn.setVisible(True)
         self.verdict_label.setText(verdict)
-        self.trail_label.setText("  ".join(f"k={k}: {r:.3f}" for k, r in self.history))
+        self._display(k)
+
+    # -- stepping -----------------------------------------------------------------------------
+    def _display(self, k: int) -> None:
+        """Repaint the captured iteration *k*: picture, clickability and captions together."""
+        rec = self._records.get(int(k))
+        if rec is None:
+            return
+        self._shown_k = int(k)
+        self._volume = rec["volume"]
+        self._centre = rec["centre"]
+        self._view_half = rec["view_half"]
+        self._gap = rec["gap"]
+        self._paint(rec["composite"])
+        top = max(self._records)
+        self.caption_label.setText(
+            f"ITERATION {k} of {top}  ·  halo/core {rec['ratio']:.3f}"
+            + (f"  ·  mean |Δ| vs k-1: {rec['delta']:.4g}" if rec["delta"] is not None else ""))
+        self.use_btn.setText(f"Use {k} iteration" + ("s" if k != 1 else "")
+                             + " for the decon run")
+        self.iter_slider.blockSignals(True)
+        self.iter_slider.setValue(int(k))
+        self.iter_slider.blockSignals(False)
         self._sync_crosshair_label()
+
+    def _step(self, direction: int) -> None:
+        if self._shown_k is None:
+            return
+        ks = sorted(self._records)
+        try:
+            i = ks.index(self._shown_k)
+        except ValueError:
+            return
+        j = min(max(i + int(direction), 0), len(ks) - 1)
+        self._display(ks[j])
+
+    def _on_slider(self, value: int) -> None:
+        if int(value) in self._records:
+            self._display(int(value))
+
+    def _on_use(self, *_) -> None:
+        if self._shown_k is not None:
+            self.useIterations.emit(int(self._shown_k))
 
     def _paint(self, composite) -> None:
         """The only place a pixmap is set, so the first paint and every crosshair move agree."""
@@ -639,15 +757,19 @@ class DeconQCResultView(QWidget):
 
 
 class DeconQCPanel(_Panel):
-    """Pick an iteration count, run it, judge the picture in the tab beside this, add one more."""
+    """Sweep the iterations once, step through the captures, and ADOPT the count that looks right.
+
+    The preview exists so the user can DECIDE how many iterations the real run gets (Julio,
+    2026-08-24): one solve captures every iteration, the inline view steps them in turbo with
+    the x-z / y-z strips, and 'use k iterations' writes k into the run's own parameter."""
 
     def __init__(self, host):
         super().__init__(
             host, "Deconvolution (Richardson-Lucy)",
             "Richardson-Lucy is SEMI-CONVERGENT: the halo tightens for a few iterations and "
             "then a disc around the core starts growing back as the algorithm fits noise. "
-            "There is no universally correct count, so run one, look at the turbo x-z / y-z "
-            "view in the tab it opens, then add ONE more and look again.")
+            "There is no universally correct count, so sweep once, step the captured "
+            "iterations below by eye, and adopt the one that looks right for the run.")
         from squidxplorer._decon import QC_START_ITERATIONS
         from squidxplorer._decon_qc import DEFAULT_CROP_HALF, DEFAULT_VIEW_HALF
 
@@ -675,22 +797,67 @@ class DeconQCPanel(_Panel):
         self.channel_combo.setToolTip(
             "The emission wavelength of this channel sets the PSF. The kernel is a VECTORIAL "
             "PSF computed from the acquisition's own optics, not a Gaussian.")
+        self.channel_combo.currentTextChanged.connect(
+            lambda *_: self._refresh_optics_note())
         self.v.addLayout(_row(QLabel("Channel:"), self.channel_combo))
 
-        self.v.addWidget(_head("ITERATIONS"))
+        # -- optics: the immersion index is CHOSEN, never silently inferred off the NA
+        # (Julio, 2026-08-24: "Let it assume air, but user can then click water or oil").
+        # One source of truth: the choice lands in _decon's session state, which
+        # optics_for_channel applies to BOTH the QC solve and the real run's PSF. -----------
+        from squidxplorer._decon import IMMERSION_MEDIA, session_ni, set_session_ni
+
+        self.v.addWidget(_head("OPTICS"))
+        self.ni_combo = QComboBox()
+        for value, medium in IMMERSION_MEDIA:
+            self.ni_combo.addItem(f"{value:.3f} ({medium})", value)
+        current_ni = session_ni()
+        if current_ni is not None:            # the session already chose; a rebuild keeps it
+            for i in range(self.ni_combo.count()):
+                if abs(float(self.ni_combo.itemData(i)) - current_ni) < 5e-3:
+                    self.ni_combo.setCurrentIndex(i)
+                    break
+        self.ni_combo.setToolTip(
+            "The immersion medium's refractive index, which shapes the axial PSF. Assumed AIR "
+            "until you pick the objective's actual medium; the choice holds for this session "
+            "and reaches the QC preview and every decon run alike.")
+        self.ni_combo.currentIndexChanged.connect(self._on_ni_changed)
+        set_session_ni(float(self.ni_combo.currentData()))
+        self.v.addLayout(_row(QLabel("Immersion (ni):"), self.ni_combo))
+
+        self.na_spin = QDoubleSpinBox()
+        self.na_spin.setRange(0.0, 1.7)
+        self.na_spin.setDecimals(2)
+        self.na_spin.setSingleStep(0.05)
+        self.na_spin.setSpecialValueText("recorded")
+        self.na_spin.setToolTip(
+            "The objective NA the PSF is computed with. 'recorded' uses the acquisition's own "
+            "value (shown below); type a number to override a wrong rig profile for this "
+            "session.")
+        self.na_spin.valueChanged.connect(self._on_na_changed)
+        self.v.addLayout(_row(QLabel("NA:"), self.na_spin))
+
+        # The auto-derived optics, VISIBLE before a run: a wrong rig profile (a 25x/NA 0.85
+        # set recorded as 20x/NA 0.8) should be caught by eye here, not discovered in a halo.
+        self.optics_note = _wrapped("", _SUB)
+        self.v.addWidget(self.optics_note)
+
+        self.v.addWidget(_head("QC SWEEP"))
         self.iter_spin = QSpinBox()
         self.iter_spin.setRange(1, 100)
         self.iter_spin.setValue(QC_START_ITERATIONS)
-        self.iter_spin.setToolTip("Richardson-Lucy iterations for the next run.")
+        self.iter_spin.setToolTip(
+            "The sweep's top count: ONE RL solve runs to this, capturing EVERY iteration on "
+            "the way, so the stepper below the picture revisits any of them instantly.")
         self.iter_hint = QLabel(f"shipped default: {_shipped_iterations()}")
         self.iter_hint.setStyleSheet(_SUB)
         self.plus_btn = QPushButton("+1 iteration")
         self.plus_btn.setToolTip(
-            "Add exactly one and re-run. One at a time is the point: the turn is judged by "
-            "eye between steps, and a jump of five hides where it happened.")
+            "Extend the sweep by exactly one and re-run. The turn is judged by eye between "
+            "steps, and a jump of five hides where it happened.")
         self.plus_btn.clicked.connect(
             lambda: self.iter_spin.setValue(self.iter_spin.value() + 1))
-        self.v.addLayout(_row(QLabel("Run with:"), self.iter_spin, self.iter_hint,
+        self.v.addLayout(_row(QLabel("Sweep to:"), self.iter_spin, self.iter_hint,
                               self.plus_btn))
 
         self.cpu_cb = QCheckBox("Force CPU (disable GPU)")
@@ -698,7 +865,7 @@ class DeconQCPanel(_Panel):
             "Selects a BACKEND, not an algorithm — the RL update is identical either way.")
         self.v.addWidget(self.cpu_cb)
 
-        self.run_btn = QPushButton("Deconvolve and show the turbo x-z / y-z view")
+        self.run_btn = QPushButton("Deconvolve and show the turbo x-z / y-z sweep")
         self.run_btn.setCursor(Qt.PointingHandCursor)
         self.run_btn.clicked.connect(self.run)
         self.v.addWidget(self.run_btn)
@@ -710,16 +877,84 @@ class DeconQCPanel(_Panel):
         self.v.addWidget(self.progress)
         self.v.addWidget(self.status)
 
-        note = _wrapped("The result opens as a tab beside this one. Nothing is written next to "
-                        "the acquisition; the datasets are opened read only.", _SUB)
-        self.v.addWidget(note)
+        # The result view lives INLINE, right under its controls — the panel is one surface
+        # wherever it is hosted (a dock page or a tab), never a picture thrown to another
+        # window (2026-08-24; publish_qc_result stays a window capability, unused here).
+        self._view_slot = QVBoxLayout()
+        self._view_slot.setContentsMargins(0, 0, 0, 0)
+        self.v.addLayout(self._view_slot)
+
+        self.v.addWidget(_head("RUN ITERATIONS"))
+        from squidxplorer._decon import DEFAULT_ITERATIONS
+
+        self.run_iter_spin = QSpinBox()
+        self.run_iter_spin.setRange(1, 100)
+        self.run_iter_spin.setValue(DEFAULT_ITERATIONS)
+        self.run_iter_spin.setToolTip(
+            "THE iteration count a decon run uses while this panel is open — the run dispatch "
+            "reads it off this panel (operator_kwargs_for), so what you adopted from the sweep "
+            "is what the run gets. Closed panel = the declared default.")
+        self.v.addLayout(_row(QLabel("Runs use:"), self.run_iter_spin))
+        self.v.addWidget(_wrapped(
+            "Judge the sweep above, step to the iteration that looks right, and press its "
+            "'use k iterations' button — the count lands here and every decon run launched "
+            "from a view's Run button uses it. Nothing is written next to the acquisition; "
+            "the datasets are opened read only.", _SUB))
         self.v.addStretch(1)
         _apply_qss(self)
+        self._refresh_optics_note()
 
     def _subject(self) -> str:
         return (f"{self.region_combo.currentText()}/{self.fov_spin.value()}/"
                 f"{self.channel_combo.currentText()}")
 
+    # -- optics row ---------------------------------------------------------------------------
+    def _recorded_optics(self):
+        """``(OpticsParams, "")`` for the current channel, or ``(None, why)`` — never a guess."""
+        from squidxplorer._decon import OpticsParams
+
+        dataset = getattr(self.host, "_acq_path", None)
+        if not dataset:
+            return None, "no acquisition is open"
+        try:
+            return OpticsParams.from_acquisition(dataset, channel=self.channel_combo.currentText()), ""
+        except Exception as exc:               # noqa: BLE001 - shown as a sentence, not hidden
+            return None, f"{exc}"
+
+    def _refresh_optics_note(self) -> None:
+        """The auto-derived optics, on screen BEFORE a run, plus the NA-vs-ni physics check."""
+        from squidxplorer._decon import medium_for_ni, session_na
+
+        optics, why = self._recorded_optics()
+        if optics is None:
+            self.optics_note.setText(f"recorded optics unreadable: {why}")
+        else:
+            self.optics_note.setText(
+                f"recorded: NA {optics.na:.2f} · emission {optics.wavelength_um:.3f} µm · "
+                f"pixel {optics.dxy_um:.3f} µm · dz {optics.dz_um:.2f} µm — check these "
+                "against the objective actually used; a wrong rig profile shows up here.")
+        na = session_na() or (optics.na if optics is not None else None)
+        ni = float(self.ni_combo.currentData())
+        if na is not None and na > ni + 1e-9:
+            self.say(f"NA {na:.2f} is impossible in {medium_for_ni(ni)} (ni {ni:.3f}) — pick "
+                     "the objective's actual immersion. The solve will refuse until they agree.")
+
+    def _on_ni_changed(self, *_) -> None:
+        from squidxplorer._decon import set_session_ni
+
+        set_session_ni(float(self.ni_combo.currentData()))
+        self.say("")
+        self._refresh_optics_note()
+
+    def _on_na_changed(self, value: float) -> None:
+        # 0.00 shows as 'recorded' and clears the override; anything else installs it.
+        from squidxplorer._decon import set_session_na
+
+        set_session_na(float(value) if value > 0 else None)
+        self.say("")
+        self._refresh_optics_note()
+
+    # -- the sweep ------------------------------------------------------------------------------
     def run(self) -> None:
         dataset = getattr(self.host, "_acq_path", None)
         if not dataset:
@@ -730,42 +965,55 @@ class DeconQCPanel(_Panel):
             self.say("a deconvolution is already running — let it finish before adding an "
                      "iteration.")
             return
-        if not hasattr(self.host, "publish_qc_result"):
-            self.say("this window cannot show a QC result: it does not implement "
-                     "publish_qc_result(widget, title), which is how it is handed a result "
-                     "tab. Refusing to deconvolve and then drop the picture.")
-            return
 
         iterations = self.iter_spin.value()
         subject = self._subject()
         if self._view is None or self._view_subject != subject:
+            if self._view is not None:
+                self._view_slot.removeWidget(self._view)
+                self._view.deleteLater()
             self._view = DeconQCResultView(subject)
+            self._view.useIterations.connect(self._adopt_iterations)
             self._view_subject = subject
-            self.host.publish_qc_result(self._view, f"Decon QC · {subject}")
+            self._view_slot.addWidget(self._view)
 
         self.progress.setVisible(True)
         self.run_btn.setEnabled(False)
-        self.say(f"deconvolving {subject} at {iterations} iterations …")
+        self.say(f"deconvolving {subject}, capturing every iteration up to {iterations} …")
         self._worker = _DeconQCWorker(
             dataset, self.region_combo.currentText(), self.fov_spin.value(),
             self.channel_combo.currentText(), iterations, not self.cpu_cb.isChecked(),
             self._crop_half, self._view_half)
         self._worker.done.connect(self._on_done)
+        self._worker.sweep_done.connect(self._on_sweep_done)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
     def _on_done(self, iterations, frame, ratio) -> None:
         from squidxplorer._decon_qc import halo_verdict
 
-        self.progress.setVisible(False)
-        self.run_btn.setEnabled(True)
         # The verdict needs this iteration included; show_iteration is what appends it.
         history = list(self._view.history) + [(int(iterations), float(ratio))]
         kind, verdict = halo_verdict(history)
         self._view.show_iteration(iterations, frame.composite, ratio, kind, verdict,
                                   volume=frame.volume, centre=frame.centre,
-                                  view_half=frame.view_half)
+                                  view_half=frame.view_half,
+                                  delta=getattr(frame, "delta", None))
         self.say(verdict)
+
+    def _on_sweep_done(self, n: int) -> None:
+        self.progress.setVisible(False)
+        self.run_btn.setEnabled(True)
+
+    def _adopt_iterations(self, k: int) -> None:
+        """The QC's chosen count becomes THE run's iterations (read via ``kwargs``)."""
+        self.run_iter_spin.setValue(int(k))
+        self.say(f"decon runs will use {int(k)} iteration" + ("s" if int(k) != 1 else "")
+                 + " — adopted from the QC sweep; a view's Run button reads it off this panel.")
+
+    def kwargs(self) -> dict:
+        """The decon run's parameters, read by ``operator_kwargs_for('decon')`` at launch."""
+        return {"iterations": int(self.run_iter_spin.value())}
 
     def _on_failed(self, message: str) -> None:
         self.progress.setVisible(False)
@@ -780,7 +1028,8 @@ class DeconQCPanel(_Panel):
             return
         # Drop the result callbacks first: a done/failed emit landing during teardown would
         # call show_iteration on a deleted widget.
-        for sig, slot in ((w.done, self._on_done), (w.failed, self._on_failed)):
+        for sig, slot in ((w.done, self._on_done), (w.sweep_done, self._on_sweep_done),
+                          (w.failed, self._on_failed)):
             try:
                 sig.disconnect(slot)
             except (TypeError, RuntimeError):

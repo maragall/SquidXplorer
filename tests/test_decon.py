@@ -508,3 +508,106 @@ def test_specialising_to_a_channel_may_not_change_the_consumed_axis():
     _plane_op.for_channel = lambda path, channel: decon3d_op(FAST_OPTICS, 1)
     with pytest.raises(ValueError, match="must not change the output shape"):
         bind_channel(_plane_op, "/some/acquisition", "Fluorescence_638_nm_Ex")
+
+
+# --- the QC sweep's capture: one solve, every iteration (2026-08-24) --------------------------
+
+def test_run_snapshot_iters_captures_every_iteration_of_one_solve(monkeypatch):
+    """petakit's snapshot_iters is the per-iteration hook: the sweep's LAST capture must be
+    the plain run's answer (same solve, not one solve per count), and earlier captures must
+    genuinely differ, or the stepper would page through copies."""
+    monkeypatch.setenv("SQUIDXPLORER_DECON_DEVICE", "cpu")
+    from squidxplorer._decon import _run
+
+    psf = make_psf(FAST_OPTICS)
+    rng = np.random.default_rng(0)
+    volume = (rng.random((3, 32, 32)) * 100).astype(np.float32)
+
+    snaps = _run(volume, psf, 3, gpu=False, snapshot_iters=[1, 2, 3])
+    plain = _run(volume, psf, 3, gpu=False)
+
+    assert sorted(snaps) == [1, 2, 3]
+    assert np.allclose(snaps[3], plain, rtol=1e-5, atol=1e-4), (
+        "the sweep's final capture is not the plain run's answer")
+    assert not np.array_equal(snaps[1], snaps[3]), "iteration 1 equals iteration 3"
+
+
+def test_iterations_is_a_declared_param_on_both_decon_registrations():
+    """THE one place the QC's chosen count lands: the registered operators declare
+    ``iterations``, so operator_kwargs / recipes / the declaration probe all carry it."""
+    from squidxplorer._engine import operator_params
+
+    for name in ("decon", "decon3d"):
+        params = {p.name: p.default for p in operator_params(name)}
+        assert params == {"iterations": DEFAULT_ITERATIONS}, (
+            f"{name} does not declare iterations (or declares more than the panel feeds)")
+
+
+# --- the session immersion / NA choices (2026-08-24) ------------------------------------------
+
+def _write_acq(tmp_path, na=0.75):
+    root = tmp_path / "acq"
+    root.mkdir(parents=True)
+    (root / "acquisition parameters.json").write_text(json.dumps(
+        {"dz(um)": 2.0, "Nz": 4, "Nt": 1,
+         "objective": {"magnification": 20.0, "NA": na}, "sensor_pixel_size_um": 6.5}))
+    (root / "acquisition.yaml").write_text(
+        "objective:\n  pixel_size_um: 0.400\n  magnification: 20.0\n"
+        "z_stack:\n  nz: 4\n  delta_z_mm: 0.002\n"
+        "time_series:\n  nt: 1\n")
+    return root
+
+
+def test_session_ni_reaches_the_channel_optics_for_preview_and_run(tmp_path):
+    """optics_for_channel is the ONE reader both the QC worker and a run's for_channel use, so
+    the medium chosen in the panel shapes BOTH PSFs; clearing it restores inference."""
+    from squidxplorer._decon import session_ni, set_session_ni
+
+    root = _write_acq(tmp_path)
+    try:
+        set_session_ni(1.333)
+        assert session_ni() == pytest.approx(1.333)
+        optics = optics_for_channel(root, "Fluorescence_488_nm_Ex")
+        assert optics.ni == pytest.approx(1.333)
+        assert optics.immersion_index == pytest.approx(1.333)
+    finally:
+        set_session_ni(None)
+    assert optics_for_channel(root, "Fluorescence_488_nm_Ex").ni is None
+
+
+def test_an_na_impossible_under_the_chosen_medium_is_refused_by_name(tmp_path):
+    """NA <= ni is physics: a 1.40 objective under air must refuse, naming both numbers and
+    the way out, never solve with an impossible PSF."""
+    from squidxplorer._decon import set_session_ni
+
+    root = _write_acq(tmp_path, na=1.40)
+    try:
+        set_session_ni(1.000)
+        with pytest.raises(ValueError, match=r"NA 1\.40 is impossible in air"):
+            optics_for_channel(root, "Fluorescence_488_nm_Ex")
+        set_session_ni(1.515)                  # the actual oil objective: allowed again
+        assert optics_for_channel(root, "Fluorescence_488_nm_Ex").ni == pytest.approx(1.515)
+    finally:
+        set_session_ni(None)
+
+
+def test_a_session_na_override_reaches_the_optics_and_is_cleared_by_none(tmp_path):
+    from squidxplorer._decon import set_session_na
+
+    root = _write_acq(tmp_path)
+    try:
+        set_session_na(0.85)
+        assert optics_for_channel(root, "Fluorescence_488_nm_Ex").na == pytest.approx(0.85)
+    finally:
+        set_session_na(None)
+    assert optics_for_channel(root, "Fluorescence_488_nm_Ex").na == pytest.approx(0.75)
+
+
+def test_the_immersion_table_is_value_first_with_the_medium_beside_it():
+    from squidxplorer._decon import IMMERSION_MEDIA, medium_for_ni
+
+    assert IMMERSION_MEDIA[0] == (1.000, "air"), "air is the assumed default and comes first"
+    assert dict(IMMERSION_MEDIA) == {1.000: "air", 1.333: "water", 1.406: "silicone oil",
+                                     1.473: "glycerol", 1.515: "oil"}
+    assert medium_for_ni(1.515) == "oil"
+    assert medium_for_ni(1.2345) == "ni 1.234", "an off-table index is named by its value"

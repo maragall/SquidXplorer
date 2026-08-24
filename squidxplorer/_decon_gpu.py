@@ -194,10 +194,20 @@ def _otf_source(psf: np.ndarray, out_shape) -> np.ndarray:
     return np.roll(padded, -(np.array(p.shape) // 2), axis=(0, 1, 2))
 
 
-def rl(volume: np.ndarray, psf: np.ndarray, iterations: int, device: str) -> np.ndarray:
-    """Biggs-Andrews accelerated Richardson-Lucy on *device*. Returns float32 ``(Z, Y, X)``."""
+def rl(volume: np.ndarray, psf: np.ndarray, iterations: int, device: str,
+       snapshot_iters=None):
+    """Biggs-Andrews accelerated Richardson-Lucy on *device*. Returns float32 ``(Z, Y, X)``.
+
+    ``snapshot_iters`` (petakit's own contract): an iterable of iteration counts; the return
+    becomes ``{iter: volume}`` capturing the estimate after each requested iteration of ONE
+    solve. The loop runs to ``max(iterations, max(snapshot_iters))``.
+    """
     import torch
 
+    snaps = sorted({int(i) for i in snapshot_iters}) if snapshot_iters else None
+    if snaps is not None:
+        iterations = max(int(iterations), snaps[-1])
+    captured: Optional[dict] = {} if snaps is not None else None
     dims = (-3, -2, -1)
     raw = np.maximum(np.asarray(volume, dtype=np.float32), 0)
     widths = (0, 0, 0) if padding_disabled() else pad_plan(raw.shape, psf.shape)
@@ -242,6 +252,12 @@ def rl(volume: np.ndarray, psf: np.ndarray, iterations: int, device: str) -> np.
                 min=0,
             )
 
+            if snaps is not None and k in snaps:
+                captured[k] = (J_2[core].contiguous().to("cpu").numpy()
+                               .astype(np.float32, copy=False))
+
+        if snaps is not None:
+            return captured
         out = J_2[core].contiguous().to("cpu").numpy()
 
     return out.astype(np.float32, copy=False)
