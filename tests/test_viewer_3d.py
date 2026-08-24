@@ -482,6 +482,33 @@ def test_a_channel_whose_first_brick_is_blank_still_displays(mosaic):
         f"refused by napari")
 
 
+def test_a_depth_keeping_operators_volume_survives_its_own_toggle(mosaic):
+    """Julio, live (2026-08-24): "I can't toggle on and off the 3D decon-ed layer in napari."
+
+    decon declares ``consumes={"z"}`` (the engine hands it the whole stack) AND ``keeps_depth``
+    (every plane comes back), but the display side read only ``consumes``: ``_reduces_z`` said
+    True for decon, so the visibility toggle's ``_present_z_axis`` COLLAPSED every decon brick
+    to a single plane the moment the volume was lit while the pane's dims were 2-D (measured:
+    (4, 8, 8) -> (8, 8) on the toggle back ON) — and ``volume_source`` refused to open 3D on a
+    decon layer at all, off the same one line. What collapses is the OUTPUT's depth, not the
+    input axis the operator eats."""
+    build_volume_scene(mosaic, "decon", ("488",), bricks=3)
+
+    for ly in mosaic.layers_for("decon", "488"):     # the tree checkbox: OFF ...
+        ly.visible = False
+    for ly in mosaic.layers_for("decon", "488"):     # ... and back ON
+        ly.visible = True
+
+    for ly in mosaic.layers_for("decon", "488"):
+        assert ly.visible is True
+        assert tuple(ly.data.shape) == (4, 8, 8), (
+            f"the toggle flattened a decon brick to {tuple(ly.data.shape)} — the volume was "
+            "treated as a z-reducer's single plane while decon keeps every plane")
+    assert mosaic._reduces_z("decon") is False, (
+        "the display side still reads decon's consumed axis as its output depth; volume_source "
+        "refuses 3D on it and _present_z_axis flattens it")
+
+
 def test_auto_clim_never_hands_napari_a_degenerate_window():
     """napari raises ValueError on contrast_limits with lo == hi; a blank stack must yield None
     (napari autoscales), never (0.0, 0.0)."""

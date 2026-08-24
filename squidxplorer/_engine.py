@@ -344,9 +344,26 @@ def operator_output(name: str, operator_kwargs: Optional[dict] = None) -> tuple[
         if inner_name is None:
             # z_operator=None: keep every acquired plane, fused unchanged — full z, intensity.
             return False, INTENSITY
-        inner = _resolve_operator(inner_name)
-        return "z" in inner.consumes, inner.produces
-    return "z" in op.consumes, op.produces
+        op = _resolve_operator(inner_name)
+    # A z-consumer declaring ``keeps_depth`` on its callable (decon: the whole deconvolved
+    # stack, same size as the input) eats the z AXIS without collapsing the OUTPUT — the same
+    # declaration project_well and the acquisition writer honour. Reading consumes alone here
+    # made write_plate declare n_z=1 against a full-depth stream and made the display side
+    # flatten a decon volume on its own visibility toggle (2026-08-24).
+    keeps_depth = bool(getattr(op.fn, "keeps_depth", False))
+    return "z" in op.consumes and not keeps_depth, op.produces
+
+
+def operator_reduces_depth(name: str) -> bool:
+    """Does *name*'s OUTPUT collapse z to one plane, whatever a run's kwargs?
+
+    The NAME-ONLY half of :func:`operator_output`, for callers that hold no kwargs (the
+    display side's layer keys). An operator with ``inner_param`` answers False here — its
+    depth depends on the run's inner choice, which a name cannot know, so the layer's own
+    data decides. A z-consumer declaring ``keeps_depth`` (decon) keeps its planes.
+    """
+    op = _resolve_operator(name)
+    return "z" in op.consumes and not bool(getattr(op.fn, "keeps_depth", False))
 
 
 def bind_operator(name: str, operator_kwargs: Optional[dict] = None) -> OperatorFn:

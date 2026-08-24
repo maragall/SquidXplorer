@@ -155,6 +155,47 @@ def test_show_op_is_the_before_after_toggle(layers):
     assert not any(ly.visible for ly in layers.group("raw"))
 
 
+def test_a_subset_channel_result_is_the_visible_op_while_it_is_lit(layers):
+    """Julio, live (2026-08-24): a decon result covering ONE of raw's channels could not be
+    toggled — in 2D or 3D. Root: the result's arrival darkens raw only on ITS channel, so
+    raw stays lit on the others, and ``visible_op()`` returned the FIRST visible layer's op
+    (bottom-most = raw). Everything reading "the shown layer" — 3D's volume_source, the
+    z-axis rule, the plate follow — then drove RAW while the user was looking at the result.
+    The topmost visible layer is the one the user's last gesture lit; its op is the answer."""
+    layers.add_mosaic("raw", "488", _img())
+    layers.add_mosaic("raw", "561", _img())
+    layers.add_result("intensity", "decon", "488", _img(3))    # arrives lit; darkens raw·488 only
+
+    assert layers.find("raw", "561").visible, "the un-deconvolved channel must stay on screen"
+    assert layers.visible_op() == "decon", (
+        "the window claims raw is the shown layer while the decon result is what the user "
+        "just lit: 3D renders raw and every toggle drives the wrong op")
+
+    layers.find("decon", "488").visible = False
+    assert layers.visible_op() == "raw"
+
+
+def test_the_channel_toggle_drives_the_layer_the_channel_is_showing(layers):
+    """The channel checkbox wrote ``group(visible_op())`` — with a subset-channel result lit,
+    OFF wrote the already-dark raw layer (a measured no-op: the canvas never changed) and ON
+    lit raw, whose arrival then DARKENED the result (the exclusive-op rule). The toggle must
+    hide what the channel is showing and bring the SAME thing back."""
+    layers.add_mosaic("raw", "488", _img())
+    layers.add_mosaic("raw", "561", _img())
+    layers.add_result("intensity", "decon", "488", _img(3))
+
+    layers.set_channel_visible("488", False)
+    assert layers.find("decon", "488").visible is False, (
+        "channel OFF left the channel's lit layer on screen — the measured inert toggle")
+    assert layers.find("raw", "561").visible is True
+
+    layers.set_channel_visible("488", True)
+    assert layers.find("decon", "488").visible is True, (
+        "channel ON brought back a different op's layer than the one OFF hid")
+    assert layers.find("raw", "488").visible is False, (
+        "channel ON lit raw beside the result, and the exclusive rule then darkened the result")
+
+
 def test_show_op_rejects_an_unknown_processing_layer(layers):
     layers.add_mosaic("raw", "488", _img())
     with pytest.raises(KeyError):

@@ -288,6 +288,16 @@ def test_decon_is_registered_as_the_depth_keeping_volume_solve():
     assert getattr(_resolve_operator("decon").fn, "keeps_depth", False) is True
 
 
+def test_the_output_query_says_decon_keeps_its_depth():
+    """`operator_output` is what the writer's depth AND the display's z-collapse read; for a
+    z-consumer declaring keeps_depth the OUTPUT does not collapse (the 2026-08-24 toggle bug:
+    `_reduces_z("decon")` read consumes alone and flattened the volume; write_plate declared
+    n_z=1 against a full-depth stream)."""
+    from squidxplorer._engine import operator_output
+
+    assert operator_output("decon") == (False, "intensity")
+
+
 def test_decon3d_is_refused_by_name_with_a_pointer_to_decon():
     """Absence pin (2026-08-24): the survivor of the 2D/3D merge is REGISTERED AS `decon`;
     a stale recipe or script saying decon3d gets the rename, not a bare unknown-name error."""
