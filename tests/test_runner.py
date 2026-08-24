@@ -45,7 +45,8 @@ def test_the_dispatch_module_holds_the_substitution_point():
 
 # --------------------------------------------- parity: the old monkeypatch seams still work
 
-def test_a_monkeypatched_write_plate_still_intercepts_the_save_arm(monkeypatch, tmp_path):
+def test_a_monkeypatched_write_plate_still_intercepts_the_save_arm(monkeypatch, tmp_path,
+                                                                  blob_operator):
     seen = {}
 
     def fake_write_plate(reader, out_dir, *, n_fovs=1, workers=None, operator="mip",
@@ -56,13 +57,14 @@ def test_a_monkeypatched_write_plate_still_intercepts_the_save_arm(monkeypatch, 
         return {"plate": str(tmp_path), "n_fields_written": 1}
 
     monkeypatch.setattr(squidxplorer, "write_plate", fake_write_plate)
-    run_operator_once(_Reader(), operator="spot", save=True, owed=1, out_dir=tmp_path,
+    run_operator_once(_Reader(), operator="blob", save=True, owed=1, out_dir=tmp_path,
                       n_fovs=2, regions=["B2"], parameters={"min_area_px": 30})
-    assert seen == {"out_dir": str(tmp_path), "operator": "spot", "tiff": False, "n_fovs": 2,
+    assert seen == {"out_dir": str(tmp_path), "operator": "blob", "tiff": False, "n_fovs": 2,
                     "regions": ["B2"], "operator_kwargs": {"min_area_px": 30}}
 
 
-def test_a_monkeypatched_run_plate_still_intercepts_the_preview_arm(monkeypatch):
+def test_a_monkeypatched_run_plate_still_intercepts_the_preview_arm(monkeypatch,
+                                                                    blob_operator):
     seen = {}
 
     def fake_run_plate(reader, **kw):
@@ -71,10 +73,10 @@ def test_a_monkeypatched_run_plate_still_intercepts_the_preview_arm(monkeypatch)
 
     monkeypatch.setattr(squidxplorer, "run_plate", fake_run_plate)
     landed = []
-    result = run_operator_once(_Reader(), operator="spot", save=False, owed=2,
+    result = run_operator_once(_Reader(), operator="blob", save=False, owed=2,
                                regions=["B2", "B3"], parameters={"min_area_px": 30},
                                on_well=lambda region, fov, image: landed.append(region))
-    assert seen["operator"] == "spot" and seen["regions"] == ["B2", "B3"]
+    assert seen["operator"] == "blob" and seen["regions"] == ["B2", "B3"]
     assert seen["operator_kwargs"] == {"min_area_px": 30}
     assert seen["n_fovs"] is N_FOVS_LOOP_DEFAULT
     assert landed == ["B2", "B3"] and result.landed == 2 and result.outcome == "ok"
@@ -98,17 +100,18 @@ class _RecordingRunner:
         return 1, False
 
 
-def test_a_substituted_runner_receives_the_spec_on_the_save_arm(monkeypatch, tmp_path):
+def test_a_substituted_runner_receives_the_spec_on_the_save_arm(monkeypatch, tmp_path,
+                                                                blob_operator):
     rec = _RecordingRunner(manifest={"plate": str(tmp_path), "n_fields_written": 1})
     monkeypatch.setattr(dispatch_mod, "_RUNNER", rec)
     reader = _Reader("/data/acq")
-    result = run_operator_once(reader, operator="spot", save=True, owed=1, out_dir=tmp_path,
+    result = run_operator_once(reader, operator="blob", save=True, owed=1, out_dir=tmp_path,
                                n_fovs=None, regions={"B2": [0, 1]},
                                parameters={"min_area_px": 30})
     (arm, got_reader, spec, out_dir), = rec.calls
     assert arm == "save" and got_reader is reader and out_dir == tmp_path
     assert isinstance(spec, RunSpec)
-    assert spec.operator == "spot" and spec.operator_kwargs == {"min_area_px": 30}
+    assert spec.operator == "blob" and spec.operator_kwargs == {"min_area_px": 30}
     assert spec.regions == {"B2": [0, 1]} and spec.n_fovs is None
     assert spec.source_id == "/data/acq"
     assert result.outcome == "ok"

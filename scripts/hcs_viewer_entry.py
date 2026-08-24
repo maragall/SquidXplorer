@@ -62,13 +62,13 @@ def _selftest(dataset: str) -> int:
 
 
 def _compute_check(win) -> dict:
-    """MIP one real FOV, then run each plane operator on a crop of it.
+    """MIP one real FOV, then deconvolve a crop of it (the volume solve on a 1-plane stack).
 
-    A crop rather than a whole frame: rolling-ball on 2084x2084 takes minutes.
+    A crop rather than a whole frame: RL on 2084x2084 takes minutes.
     """
     import numpy as np
 
-    from squidxplorer import deconvolve_plane, project_well, subtract_background
+    from squidxplorer import deconvolve_stack, project_well
 
     out = {}
     try:
@@ -79,11 +79,10 @@ def _compute_check(win) -> dict:
         out["mip_shape"] = list(mip.shape)
         out["mip_dtype"] = str(mip.dtype)
         crop = np.ascontiguousarray(mip[0, 0, 0, :256, :256])
-        bg = subtract_background(crop)                   # scikit-image rolling_ball
-        dec = deconvolve_plane(crop)                     # petakit vectorial PSF, one plane
-        out["bgsub_mean_delta"] = float(crop.mean() - bg.mean())
+        # petakit vectorial PSF; a 1-plane stack is the volume solve's own degenerate case.
+        dec = deconvolve_stack(crop[None, ...], project=False)[0]
         out["decon_shape"] = list(dec.shape)
-        out["ok"] = mip.shape[2] == 1 and bg.shape == crop.shape and dec.shape == crop.shape
+        out["ok"] = mip.shape[2] == 1 and dec.shape == crop.shape
     except Exception as exc:  # report, never crash: the point is a legible verdict
         out["ok"] = False
         out["error"] = f"{type(exc).__name__}: {exc}"

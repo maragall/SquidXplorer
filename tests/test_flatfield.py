@@ -1,4 +1,9 @@
-"""Flat-field correction: numerical property tests + the MIP-commutation shortcut."""
+"""Flat-field machinery: numerical property tests + the MIP-commutation shortcut.
+
+The standalone `flatfield` OPERATOR was shelved 2026-08-24; what this file covers is the
+machinery STITCH rides (profile record, BaSiC estimate, per-channel .npy parse, the
+correction arithmetic, the installed-profile store) plus the absence pins.
+"""
 
 from __future__ import annotations
 
@@ -8,18 +13,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from squidxplorer import available_plane_operators, project, project_well, operator_consumes
+from squidxplorer import available_plane_operators, project
 from squidxplorer._flatfield import (
     FlatfieldProfile,
     active_profiles,
     clear_profile,
     correct_flatfield,
     estimate_profile,
-    flatfield_op,
     set_profile,
     set_profiles,
 )
-from squidxplorer.projection import PLANE_OP
 from squidxplorer.reader import open_reader
 
 pytest.importorskip("scipy.ndimage")
@@ -226,27 +229,19 @@ def test_flatfield_commutes_with_the_mip_on_real_10x_data(laser_af_dataset, caps
     assert t_per_plane > t_after_mip
 
 
-def test_flatfield_is_registered_as_a_plane_op():
-    assert "flatfield" in available_plane_operators()
-    assert operator_consumes("flatfield") == PLANE_OP
+def test_the_flatfield_operator_is_shelved_whole():
+    """Absence pin (2026-08-24): no registered operator, no callable surface, no export.
+    The machinery stitch rides — FlatfieldProfile, estimate_profile, correct_flatfield and
+    the set_profile(s)/active_profiles store — deliberately survives, tested above."""
+    import squidxplorer
+    import squidxplorer._flatfield as ff
 
-
-def test_the_registered_operator_fails_loud_and_actionable_with_no_profile_set():
-    """No sane default: an identity field would silently do nothing while the UI said 'applied'."""
-    from squidxplorer._engine import _resolve_operator
-    op = _resolve_operator("flatfield").fn
-    with pytest.raises(ValueError, match="no flat-field profile"):
-        op([np.ones((8, 8), np.uint16)])
-
-
-def test_set_profile_activates_the_registered_operator():
-    from squidxplorer._engine import _resolve_operator
-    ff = _vignette(32)
-    set_profile(FlatfieldProfile(ff), channel="Fluorescence_405_nm_Ex")
-    assert list(active_profiles()) == ["Fluorescence_405_nm_Ex"]
-    raw = (np.float32(1000) * ff).astype(np.uint16)
-    out = _resolve_operator("flatfield").fn([raw])
-    assert np.allclose(out, 1000, atol=2)
+    assert "flatfield" not in squidxplorer.runnable_operators()
+    assert "flatfield" not in available_plane_operators()
+    for gone in ("flatfield_op", "_ACTIVE_OP", "_correct_with_active", "_profile_for",
+                 "LAYER_KEY", "LAYER_LABEL"):
+        assert not hasattr(ff, gone), f"{gone} is back; the flatfield operator was shelved"
+    assert not hasattr(squidxplorer, "flatfield_op")
 
 
 def test_a_profile_cannot_be_installed_without_saying_which_channel_measured_it():
@@ -257,123 +252,22 @@ def test_a_profile_cannot_be_installed_without_saying_which_channel_measured_it(
         set_profile(FlatfieldProfile(_vignette(8)), channel="")
 
 
-def test_flatfield_op_refuses_a_whole_z_stack():
-    op = flatfield_op(FlatfieldProfile(_vignette(8)))
-    with pytest.raises(ValueError, match="more than one plane"):
-        op([np.ones((8, 8), np.uint16), np.ones((8, 8), np.uint16)])
-
-
-def test_project_well_with_flatfield_keeps_z_at_full_depth(squid_dataset):
-    root, _ = squid_dataset
-    reader = open_reader(root)
-    ff = np.ones((4, 4), np.float32)
-    out = project_well(reader, "B2", 0, reduce=flatfield_op(FlatfieldProfile(ff)))
-    assert out.shape[2] == len(reader.metadata["z_levels"])
-    assert out.dtype == reader.metadata["dtype"]
-
-
-def _sloped(shape, slope: float) -> np.ndarray:
-    """A gain field with a known, per-channel-distinguishable tilt, normalised to mean 1."""
-    ny, nx = shape
-    yy, xx = np.mgrid[0:ny, 0:nx].astype(np.float32)
-    field = 1.0 + slope * ((yy + xx) / max(1.0, float(ny + nx - 2)) - 0.5)
-    return (field / field.mean()).astype(np.float32)
-
-
-def _fields_per_channel(reader) -> dict:
-    """One DIFFERENT gain field per channel of *reader*, keyed by channel name."""
-    shape = tuple(reader.metadata["frame_shape"])
-    names = [c["name"] for c in reader.metadata["channels"]]
-    return {n: FlatfieldProfile(_sloped(shape, 0.4 + 0.5 * i)) for i, n in enumerate(names)}
-
-
-def test_every_channel_is_corrected_by_its_own_gain_field(squid_dataset):
-    """Runs the operator through project_well and checks every (channel, z) plane against
-    that channel's own field; also checks another channel's field gives a different answer."""
-    from squidxplorer._engine import _resolve_operator
-
-    root, _ = squid_dataset
-    reader = open_reader(root)
-    meta = reader.metadata
-    names = [c["name"] for c in meta["channels"]]
-    assert len(names) > 1, "a one-channel fixture cannot see this defect at all"
-    profiles = _fields_per_channel(reader)
-    set_profiles(profiles)
-
-    out = project_well(reader, "B2", 0, reduce=_resolve_operator("flatfield").fn)
-
-    for c_i, name in enumerate(names):
-        other = names[(c_i + 1) % len(names)]
-        for z_i, z in enumerate(meta["z_levels"]):
-            raw = reader.read("B2", 0, name, z, 0)
-            mine = correct_flatfield(raw, profiles[name])
-            theirs = correct_flatfield(raw, profiles[other])
-            assert not np.array_equal(mine, theirs), (
-                f"the fixture cannot tell {name} and {other} apart — the assertion below would "
-                "pass for an operator that used either field")
-            got = out[0, c_i, z_i]
-            assert np.array_equal(got, mine), (
-                f"{name} (z={z}) was NOT corrected by its own gain field: got mean "
-                f"{got.mean():.2f}, its own field gives {mine.mean():.2f}, and {other}'s field "
-                f"gives {theirs.mean():.2f} — {100.0 * (got != mine).mean():.1f}% of pixels "
-                f"differ from the right answer by up to "
-                f"{np.abs(got.astype(np.int64) - mine.astype(np.int64)).max()}")
-
-
-def test_a_channel_with_no_installed_profile_is_refused_by_name(squid_dataset):
-    """Only one channel's field installed: the other channel must stop the run, named."""
-    from squidxplorer._engine import _resolve_operator
-
-    root, _ = squid_dataset
-    reader = open_reader(root)
-    names = [c["name"] for c in reader.metadata["channels"]]
-    profiles = _fields_per_channel(reader)
-    set_profile(profiles[names[0]], channel=names[0])
-
-    with pytest.raises(ValueError) as exc:
-        project_well(reader, "B2", 0, reduce=_resolve_operator("flatfield").fn)
-    message = str(exc.value)
-    assert names[1] in message, (
-        f"the refusal does not name the channel it has no profile for: {message!r}")
-    assert names[0] in message, (
-        f"the refusal does not say which channel(s) DO have one: {message!r}")
-
-    # the channel that HAS a profile still binds and corrects
-    from squidxplorer.projection import bind_channel
-
-    raw = reader.read("B2", 0, names[0], reader.metadata["z_levels"][0], 0)
-    bound = bind_channel(_resolve_operator("flatfield").fn, str(root), names[0])
-    assert np.array_equal(np.asarray(bound([raw])),
-                          correct_flatfield(raw, profiles[names[0]]))
-
-
-def test_nothing_installed_still_refuses_loud_and_actionable():
-    from squidxplorer._engine import _resolve_operator
-
-    op = _resolve_operator("flatfield")
-    with pytest.raises(ValueError, match="no flat-field profile"):
-        op.fn([np.ones((8, 8), np.uint16)])
-    with pytest.raises(ValueError, match="no flat-field profile"):
-        op.fn.for_channel(None, "Fluorescence_488_nm_Ex")
-
-
-def test_the_unbound_operator_refuses_to_choose_between_several_channels():
-    """With no channel bound and several profiles installed, the operator must not pick one."""
-    from squidxplorer._engine import _resolve_operator
-
-    op = _resolve_operator("flatfield").fn
-    set_profiles({"a": FlatfieldProfile(_vignette(8)), "b": FlatfieldProfile(_vignette(8, 0.2))})
-    with pytest.raises(ValueError, match="without being told which channel"):
-        op([np.ones((8, 8), np.uint16)])
+def test_the_profile_store_round_trips_per_channel():
+    """set_profile / set_profiles / active_profiles — what _stitch._selected_profiles reads."""
+    a, b = FlatfieldProfile(_vignette(8)), FlatfieldProfile(_vignette(8, 0.2))
+    set_profile(a, channel="405")
+    assert list(active_profiles()) == ["405"]
+    set_profiles({"405": a, "488": b})
+    got = active_profiles()
+    assert sorted(got) == ["405", "488"] and got["488"] is b
+    clear_profile()
+    assert active_profiles() == {}
 
 
 @pytest.mark.integration
-def test_per_channel_correction_on_the_real_stored_profile(laser_af_dataset, capsys):
-    """On the acquisition's own (4, 2084, 2084) profile; channel 0 (405) is bit-identical
-    either way, which is why a broadcast bug there went unnoticed."""
-    from squidxplorer._engine import _resolve_operator
-    from squidxplorer.projection import bind_channel
-
+def test_per_channel_npy_parse_on_the_real_stored_profile(laser_af_dataset, capsys):
+    """per_channel_from_npy maps channel NAMES to plane INDICES of the stored (C, Y, X) file;
+    correcting a channel with plane 0's field is measurably wrong (the 2026-08-06 defect)."""
     npy = laser_af_dataset / f"{laser_af_dataset.name}_flatfield.npy"
     if not npy.exists():
         pytest.skip("this acquisition carries no stored flat-field profile")
@@ -385,19 +279,17 @@ def test_per_channel_correction_on_the_real_stored_profile(laser_af_dataset, cap
     z = meta["z_levels"][len(meta["z_levels"]) // 2]
 
     profiles = FlatfieldProfile.per_channel_from_npy(npy, names)
-    set_profiles(profiles)
-    op = _resolve_operator("flatfield").fn
-
     print(f"\n[per-channel flat-field] {npy.name}")
+    any_differs = False
     for i, name in enumerate(names):
         raw = reader.read(region, fov, name, z, 0)
-        got = np.asarray(bind_channel(op, str(laser_af_dataset), name)([raw]))
-        right = correct_flatfield(raw, FlatfieldProfile.from_npy(npy, channel=i))
+        right = correct_flatfield(raw, profiles[name])
+        by_index = correct_flatfield(raw, FlatfieldProfile.from_npy(npy, channel=i))
+        assert np.array_equal(right, by_index), (
+            f"{name}: per_channel_from_npy did not map this NAME to plane {i}")
         wrong = correct_flatfield(raw, FlatfieldProfile.from_npy(npy, channel=0))
         d = np.abs(wrong.astype(np.int64) - right.astype(np.int64))
+        any_differs = any_differs or bool((d > 0).any())
         print(f"  {name:30s} one-profile mean {wrong.mean():9.2f}  per-channel mean "
               f"{right.mean():9.2f}  differing {100.0 * (d > 0).mean():7.3f}%  max {d.max()}")
-        assert np.array_equal(got, right), (
-            f"{name} was corrected by the wrong field: {100.0 * (got != right).mean():.3f}% of "
-            f"pixels differ, by up to "
-            f"{np.abs(got.astype(np.int64) - right.astype(np.int64)).max()}")
+    assert any_differs, "every channel matched plane 0's field; this file cannot see the defect"

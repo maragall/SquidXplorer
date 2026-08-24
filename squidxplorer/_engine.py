@@ -11,7 +11,6 @@ import numpy as np
 
 from squidxplorer.projection import (
     INTENSITY,
-    PLANE_OP,
     REGION_OP,
     Z_REDUCER,
     MissingDependency,
@@ -19,10 +18,8 @@ from squidxplorer.projection import (
     normalise_consumes,
     normalise_produces,
     normalise_requires,
-    plane_op,
     scope_wells,
     project,
-    project_reference,
     project_well,
     requirement_refusal,
 )
@@ -32,7 +29,7 @@ if TYPE_CHECKING:  # avoid import cost / cycle at runtime
 
 OperatorFn = Callable[[Iterable[np.ndarray]], np.ndarray]
 
-# '+()' are expression punctuation in a recipe label ('spot(min_area_px=80)'), so a registered
+# '+()' are expression punctuation in a recipe label ('stitch(register=False)'), so a registered
 # name may carry none of them.
 _CHAIN_CHARS = "+()"
 
@@ -116,11 +113,10 @@ class Operator:
 _NOT_A_WELL_FAULT = (ImportError, MissingDependency)
 
 # THE operator table — name -> Operator. `consumes` is the dispatch; nothing branches on a name.
+# (Shelved 2026-08-24: `keepz` — keeping every z plane is spelled `z_operator=None` on stitch
+# now — and `reference`, the Tenengrad z-selecting reducer. Git history reinstates.)
 _OPERATORS: dict[str, Operator] = {
     "mip": Operator("mip", project, Z_REDUCER),
-    "reference": Operator("reference", project_reference, Z_REDUCER),
-    # Identity plane-op: keeps every z plane unchanged, so stitching can run per z-level.
-    "keepz": Operator("keepz", plane_op(lambda plane: plane), PLANE_OP),
 }
 
 
@@ -344,7 +340,11 @@ def operator_output(name: str, operator_kwargs: Optional[dict] = None) -> tuple[
     op = _resolve_operator(name)
     if op.inner_param is not None:
         default = next(p.default for p in op.params if p.name == op.inner_param)
-        inner = _resolve_operator((operator_kwargs or {}).get(op.inner_param, default))
+        inner_name = (operator_kwargs or {}).get(op.inner_param, default)
+        if inner_name is None:
+            # z_operator=None: keep every acquired plane, fused unchanged — full z, intensity.
+            return False, INTENSITY
+        inner = _resolve_operator(inner_name)
         return "z" in inner.consumes, inner.produces
     return "z" in op.consumes, op.produces
 
@@ -362,6 +362,11 @@ def _resolve_operator(name) -> Operator:
     operator = _OPERATORS.get(name)
     if operator is not None:
         return operator
+    if name == "decon3d":
+        raise KeyError(
+            "operator 'decon3d' was renamed to 'decon' (2026-08-24): 'decon' IS the volume "
+            "solve now — true 3-D RL over the whole stack, every plane kept, and on an n_z=1 "
+            "acquisition it equals the old per-plane result. Run operator='decon'.")
     if any(char in name for char in _CHAIN_CHARS):
         raise ValueError(
             f"{name!r} is a chain expression, and operator chaining was removed: an operator is "

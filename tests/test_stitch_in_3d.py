@@ -151,8 +151,8 @@ def test_a_per_FOV_operator_still_delivers_one_plane_AND_SAYS_SO(caplog):
     import logging
 
     meta = _meta()
-    worker = _worker(meta, "bgsub")
-    assert not worker._region_op, "'bgsub' is a per-FOV operator; this test asserts nothing"
+    worker = _worker(meta, "decon")
+    assert not worker._region_op, "'decon' is a per-FOV operator; this test asserts nothing"
     got: list = []
     worker.resultReady.connect(lambda region, fov, planes: got.append(planes))
     with caplog.at_level(logging.INFO):

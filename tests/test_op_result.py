@@ -24,7 +24,7 @@ def _meta(frame=(8, 8), step=6.0):
 
 
 def test_a_plane_op_s_fovs_accumulate_into_one_region_mosaic():
-    acc = RegionResultAccumulator("bgsub", "A1", _meta(), CHANNELS)
+    acc = RegionResultAccumulator("demo", "A1", _meta(), CHANNELS)
     assert not acc.complete()
     acc.add(0, np.full((2, 8, 8), 11, np.uint16))
     assert not acc.complete()
@@ -52,7 +52,7 @@ def test_the_operator_mosaic_lands_in_THE_SAME_FRAME_as_the_raw_mosaic():
     offsets = fov_offsets_px(meta["fov_positions_um"], "A1", [0, 1], 1.0)
     raw_shape = mosaic_extent_px(offsets, (8, 8))
 
-    acc = RegionResultAccumulator("bgsub", "A1", meta, CHANNELS)
+    acc = RegionResultAccumulator("demo", "A1", meta, CHANNELS)
     acc.add(0, np.zeros((2, 8, 8), np.uint16))
     acc.add(1, np.zeros((2, 8, 8), np.uint16))
     assert acc.result().plane(CHANNELS[0]).shape == tuple(raw_shape)
@@ -60,7 +60,7 @@ def test_the_operator_mosaic_lands_in_THE_SAME_FRAME_as_the_raw_mosaic():
 
 def test_the_pixels_are_the_OPERATOR_S_not_the_reader_s():
     """Distinct constants per FOV make a quiet re-read of the raw file visible."""
-    acc = RegionResultAccumulator("bgsub", "A1", _meta(), CHANNELS)
+    acc = RegionResultAccumulator("demo", "A1", _meta(), CHANNELS)
     acc.add(0, np.full((2, 8, 8), 11, np.uint16))
     acc.add(1, np.full((2, 8, 8), 22, np.uint16))
     plane = acc.result().plane(CHANNELS[0])
@@ -69,7 +69,7 @@ def test_the_pixels_are_the_OPERATOR_S_not_the_reader_s():
 
 
 def test_each_channel_keeps_its_own_pixels():
-    acc = RegionResultAccumulator("bgsub", "A1", _meta(), CHANNELS)
+    acc = RegionResultAccumulator("demo", "A1", _meta(), CHANNELS)
     for fov in (0, 1):
         planes = np.stack([np.full((8, 8), 7, np.uint16), np.full((8, 8), 99, np.uint16)])
         acc.add(fov, planes)
@@ -90,20 +90,20 @@ def test_a_region_operator_s_result_IS_the_mosaic_and_is_not_re_placed():
 
 
 def test_an_incomplete_region_refuses_to_produce_a_result():
-    acc = RegionResultAccumulator("bgsub", "A1", _meta(), CHANNELS)
+    acc = RegionResultAccumulator("demo", "A1", _meta(), CHANNELS)
     acc.add(0, np.zeros((2, 8, 8), np.uint16))
     with pytest.raises(ValueError, match="1 of 2"):
         acc.result()
 
 
 def test_a_channel_count_mismatch_is_named_not_broadcast():
-    acc = RegionResultAccumulator("bgsub", "A1", _meta(), CHANNELS)
+    acc = RegionResultAccumulator("demo", "A1", _meta(), CHANNELS)
     with pytest.raises(ValueError, match="channel"):
         acc.add(0, np.zeros((1, 8, 8), np.uint16))
 
 
 def test_an_unknown_fov_is_refused_rather_than_placed_at_the_origin():
-    acc = RegionResultAccumulator("bgsub", "A1", _meta(), CHANNELS)
+    acc = RegionResultAccumulator("demo", "A1", _meta(), CHANNELS)
     with pytest.raises(ValueError, match="99"):
         acc.add(99, np.zeros((2, 8, 8), np.uint16))
 
@@ -123,17 +123,15 @@ def test_the_result_carries_the_bbox_so_napari_places_it_over_the_raw_layer():
     from squidxplorer._mosaic_source import mosaic_bbox_um
 
     meta = _meta()
-    acc = RegionResultAccumulator("bgsub", "A1", meta, CHANNELS)
+    acc = RegionResultAccumulator("demo", "A1", meta, CHANNELS)
     acc.add(0, np.zeros((2, 8, 8), np.uint16))
     acc.add(1, np.zeros((2, 8, 8), np.uint16))
     assert acc.result().extent.bbox_um == mosaic_bbox_um(meta, "A1")
 
 
-def test_the_result_carries_the_kind_its_operator_declares():
+def test_the_result_carries_the_kind_its_operator_declares(blob_operator):
     """``produces`` is read off the registry ONCE, here, and rides on the Result to every sink."""
-    from squidxplorer._spots import LAYER_KEY
-
-    acc = RegionResultAccumulator(LAYER_KEY, "A1", _meta(), CHANNELS)
+    acc = RegionResultAccumulator(blob_operator, "A1", _meta(), CHANNELS)
     acc.add(0, np.zeros((2, 8, 8), np.uint16))
     acc.add(1, np.zeros((2, 8, 8), np.uint16))
     assert acc.result().kind == "labels"

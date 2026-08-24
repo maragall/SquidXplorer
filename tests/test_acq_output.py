@@ -125,130 +125,18 @@ def test_a_stopped_run_stays_under_the_partial_name(squid_dataset, tmp_path):
     assert summary["path"].endswith(".partial")
 
 
-# ------------------------------------------------------------------ reference: hardlinks
-
-#: The z whose plane is SHARP (random texture) per FOV; every other plane is flat (Tenengrad 0).
-_SHARPEST = {0: 2, 1: 1}
-_FOCUS_NZ = 3
-_FOCUS_REGION = "B2"
-
-_FOCUS_ACQ_YAML = """\
-objective:
-  pixel_size_um: 0.325
-z_stack:
-  nz: 3
-time_series:
-  nt: 1
-"""
-
-
-@pytest.fixture
-def focus_dataset(tmp_path):
-    """An acquisition whose sharpest z plane per FOV is KNOWN, so the pick is assertable."""
-    from .conftest import _YAML
-
-    root = tmp_path / "acq_focus"
-    (root / "0").mkdir(parents=True)
-    rng = np.random.default_rng(3)
-    arrays: dict = {}
-    for fov in FOVS:
-        for z in range(_FOCUS_NZ):
-            for ch in CHANNELS:
-                if z == _SHARPEST[fov]:
-                    arr = rng.integers(0, 4000, (8, 8), dtype=np.uint16)   # texture: high gradient
-                else:
-                    arr = np.full((8, 8), 100 + z, dtype=np.uint16)        # flat: zero gradient
-                tifffile.imwrite(root / "0" / f"{_FOCUS_REGION}_{fov}_{z}_{ch}.tiff", arr)
-                arrays[(fov, z, ch)] = arr
-    (root / "acquisition_channels.yaml").write_text(_YAML)
-    (root / "acquisition.yaml").write_text(_FOCUS_ACQ_YAML)
-    lines = ["region,x (mm),y (mm),z (mm)"]
-    for _z in range(_FOCUS_NZ):
-        for fov, x in ((0, 10.0), (1, 10.5)):
-            lines.append(f"{_FOCUS_REGION},{x},20.0,")
-    (root / "coordinates.csv").write_text("\n".join(lines) + "\n")
-    return root, arrays
-
-
-def test_reference_save_hardlinks_the_chosen_z(focus_dataset, tmp_path):
-    root, arrays = focus_dataset
-    dst = tmp_path / "reference_out"
-    summary = write_acquisition_planes(open_reader(root), "reference", dst)
-    assert summary["complete"] and summary["n_fields_written"] == len(FOVS)
-    for fov in FOVS:
-        for ch in CHANNELS:
-            out_f = dst / "0" / f"{_FOCUS_REGION}_{fov}_0_{ch}.tiff"
-            src_f = root / "0" / f"{_FOCUS_REGION}_{fov}_{_SHARPEST[fov]}_{ch}.tiff"
-            # A second directory entry for the SAME bytes, and of the RIGHT source plane:
-            # every channel of one FOV links the one z the focus rule chose.
-            assert out_f.stat().st_ino == src_f.stat().st_ino, (fov, ch)
-    out = open_reader(dst)
-    assert out.metadata["n_z"] == 1
-    np.testing.assert_array_equal(out.read(_FOCUS_REGION, 0, CHANNELS[0], 0),
-                                  arrays[(0, _SHARPEST[0], CHANNELS[0])])
-
-
-def test_reference_falls_back_to_a_real_copy_where_links_are_refused(
-        focus_dataset, tmp_path, monkeypatch):
-    def _refuse(src, dst, **kw):
-        raise OSError("this filesystem refuses hardlinks")
-
-    monkeypatch.setattr("os.link", _refuse)
-    root, _ = focus_dataset
-    dst = tmp_path / "reference_out"
-    summary = write_acquisition_planes(open_reader(root), "reference", dst)
-    assert summary["complete"]
-    out_f = dst / "0" / f"{_FOCUS_REGION}_0_0_{CHANNELS[0]}.tiff"
-    src_f = root / "0" / f"{_FOCUS_REGION}_0_{_SHARPEST[0]}_{CHANNELS[0]}.tiff"
-    assert out_f.stat().st_ino != src_f.stat().st_ino     # a real copy, not a link
-    assert out_f.read_bytes() == src_f.read_bytes()       # ...of the chosen file, byte-identical
-
-
-def test_reference_over_shared_plane_files_writes_the_chosen_pixels(focus_dataset, tmp_path):
-    # A source whose planes share one file (a multi-page stack, an RGB base) cannot be linked
-    # under a single-plane name; the save falls back to the engine and still lands the chosen
-    # plane's pixels.
-    root, arrays = focus_dataset
-    reader = open_reader(root)
-    shared = root / "0" / f"{_FOCUS_REGION}_0_0_{CHANNELS[0]}.tiff"
-    reader.plane_path = lambda region, fov, channel, z_level, time_point=0: shared
-    dst = tmp_path / "reference_out"
-    summary = write_acquisition_planes(reader, "reference", dst)
-    assert summary["complete"]
-    out_f = dst / "0" / f"{_FOCUS_REGION}_0_0_{CHANNELS[0]}.tiff"
-    assert out_f.stat().st_ino != shared.stat().st_ino
-    np.testing.assert_array_equal(tifffile.imread(out_f), arrays[(0, _SHARPEST[0], CHANNELS[0])])
-
-
-def test_reference_links_every_timepoint_from_its_own_folder(multi_time_point_dataset, tmp_path):
-    from .conftest import N_TIME_POINTS, TIME_SERIES_CHANNELS, TIME_SERIES_REGION
-
-    root, _ = multi_time_point_dataset
-    dst = tmp_path / "reference_out"
-    summary = write_acquisition_planes(open_reader(root), "reference", dst)
-    assert summary["complete"]
-    for t in range(N_TIME_POINTS):
-        for ch in TIME_SERIES_CHANNELS:
-            # Constant planes tie at Tenengrad 0 and the rule keeps the FIRST, z 0.
-            out_f = dst / str(t) / f"{TIME_SERIES_REGION}_0_0_{ch}.tiff"
-            src_f = root / str(t) / f"{TIME_SERIES_REGION}_0_0_{ch}.tiff"
-            assert out_f.stat().st_ino == src_f.stat().st_ino, (t, ch)
-
-
-# ------------------------------------------------------------------ declaration refusals
-
-def test_a_region_operator_is_refused_by_name(squid_dataset, tmp_path):
-    root, _ = squid_dataset
-    with pytest.raises(ValueError, match="stitch.*whole well"):
-        write_acquisition_planes(open_reader(root), "stitch", tmp_path / "out")
+# (The reference/hardlink block — the focus_dataset fixture and the four
+# _link_selected_planes tests — was deleted 2026-08-24 with the shelved `reference`
+# operator and the writer's select_index arm. Git history reinstates.)
 
 
 # ------------------------------------------------------------------ keep-z (decon-shaped)
 
-def test_a_keep_z_operator_writes_every_plane_under_its_own_index(squid_dataset, tmp_path):
+def test_a_keep_z_operator_writes_every_plane_under_its_own_index(squid_dataset, tmp_path,
+                                                                 identity_operator):
     root, arrays = squid_dataset
-    dst = tmp_path / "keepz_out"
-    summary = write_acquisition_planes(open_reader(root), "keepz", dst)
+    dst = tmp_path / "planes_out"
+    summary = write_acquisition_planes(open_reader(root), identity_operator, dst)
     assert summary["complete"] and summary["n_fields_written"] == len(REGIONS) * len(FOVS)
     written = sorted(p.name for p in (dst / "0").iterdir())
     expected = sorted(f"{r}_{f}_{z}_{c}.tiff"
@@ -259,10 +147,11 @@ def test_a_keep_z_operator_writes_every_plane_under_its_own_index(squid_dataset,
         np.testing.assert_array_equal(out, arrays[(REGIONS[0], 0, z, CHANNELS[0])])
 
 
-def test_a_keep_z_save_keeps_the_declared_z_count_and_round_trips(squid_dataset, tmp_path):
+def test_a_keep_z_save_keeps_the_declared_z_count_and_round_trips(squid_dataset, tmp_path,
+                                                                 identity_operator):
     root, arrays = squid_dataset
-    dst = tmp_path / "keepz_out"
-    write_acquisition_planes(open_reader(root), "keepz", dst)
+    dst = tmp_path / "planes_out"
+    write_acquisition_planes(open_reader(root), identity_operator, dst)
     # nz NOT rewritten: the output really has every acquired plane.
     assert (dst / "acquisition.yaml").read_text() == (root / "acquisition.yaml").read_text()
     out = open_reader(dst)
@@ -337,10 +226,11 @@ def test_saving_mip_without_a_destination_defaults_beside_the_source(squid_datas
     assert dst.is_dir() and result.out_path == str(dst)
 
 
-def test_saving_an_operator_that_keeps_z_takes_the_acquisition_format(squid_dataset, tmp_path):
+def test_saving_an_operator_that_keeps_z_takes_the_acquisition_format(squid_dataset, tmp_path,
+                                                                     identity_operator):
     root, arrays = squid_dataset
-    out_dir = tmp_path / f"keepz_{root.name}"
-    result = run_operator_once(open_reader(root), operator="keepz", save=True,
+    out_dir = tmp_path / f"planes_{root.name}"
+    result = run_operator_once(open_reader(root), operator=identity_operator, save=True,
                                owed=len(REGIONS), out_dir=out_dir, n_fovs=None)
     assert out_dir.is_dir() and result.out_path == str(out_dir)
     assert not (out_dir / "plate.ome.zarr").exists()
@@ -386,10 +276,12 @@ def test_the_window_save_toggle_lands_both_formats(qapp, squid_dataset, tmp_path
         win.close()
 
 
-def test_the_gate_is_declaration_driven_not_name_driven(squid_dataset):
+def test_the_gate_is_declaration_driven_not_name_driven(squid_dataset, identity_operator,
+                                                        blob_operator):
     root, _ = squid_dataset
     reader = open_reader(root)
     assert acquisition_format_dst(reader, "mip") == root.parent / f"mip_{root.name}"
-    assert acquisition_format_dst(reader, "keepz") == root.parent / f"keepz_{root.name}"
+    assert (acquisition_format_dst(reader, identity_operator)
+            == root.parent / f"{identity_operator}_{root.name}")
     assert acquisition_format_dst(reader, "stitch") is None     # region operator
-    assert acquisition_format_dst(reader, "spot") is None       # labels
+    assert acquisition_format_dst(reader, blob_operator) is None   # labels

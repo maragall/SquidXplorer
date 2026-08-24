@@ -42,13 +42,11 @@ dependencies = [
     #                             the cache belongs is writing beside the acquisition, and this
     #                             tool promises it never writes into your data folder.
     "pydantic-settings>=2.3",   # declarative CLI (IMA-186), same pattern as the stitcher
-    "scipy>=1.10",              # IMA-223/224/225 plane-ops: ndimage gaussian_filter (the
-    #                             kernel-free Richardson-Lucy) and zoom (the flat-field /
-    #                             background resampling). Imported lazily inside the operators,
+    "scipy>=1.10",              # ndimage gaussian_filter and zoom (resampling); imported lazily
     #                             so the reader/writer path still starts without touching it.
-    "scikit-image>=0.22",       # IMA-224: restoration.rolling_ball — Sternberg's algorithm, i.e.
-    #                             the same one as ImageJ's Subtract Background. Reused, not
-    #                             reimplemented; also the cross-check reference for IMA-223.
+    # scikit-image was dropped 2026-08-24 with the shelved bgsub operator (its one stated
+    # consumer, restoration.rolling_ball). napari declares scikit-image itself, so the frozen
+    # build's collect_all("skimage") in scripts/hcs-viewer.spec still resolves — measured.
 ]
 
 # CORRECTED 2026-08-05. The line that stood here said "No tilefusion dependency" and that was
@@ -184,7 +182,7 @@ stitch = [
 ]
 decon = [
     # squidxplorer/_decon.py -> `import petakit` (PetaKit5D's Richardson-Lucy port). Declared on the
-    # registry as `requires=("petakit",)` for the `decon` and `decon3d` projectors.
+    # registry as `requires=("petakit",)` for the `decon` operator (the volume solve).
     # psfmodels is deliberately NOT listed here: squidxplorer never imports it, petakit does. It is
     # petakit's dependency to declare, and adding it here would be this file guessing at another
     # package's requirements.
@@ -205,11 +203,9 @@ decon = [
     # sources of truth. Raised as an action item; see AI-docs SquidXplorer/action-items.
     "petakit @ https://github.com/maragall/deconvolution/archive/64de19bca7133e9107d182ba4aff10e2ca856888.tar.gz",
 ]
-segment = [
-    # squidxplorer/_cellpose.py and squidxplorer/_spots.py -> `from cellpose import models`.
-    # The only one of the three that is a normal PyPI install.
-    "cellpose>=3.0",
-]
+# (The `segment` extra — cellpose, for the shelved spot/cellpose operators — was deleted
+# 2026-08-24. The declaration test enforces extra <-> group both ways, so the group and the
+# operators leave together. Git history reinstates.)
 
 [project.scripts]
 squidxplorer = "squidxplorer._cli:main"           # headless CLI (IMA-186): MIP a plate from the terminal

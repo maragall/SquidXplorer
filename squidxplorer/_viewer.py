@@ -273,7 +273,7 @@ class PlateWindow(QMainWindow):
         self._cursor.on_problem(lambda msg: self._readout.setText(msg))
         # THE communication backbone, built once and owned here.
         # * _log_bus attaches to the stdlib ROOT logger, so every orchestrated library (tilefusion,
-        #   petakit, bgsub, and the per-run measurement line) appears in the panel with no wiring.
+        #   petakit, and the per-run measurement line) appears in the panel with no wiring.
         # * _activity is the single registry of in-flight work the panel's header reads.
         # * commands is the ONE command surface (squidxplorer._command) — the GUI is now a CALLER of the
         #   same layer the CLI drives, so an agent/test/script says one command to both.
@@ -364,11 +364,11 @@ class PlateWindow(QMainWindow):
             self._op_actions[op.key] = act
         # EVERY OTHER RUNNABLE OPERATOR, off the ENGINE registry. A card is presentation and the
         # engine is capability (`_operations.runnable_operators`), and the gap between the two was
-        # a capability the GUI could not reach at all: `spot` and `cellpose` declare four
-        # parameters each and appeared in no menu, no card and no dropdown, so not one of those
-        # parameters was settable anywhere. These open a panel built from the declaration
-        # (`_param_panel.GenericOperatorPanel`), so this submenu needs no edit when an operator is
-        # added — including one discovered from another package through `squidxplorer._plugins`.
+        # a capability the GUI could not reach at all: a registered operator with declared
+        # parameters could appear in no menu, no card and no dropdown. These open a panel built
+        # from the declaration (`_param_panel.GenericOperatorPanel`), so this submenu needs no
+        # edit when an operator is added — including one discovered from another package through
+        # `squidxplorer._plugins`.
         self._declared_menu = proc_menu.addMenu("&From their declaration")
         self._declared_menu.setToolTip(
             "Operators with no hand-written panel. Their controls are built from the params= they "
@@ -1690,9 +1690,8 @@ class PlateWindow(QMainWindow):
            than parameter entry (``StitcherPanel`` converts units and refuses a plane-op;
            ``DeconQCPanel`` runs a QC loop and publishes a picture into pane 3), so they win.
         2. otherwise a panel built FROM THE DECLARATION — :class:`squidxplorer._param_panel
-           .GenericOperatorPanel` over the operator's ``params``. This is how ``spot``, ``cellpose``
-           and an operator discovered from somebody else's package get real controls without an
-           edit here.
+           .GenericOperatorPanel` over the operator's ``params``. This is how an operator
+           discovered from somebody else's package gets real controls without an edit here.
 
         This method used to end at step 1 with a bare ``if op is not None:``, so a key the card
         table did not know made the click land on NOTHING: no tab, no error, no line in the
@@ -1729,11 +1728,6 @@ class PlateWindow(QMainWindow):
 
     def _build_mip_tab(self) -> QWidget:
         return self._build_run_tab(_OPERATIONS_BY_KEY["mip"])
-
-    def _build_reference_tab(self) -> QWidget:
-        # The other z-reduction. `_build_run_tab` is ONE builder for every z-reducer, so the
-        # focus-reference-plane operator needs no tab code of its own -- only this hand-off.
-        return self._build_run_tab(_OPERATIONS_BY_KEY["reference"])
 
     def _build_stitch_tab(self) -> QWidget:
         """maragall/stitcher's control surface, in pane 1 (IMA-decon-stitch-ui).
@@ -1793,160 +1787,120 @@ class PlateWindow(QMainWindow):
         """
         self._open_op_tab(f"qc:{title}", title, lambda w=widget: w)
 
-    def _build_bgsub_tab(self) -> QWidget:
-        return self._build_plane_op_tab(_OPERATIONS_BY_KEY["bgsub"])
+    def _build_illumination_tab(self) -> QWidget:
+        """The illumination-profile loader and estimator THAT FEED STITCH.
 
-    def _build_flatfield_tab(self) -> QWidget:
-        # The one plane-op that cannot run without an argument: a flat-field with no illumination
-        # profile has no sane default (an identity field would silently do nothing while the UI
-        # said "corrected"), so the operator raises until one is loaded. The chooser is that load.
-        return self._build_plane_op_tab(_OPERATIONS_BY_KEY["flatfield"], profile_chooser=True)
-
-    def _build_plane_op_tab(self, op, profile_chooser: bool = False) -> QWidget:
-        """Generic PLANE-OP tab (IMA-223/224/225): preview on a subset, never save.
-
-        A plane-op maps plane -> plane and does NOT consume z (IMA-210), so its output keeps the
-        z-stack at full depth. This builder omits the "Run on the whole plate" / destination half
-        of _build_run_tab because write_plate's _validate_image accepted Z == 1 only, so there was
-        nothing to write -- and it said "the moment the OME-Zarr writer learns Z > 1, this method
-        can simply forward to _build_run_tab and disappear."
-
-        THAT MOMENT HAS PASSED. IMA-277 taught _validate_image that a plane-op's full-depth result
-        is a real result, and per-plane fusion taught stitch_region to fuse every z. So the save
-        path exists and only this card has not been given it: preview-only is now a GUI GAP TO
-        CLOSE, not a contract. Do not cite Z == 1 to justify it.
-
-        The preview path itself is unchanged and needs no worker edit: _OperatorWorker's save=False
-        branch streams the per-FOV loop, and _on_well already indexes image[0, :, 0] -- for a plane-op
-        that is the FIRST z-plane, corrected, which is exactly what a preview should show.
+        Not an operator tab: the standalone `flatfield` operator (and its preview) was shelved
+        2026-08-24 with `bgsub` and `reference`, but stitch's read path still corrects tiles
+        with whatever this tab installs (`_flatfield.set_profiles` ->
+        `_stitch._selected_profiles`). Load a stored per-channel .npy, or estimate live from
+        plate tiles with the stitcher's BaSiC estimator (tilefusion) — per CHANNEL, installed
+        only for the channel it measured.
         """
+        op = _OPERATIONS_BY_KEY["illumination"]
         w, v = self._op_tab_shell(op.label, op.blurb)
         v.addWidget(_hline())
 
-        state = {"profile": None}
-        if profile_chooser:
-            prof_lbl = QLabel("(no illumination profile loaded)")
-            prof_lbl.setWordWrap(True)
-            prof_lbl.setStyleSheet("color:#8b98ad;font-size:12px;")
+        prof_lbl = QLabel("(no illumination profile loaded)")
+        prof_lbl.setWordWrap(True)
+        prof_lbl.setStyleSheet("color:#8b98ad;font-size:12px;")
 
-            def load_profile():
-                path, _ = QFileDialog.getOpenFileName(
-                    self, "Load illumination profile", "", "Illumination profile (*.npy)")
-                if not path:
-                    return
-                from squidxplorer import FlatfieldProfile
-                from squidxplorer._flatfield import set_profiles
-                # EVERY CHANNEL, not plane 0. A stored profile is (C, Y, X) with one genuinely
-                # different gain field per channel; `from_npy(path)` defaults to channel 0, so
-                # this button used to correct 488, 561 and 638 with the 405 field — 99.8% of
-                # pixels changed, by up to 1799 counts, on the 10x set. per_channel_from_npy is
-                # the one place a channel NAME becomes a plane index of that file.
-                names = [c["name"] for c in (self._meta or {}).get("channels", [])]
-                if not names:
-                    prof_lbl.setText("no acquisition open, so nothing says which channel each "
-                                     "field in the file belongs to. Open a plate first.")
-                    return
-                try:
-                    profiles = FlatfieldProfile.per_channel_from_npy(path, names)
-                except Exception as exc:                     # bad file -> say so, keep the tab alive
-                    prof_lbl.setText(f"could not load {Path(path).name}: {exc}")
-                    return
-                frame = tuple(self._reader.metadata["frame_shape"]) if self._reader else None
-                shapes = sorted({p.shape for p in profiles.values()})
-                if frame is not None and shapes != [frame]:
-                    prof_lbl.setText(f"profile is {shapes[0]}, this acquisition's frames are "
-                                     f"{frame} -- wrong profile for this plate")
-                    return
-                set_profiles(profiles)
-                state["profile"] = path
-                prof_lbl.setText(f"{Path(path).name}  {len(profiles)} channel(s)  {shapes[0]}")
-                prev.setEnabled(True)
+        def load_profile():
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Load illumination profile", "", "Illumination profile (*.npy)")
+            if not path:
+                return
+            from squidxplorer import FlatfieldProfile
+            from squidxplorer._flatfield import set_profiles
+            # EVERY CHANNEL, not plane 0. A stored profile is (C, Y, X) with one genuinely
+            # different gain field per channel; `from_npy(path)` defaults to channel 0, so
+            # this button used to correct 488, 561 and 638 with the 405 field — 99.8% of
+            # pixels changed, by up to 1799 counts, on the 10x set. per_channel_from_npy is
+            # the one place a channel NAME becomes a plane index of that file.
+            names = [c["name"] for c in (self._meta or {}).get("channels", [])]
+            if not names:
+                prof_lbl.setText("no acquisition open, so nothing says which channel each "
+                                 "field in the file belongs to. Open a plate first.")
+                return
+            try:
+                profiles = FlatfieldProfile.per_channel_from_npy(path, names)
+            except Exception as exc:                     # bad file -> say so, keep the tab alive
+                prof_lbl.setText(f"could not load {Path(path).name}: {exc}")
+                return
+            frame = tuple(self._reader.metadata["frame_shape"]) if self._reader else None
+            shapes = sorted({p.shape for p in profiles.values()})
+            if frame is not None and shapes != [frame]:
+                prof_lbl.setText(f"profile is {shapes[0]}, this acquisition's frames are "
+                                 f"{frame} -- wrong profile for this plate")
+                return
+            set_profiles(profiles)
+            prof_lbl.setText(f"{Path(path).name}  {len(profiles)} channel(s)  {shapes[0]}")
 
-            pick_prof = QPushButton("Load illumination profile (.npy)…")
-            pick_prof.setStyleSheet(_BTN_QSS)
-            pick_prof.clicked.connect(load_profile)
-            v.addWidget(pick_prof)
+        pick_prof = QPushButton("Load illumination profile (.npy)…")
+        pick_prof.setStyleSheet(_BTN_QSS)
+        pick_prof.clicked.connect(load_profile)
+        v.addWidget(pick_prof)
 
-            # ESTIMATE LIVE from the plate (maragall/stitcher's tilefusion BaSiC), no .npy needed.
-            # Julio: flat-field computation comes from maragall/stitcher and must run from tiles.
-            est_row = QHBoxLayout(); est_row.setSpacing(6)
-            est_row.addWidget(QLabel("channel"))
-            est_channel = QComboBox(); est_channel.setStyleSheet(_COMBO_QSS)
-            est_channel.addItems([c["name"] for c in (self._meta or {}).get("channels", [])])
-            est_row.addWidget(est_channel, 1)
-            est_row.addWidget(QLabel("tiles"))
-            est_tiles = QSpinBox(); est_tiles.setRange(3, 256); est_tiles.setValue(48)
-            est_tiles.setStyleSheet(_COMBO_QSS)
-            est_row.addWidget(est_tiles)
-            v.addLayout(est_row)
+        # ESTIMATE LIVE from the plate (maragall/stitcher's tilefusion BaSiC), no .npy needed.
+        # Julio: flat-field computation comes from maragall/stitcher and must run from tiles.
+        est_row = QHBoxLayout(); est_row.setSpacing(6)
+        est_row.addWidget(QLabel("channel"))
+        est_channel = QComboBox(); est_channel.setStyleSheet(_COMBO_QSS)
+        est_channel.addItems([c["name"] for c in (self._meta or {}).get("channels", [])])
+        est_row.addWidget(est_channel, 1)
+        est_row.addWidget(QLabel("tiles"))
+        est_tiles = QSpinBox(); est_tiles.setRange(3, 256); est_tiles.setValue(48)
+        est_tiles.setStyleSheet(_COMBO_QSS)
+        est_row.addWidget(est_tiles)
+        v.addLayout(est_row)
 
-            est_btn = QPushButton("Estimate from plate")
-            est_btn.setStyleSheet(_BTN_QSS)
-            est_btn.setToolTip("Estimate the illumination profile LIVE from a spread of plate tiles "
-                               "with the stitcher's BaSiC estimator (tilefusion). No .npy required.")
+        est_btn = QPushButton("Estimate from plate")
+        est_btn.setStyleSheet(_BTN_QSS)
+        est_btn.setToolTip("Estimate the illumination profile LIVE from a spread of plate tiles "
+                           "with the stitcher's BaSiC estimator (tilefusion). No .npy required.")
 
-            def estimate_from_plate():
-                if self._reader is None or self._meta is None:
-                    prof_lbl.setText("no acquisition open to estimate a flat-field from.")
-                    return
-                ch = est_channel.currentText()
-                est_btn.setEnabled(False)
-                prof_lbl.setText(f"estimating illumination for {ch} from the plate…")
-                w = _FlatfieldWorker(self._reader, self._meta, ch,
-                                     max_tiles=est_tiles.value(), parent=self)
+        def estimate_from_plate():
+            if self._reader is None or self._meta is None:
+                prof_lbl.setText("no acquisition open to estimate a flat-field from.")
+                return
+            ch = est_channel.currentText()
+            est_btn.setEnabled(False)
+            prof_lbl.setText(f"estimating illumination for {ch} from the plate…")
+            w = _FlatfieldWorker(self._reader, self._meta, ch,
+                                 max_tiles=est_tiles.value(), parent=self)
 
-                def _ok(profile):
-                    # Installed for THE CHANNEL IT WAS ESTIMATED FROM, and only that one. The
-                    # worker reads tiles of `ch` and nothing else, so it has measured nothing
-                    # about the other channels; a run over them now refuses BY NAME instead of
-                    # correcting them with this field.
-                    from squidxplorer._flatfield import active_profiles, set_profile
-                    set_profile(profile, channel=ch)
-                    state["profile"] = f"estimated:{ch}"
-                    others = [c["name"] for c in (self._meta or {}).get("channels", [])
-                              if c["name"] not in active_profiles()]
-                    missing = (f"  (no profile yet for {', '.join(others)} — estimate each one)"
-                               if others else "")
-                    prof_lbl.setText(f"estimated from plate ({ch})  {profile.shape}{missing}")
-                    prev.setEnabled(True)
-                    est_btn.setEnabled(True)
+            def _ok(profile):
+                # Installed for THE CHANNEL IT WAS ESTIMATED FROM, and only that one. The
+                # worker reads tiles of `ch` and nothing else, so it has measured nothing
+                # about the other channels; a stitch over them estimates its own instead of
+                # correcting them with this field.
+                from squidxplorer._flatfield import active_profiles, set_profile
+                set_profile(profile, channel=ch)
+                others = [c["name"] for c in (self._meta or {}).get("channels", [])
+                          if c["name"] not in active_profiles()]
+                missing = (f"  (no profile yet for {', '.join(others)} — estimate each one)"
+                           if others else "")
+                prof_lbl.setText(f"estimated from plate ({ch})  {profile.shape}{missing}")
+                est_btn.setEnabled(True)
 
-                def _bad(msg):
-                    prof_lbl.setText(str(msg))
-                    est_btn.setEnabled(True)
+            def _bad(msg):
+                prof_lbl.setText(str(msg))
+                est_btn.setEnabled(True)
 
-                # Registered on its slot (so it is not GC'd mid-run AND teardown can see it),
-                # wired and started through the one launch seam.
-                _launch_worker(self, w, slot="_flatfield_worker", on_done=_ok, on_problem=_bad,
-                               signals={"stage": lambda s: prof_lbl.setText(str(s))})
+            # Registered on its slot (so it is not GC'd mid-run AND teardown can see it),
+            # wired and started through the one launch seam.
+            _launch_worker(self, w, slot="_flatfield_worker", on_done=_ok, on_problem=_bad,
+                           signals={"stage": lambda s: prof_lbl.setText(str(s))})
 
-            est_btn.clicked.connect(estimate_from_plate)
-            v.addWidget(est_btn)
-            v.addWidget(prof_lbl)
-            v.addWidget(_hline())
+        est_btn.clicked.connect(estimate_from_plate)
+        v.addWidget(est_btn)
+        v.addWidget(prof_lbl)
 
-        prev_lbl = QLabel("Preview (subset)")
-        prev_lbl.setStyleSheet("color:#57606a;font-size:10px;font-weight:800;letter-spacing:1.5px;padding-top:6px;")
-        v.addWidget(prev_lbl)
-        n_wells = max(1, len(self._order))
-        row = QHBoxLayout(); row.setSpacing(6)
-        row.addWidget(QLabel("First"))
-        spin = QSpinBox(); spin.setRange(1, n_wells); spin.setValue(min(4, n_wells))
-        spin.setStyleSheet(_COMBO_QSS)
-        row.addWidget(spin); row.addWidget(QLabel("wells")); row.addStretch(1)
-        v.addLayout(row)
-
-        prev = QPushButton("Preview"); prev.setStyleSheet(_BTN_QSS)
-        prev.setEnabled(not profile_chooser)          # flat-field waits for its profile
-        prev.clicked.connect(
-            lambda: self.run_operator(op.key, out_parent=None,
-                                      regions=self._order[:spin.value()], save=False))
-        v.addWidget(prev)
-
-        note = QLabel("Preview only: this operator keeps the z-stack at full depth, and the "
-                      "OME-Zarr writer accepts one z per field today, so there is nothing to "
-                      "save yet. The raw acquisition is never modified.")
-        note.setWordWrap(True); note.setStyleSheet("color:#8b98ad;font-size:11px;")
+        note = QLabel("Profiles installed here are what a stitch run's illumination correction "
+                      "uses when it covers every channel of the run; otherwise stitch estimates "
+                      "its own from the tiles. The raw acquisition is never modified.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#8b98ad;font-size:11px;")
         v.addWidget(note)
         v.addStretch(1)
         return w
@@ -2269,8 +2223,8 @@ class PlateWindow(QMainWindow):
     # times into a slot that could only return. The timer went with them.
     #
     # ``_on_detect_nuclei`` had no call site at all: its only entry point was the pane's own
-    # ``detect_button``. The live homes for both jobs are ``RegionViewer._load_mosaic`` and
-    # ``RegionViewer._detect_nuclei``, each on a window that actually has napari layers.
+    # ``detect_button``. The live home for the mosaic job is ``RegionViewer._load_mosaic``, on a
+    # window that actually has napari layers. (Spot detection itself was shelved 2026-08-24.)
     #
     # ``_bind_napari_contrast`` went with them for the same reason at one remove: it swept every
     # open window and re-offered it to ``_bind_window_contrast`` below, and its only caller was
@@ -2688,9 +2642,8 @@ class PlateWindow(QMainWindow):
             self._readout.setText("already processing — let the current run finish first")
             return
         # IMA-226: gate on the ENGINE registry, not on the card table. `_OPERATIONS_BY_KEY[key]`
-        # raised a bare KeyError for a registered operator with no card (`reference` then, `spot`
-        # and `decon3d` now) and let a card that is not an operator through to die
-        # inside the engine instead.
+        # raised a bare KeyError for a registered operator with no card and let a card that is
+        # not an operator through to die inside the engine instead.
         # Refuse BY NAME here, in the readout, the same way an unknown region is refused below.
         if key not in runnable_operators():
             self._readout.setText(
@@ -2716,37 +2669,6 @@ class PlateWindow(QMainWindow):
                 and self._bulk_all_box.isChecked()):
             self._run_bulk_over_set(key, out_parent, operator_kwargs)
             return
-        # FLAT-FIELD needs an illumination profile PER CHANNEL. With none at all, the operator
-        # raises per field and the plate fills with red x's (Julio: "flatfield shows as x's"). If
-        # nothing is installed, AUTO-ESTIMATE one from a spread sample of plate tiles (tilefusion
-        # BaSiC, off-thread) and re-run once it lands.
-        #
-        # The estimate is for the FIRST CHANNEL and is installed for that channel only: the worker
-        # reads that channel's tiles and has measured nothing about the others, so a run over them
-        # now refuses by name rather than correcting them with this field (which was wrong by up
-        # to 1799 counts on the 10x set). The flat-field tab estimates the remaining channels.
-        if key == "flatfield":
-            import squidxplorer._flatfield as _ff
-            if not _ff.active_profiles():
-                if getattr(self, "_ff_est_worker", None) is not None and self._ff_est_worker.isRunning():
-                    self._readout.setText("flat-field: estimating an illumination profile…")
-                    return
-                chan = self._meta["channels"][0]["name"]
-                w = _FlatfieldWorker(self._reader, self._meta, chan, parent=self)
-
-                def _profile_ready(profile, k=key, regs=regions, sv=save, op=out_parent, c=chan):
-                    _ff.set_profile(profile, channel=c)
-                    self._readout.setText("flat-field: profile ready — running.")
-                    self.run_operator(k, out_parent=op, regions=regs, save=sv)
-
-                self._readout.setText(f"flat-field: estimating an illumination profile from {chan} "
-                                      "(tilefusion BaSiC)…")
-                _launch_worker(
-                    self, w, slot="_ff_est_worker", on_done=_profile_ready,
-                    on_problem=lambda m: self._readout.setText(
-                        f"flat-field estimate failed: {m}"),
-                    signals={"stage": self._readout.setText})
-                return
         label = operator_label(key)
         # Scope the run. An explicit `regions` list still wins (the preview spinner builds one, and
         # so do tests). Otherwise the SCOPE SELECTOR on this pane decides — one control panel, one

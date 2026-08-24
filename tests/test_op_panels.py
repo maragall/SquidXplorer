@@ -96,27 +96,25 @@ def test_the_kwargs_are_accepted_by_stitch_region_itself():
 # the stitch guard, surfaced BEFORE the run
 # ---------------------------------------------------------------------------------------
 
-def test_a_labels_operator_is_refused_with_a_sentence_naming_the_way_out():
+def test_a_labels_operator_is_refused_with_a_sentence_naming_the_way_out(blob_operator):
     """``stitch_region`` raises for a labels operator; the panel asks the same registry first
     rather than let the user discover it after a multi-minute run."""
-    why = stitch_refusal("cellpose")
+    why = stitch_refusal(blob_operator)
     assert why is not None
-    assert "cellpose" in why
+    assert blob_operator in why
     assert "label" in why.lower()
     assert "per FOV" in why or "intensity" in why    # it must say what to do instead
 
 
-def test_a_plane_op_is_no_longer_refused():
+def test_an_intensity_operator_is_not_refused(identity_operator):
     """Per-plane fusion made a plane-op stitchable; a pre-check outliving that change would be
     the engine's answer, wrong, delivered with authority."""
+    assert stitch_refusal(identity_operator) is None
     assert stitch_refusal("decon") is None
-    assert stitch_refusal("bgsub") is None
-    assert stitch_refusal("flatfield") is None
 
 
 def test_a_z_reducer_is_not_refused():
     assert stitch_refusal("mip") is None
-    assert stitch_refusal("decon3d") is None
 
 
 def test_an_unknown_operator_is_named_rather_than_crashing_the_panel():
@@ -272,17 +270,17 @@ def test_turning_registration_off_disables_the_registration_only_controls(qapp):
     assert p.rel_spin.isEnabled()
 
 
-def test_a_labels_z_operator_disables_the_run_button_and_says_why(qapp):
+def test_a_labels_z_operator_disables_the_run_button_and_says_why(qapp, blob_operator):
     host = _Host()
     p = StitcherPanel(host)
-    p.z_operator_combo.setCurrentText("cellpose")
+    p.z_operator_combo.setCurrentText(blob_operator)
     assert not p.run_btn.isEnabled()
     assert host.said and "label" in host.said[-1].lower()
     p.z_operator_combo.setCurrentText("mip")
     assert p.run_btn.isEnabled()
 
 
-def test_a_plane_op_z_operator_leaves_the_run_button_enabled(qapp):
+def test_an_intensity_z_operator_leaves_the_run_button_enabled(qapp):
     """The button follows the ENGINE, not a guard the engine outgrew."""
     host = _Host()
     p = StitcherPanel(host)
@@ -290,12 +288,31 @@ def test_a_plane_op_z_operator_leaves_the_run_button_enabled(qapp):
     assert p.run_btn.isEnabled()
 
 
-def test_the_run_handler_itself_refuses_labels_not_just_the_disabled_button(qapp):
+def test_keep_every_plane_is_offered_and_spells_z_operator_none(qapp):
+    """The shelved `keepz` identity's replacement: the combo's label maps to z_operator=None —
+    every acquired plane fused unchanged — and never reaches the registry as a name."""
+    from squidxplorer._op_panels import KEEP_EVERY_PLANE
+
+    host = _Host()
+    p = StitcherPanel(host)
+    labels = [p.z_operator_combo.itemText(i) for i in range(p.z_operator_combo.count())]
+    assert KEEP_EVERY_PLANE in labels
+    assert "keepz" not in labels
+    p.z_operator_combo.setCurrentText(KEEP_EVERY_PLANE)
+    assert p.run_btn.isEnabled(), host.said
+    p._run()
+    (key, kw), = host.calls
+    assert key == "stitch"
+    assert kw["operator_kwargs"]["z_operator"] is None
+
+
+def test_the_run_handler_itself_refuses_labels_not_just_the_disabled_button(qapp,
+                                                                            blob_operator):
     """Exercises the SECOND defence: clicking a disabled button never enters the handler, so
     the guard inside ``_run`` must refuse independently of the button's enabled state."""
     host = _Host()
     p = StitcherPanel(host)
-    p.z_operator_combo.setCurrentText("cellpose")
+    p.z_operator_combo.setCurrentText(blob_operator)
     p.run_btn.setEnabled(True)                  # simulate reaching _run some other way
     p._run()
     assert host.calls == [], "the run must not start"
@@ -644,17 +661,11 @@ def test_a_default_this_panel_cannot_draw_is_named_rather_than_guessed():
 # -- the refusal ------------------------------------------------------------------------
 
 def test_a_chain_expression_key_is_refused_naming_the_removal():
-    why = panel_refusal("bgsub + spot")
+    why = panel_refusal("demo + blob")
     assert why is not None and "chaining was removed" in why
 
-def test_a_parameterised_operator_is_not_refused():
-    assert panel_refusal("spot") is None
-    # cellpose is the [segment] extra, not installed by `.[gui,test]`; on a clean venv it
-    # correctly refuses "needs cellpose, which is not installed". Guarded rather than
-    # deleted, because when the extra IS installed this pins that requires= being satisfied
-    # still yields a panel.
-    pytest.importorskip("cellpose")
-    assert panel_refusal("cellpose") is None
+def test_a_parameterised_operator_is_not_refused(blob_operator):
+    assert panel_refusal(blob_operator) is None
 
 
 def test_a_region_operator_that_declares_no_params_is_refused_for_that_reason():
@@ -669,8 +680,8 @@ def test_a_region_operator_that_declares_no_params_is_refused_for_that_reason():
     why = panel_refusal("bare_region_op_for_panels")
     assert why and "declares no params" in why
 
-    assert panel_refusal("coordinate") is None, (
-        "coordinate declares params now; a generated panel must serve it, not a refusal")
+    assert panel_refusal("register") is None, (
+        "register declares params; a generated panel must serve it, not a refusal")
 
 
 def test_a_key_that_is_not_an_operator_is_refused_by_name():
@@ -701,39 +712,39 @@ def test_an_undrawable_parameter_refuses_the_whole_panel_naming_the_parameter():
 
 # -- the Qt half ------------------------------------------------------------------------
 
-def test_the_panel_builds_one_widget_per_declared_parameter(qapp):
+def test_the_panel_builds_one_widget_per_declared_parameter(qapp, blob_operator):
     from squidxplorer._engine import operator_params
 
-    p = GenericOperatorPanel(_Host(), "spot")
-    assert sorted(p.widgets) == sorted(param.name for param in operator_params("spot"))
-    assert len(p.widgets) == 4
+    p = GenericOperatorPanel(_Host(), blob_operator)
+    assert sorted(p.widgets) == sorted(param.name for param in operator_params(blob_operator))
+    assert len(p.widgets) == 3
 
 
-def test_each_widget_starts_at_the_declared_default(qapp):
+def test_each_widget_starts_at_the_declared_default(qapp, blob_operator):
     """An untouched panel must launch what the operator ships with — same rule
     ``STITCH_DEFAULTS`` is held to."""
     from squidxplorer._engine import operator_params
 
-    p = GenericOperatorPanel(_Host(), "spot")
-    declared = {param.name: param.default for param in operator_params("spot")}
+    p = GenericOperatorPanel(_Host(), blob_operator)
+    declared = {param.name: param.default for param in operator_params(blob_operator)}
     assert p.kwargs() == declared
 
 
-def test_the_blurb_becomes_the_tooltip(qapp):
+def test_the_blurb_becomes_the_tooltip(qapp, blob_operator):
     from squidxplorer._engine import operator_params
 
-    blurbs = {param.name: param.blurb for param in operator_params("spot")}
-    p = GenericOperatorPanel(_Host(), "spot")
+    blurbs = {param.name: param.blurb for param in operator_params(blob_operator)}
+    p = GenericOperatorPanel(_Host(), blob_operator)
     assert p.widgets, "the panel drew no widgets"
     for name, widget in p.widgets.items():
         assert blurbs[name], f"{name} declares no blurb, so the tooltip claim is untested"
         assert widget.toolTip() == blurbs[name]
 
 
-def test_a_value_read_back_keeps_the_declared_type(qapp):
+def test_a_value_read_back_keeps_the_declared_type(qapp, blob_operator):
     """A ``min_area_px`` arriving as 30.0 where 30 was declared would survive all the way to
     a comparison against an integer pixel count."""
-    p = GenericOperatorPanel(_Host(), "spot")
+    p = GenericOperatorPanel(_Host(), blob_operator)
     p.widgets["min_area_px"].setValue(400)
     kwargs = p.kwargs()
     assert kwargs["min_area_px"] == 400 and isinstance(kwargs["min_area_px"], int)
@@ -741,35 +752,38 @@ def test_a_value_read_back_keeps_the_declared_type(qapp):
     assert isinstance(kwargs["split_touching"], bool)
 
 
-def test_the_widget_s_value_travels_to_run_operator_through_operator_kwargs(qapp):
+def test_the_widget_s_value_travels_to_run_operator_through_operator_kwargs(qapp,
+                                                                            blob_operator):
     """The SAME argument StitcherPanel uses, so this is an already-tested path."""
     host = _Host()
-    p = GenericOperatorPanel(host, "spot")
+    p = GenericOperatorPanel(host, blob_operator)
     p.widgets["min_area_px"].setValue(400)
     p.widgets["split_touching"].setChecked(False)
     p.run_btn.click()
     key, kw = host.calls[0]
-    assert key == "spot"
+    assert key == blob_operator
     assert kw["operator_kwargs"]["min_area_px"] == 400
     assert kw["operator_kwargs"]["split_touching"] is False
     assert kw["save"] is False
 
 
-def test_every_kwarg_the_panel_emits_is_a_parameter_the_operator_accepts(qapp):
+def test_every_kwarg_the_panel_emits_is_a_parameter_the_operator_accepts(qapp,
+                                                                          blob_operator):
     """The panel's output must survive ``Operator.bind``, which refuses an unknown name loud."""
     from squidxplorer import bind_operator
 
     host = _Host()
-    p = GenericOperatorPanel(host, "spot")
+    p = GenericOperatorPanel(host, blob_operator)
     p.widgets["min_area_px"].setValue(80)
     p.run_btn.click()
-    bind_operator("spot", host.calls[0][1]["operator_kwargs"])   # raises if a name is wrong
+    bind_operator(blob_operator, host.calls[0][1]["operator_kwargs"])   # raises if wrong
 
 
-def test_a_plane_op_is_offered_preview_only_and_the_choice_comes_off_consumes(qapp):
-    """``spot`` keeps z at full depth, so there is no plate to save. Read off ``consumes``,
+def test_a_plane_op_is_offered_preview_only_and_the_choice_comes_off_consumes(qapp,
+                                                                               blob_operator):
+    """A plane-op keeps z at full depth, so there is no plate to save. Read off ``consumes``,
     never the name."""
-    p = GenericOperatorPanel(_Host(), "spot")
+    p = GenericOperatorPanel(_Host(), blob_operator)
     assert p._can_save is False
     assert p.save_btn is None                # not built at all, not built-and-hidden
 

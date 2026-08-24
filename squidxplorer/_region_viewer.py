@@ -330,7 +330,6 @@ class RegionViewer(QMainWindow):
         self._slider = None
         self._cursor = None
         self._native3d = None
-        self._spot_worker = None
         self._focus_worker = None
         self._video_worker = None
         self._png_worker = None
@@ -480,18 +479,6 @@ class RegionViewer(QMainWindow):
             self._install_canvas_loupe(pane)
         except Exception as exc:                          # noqa: BLE001 - a magnifier, never fatal
             log.debug("view %s could not wire the canvas loupe: %s", self.window_id, exc)
-
-        try:
-            ch_combo = getattr(pane, "detect_channel", None)
-            if ch_combo is not None and ch_combo.count() == 0:
-                for c in (self._meta or {}).get("channels", []):
-                    ch_combo.addItem(str(c["name"]))
-            btn = getattr(pane, "detect_button", None)
-            if btn is not None:
-                btn.setEnabled(True)
-                btn.clicked.connect(self._detect_nuclei)
-        except Exception:                                # noqa: BLE001 - detection stays optional
-            pass
 
         # EVERYTHING WINDOW-SCOPED lives in napari's LEFT column, above the layer controls (UI
         # feedback 2026-08-19: "free up the viewer space to the top" — no full-width top dock;
@@ -749,14 +736,6 @@ class RegionViewer(QMainWindow):
         # (Julio, 2026-08-19) and the two-button LUT clipboard lives in the 2D/3D·ROI block.
         pv.addWidget(op_box)
 
-        # THE DETECT ROW (UI feedback 2026-08-17 "Move to controls window", landed with this
-        # dock): the pane BUILDS it (`_napari_pane` exposes `detect_row` for exactly this) and the
-        # operator surface SHOWS it. The wiring in `_build` is untouched — same combo, same button.
-        pane = self._pane
-        detect_row = getattr(pane, "detect_row", None) if pane is not None else None
-        if detect_row is not None:
-            pv.addWidget(detect_row)
-
         self._op_panel = panel
         self._refresh_controls_note()
         return panel
@@ -821,6 +800,8 @@ class RegionViewer(QMainWindow):
                 return {}
         except Exception:                        # noqa: BLE001 - an unknown key: leave it alone
             return {}
+        if "z_operator" in current and current["z_operator"] is None:
+            return {}                            # already keeping every plane, on purpose
         chosen = str(current.get("z_operator") or "")
         from squidxplorer._engine import Z_REDUCER, operator_consumes
 
@@ -831,8 +812,9 @@ class RegionViewer(QMainWindow):
         if not reduces:
             return {}
         self._say(f"3D: stitching all {int((self._meta or {}).get('n_z') or 1)} z-planes "
-                  f"(z operator 'keepz') — one pose graph, every plane fused from it.")
-        return {"z_operator": "keepz"}
+                  f"(z_operator=None, every plane kept) — one pose graph, every plane fused "
+                  f"from it.")
+        return {"z_operator": None}
 
     def set_render_mode(self, mode: str) -> None:
         """Record whether this window is a PLANE or a VOLUME, and repaint what says so."""
@@ -1395,128 +1377,8 @@ class RegionViewer(QMainWindow):
         if gone:
             self._say(f"dropped the {', '.join(gone)} layer(s): {why}")
 
-    def _spot_source(self):
-        """The (channel, raw layer) to detect nuclei on, or (None, None) with nothing to segment."""
-        pane = self._pane
-        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
-        if mosaic is None:
-            return None, None
-        v = self._napari_viewer()
-        active = getattr(getattr(v, "layers", None), "selection", None)
-        active_layer = getattr(active, "active", None) if active is not None else None
-        for c in (self._meta or {}).get("channels", []):
-            name = c["name"]
-            layer = mosaic.find(_RAW_OP, name)
-            if layer is None:
-                continue
-            if active_layer is not None and layer is active_layer:
-                return name, layer
-        for c in (self._meta or {}).get("channels", []):
-            name = c["name"]
-            layer = mosaic.find(_RAW_OP, name)
-            if layer is not None:
-                return name, layer
-        return None, None
-
-    def _detect_nuclei(self):
-        """Detect nuclei (Cellpose) on THIS view's MIP, off the GUI thread, and overlay the mask."""
-        if self._spot_worker is not None and self._spot_worker.isRunning():
-            self._say("nuclei detection is already running in this window.")
-            return
-        channel, layer = None, None
-        pane = self._pane
-        picker = getattr(pane, "detect_channel", None) if pane is not None else None
-        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
-        if picker is not None and mosaic is not None and picker.currentText():
-            channel = picker.currentText()
-            layer = mosaic.find(_RAW_OP, channel)
-        if layer is None:
-            channel, layer = self._spot_source()
-        if layer is None:
-            self._say("show a region in this view first, then detect nuclei.")
-            return
-        try:
-            from squidxplorer._workers import _SpotWorker
-            from squidxplorer._spots import SpotParams
-            from squidxplorer._workers import nuclei_operator
-        except Exception as exc:                          # noqa: BLE001
-            self._say(f"nuclei detection unavailable: {exc}")
-            return
-        region = self._cursor.region if self._cursor is not None else (
-            self._regions[0] if self._regions else "")
-        # The registry picks the algorithm (cellpose when its requires are importable, else the
-        # watershed), and the SAME name labels the action, sources the panel's values and runs —
-        # the label used to say cellpose whichever ran, and the params were hardcoded defaults.
-        algo_name, segment = nuclei_operator()
-        from squidxplorer._engine import operator_params
-
-        declared = {p.name for p in operator_params(algo_name)}
-        panel = self._plate_operator_kwargs(algo_name)
-        params = SpotParams(**{k: v for k, v in panel.items() if k in declared})
-        action = f"nuclei({algo_name}, {channel})"
-        where = self.address()
-        began = time.monotonic()
-        data = layer.data
-        if self._roi_bbox is not None:
-            from squidxplorer._mosaic_source import mosaic_bbox_um
-            from squidxplorer._napari_view import pyramid_levels
-
-            region_bbox = mosaic_bbox_um(self._meta or {}, region)
-            if region_bbox is not None:
-                cropped = _crop_levels_to_bbox(list(pyramid_levels(data)), region_bbox,
-                                               self._roi_bbox)
-                if cropped is not None:
-                    data = cropped[0]
-                    self._say("detecting on the ROI only — the box you drew, not the whole well.")
-        w = _SpotWorker(region, channel, data, None, None, params, parent=self,
-                        algorithm=(algo_name, segment))
-        self.log.started(action, address=where)
-        # Off the DECLARATION, not the name: an algorithm with requires= is the deep-learning
-        # kind whose first run fetches weights; the built-in watershed declares none.
-        from squidxplorer._engine import operator_requires
-
-        weights = " — first run downloads weights…" if operator_requires(algo_name) else "…"
-        self._echo(f"detecting nuclei ({algo_name}) on the {channel} MIP{weights}")
-        _launch_worker(
-            self, w, slot="_spot_worker",
-            # `problem` keeps its subscriber ORDER: the console's failed line, then the echo.
-            on_problem=[lambda m, a=action, d=where: self.log.failed(a, str(m), address=d),
-                        self._echo],
-            signals={
-                "ready": self._on_nuclei_ready,
-                "finished_count": lambda r, c, n, a=action, d=where, t0=began: (
-                    self.log.done(f"{a}: {n} nuclei", time.monotonic() - t0, address=d),
-                    self._echo(f"{n} nuclei detected on {c}."),
-                ),
-            })
-
-    def _on_nuclei_ready(self, region, channel, labels, centroids, bbox_um, count):
-        """Lay the label mask over the mosaic as a napari Labels layer, aligned to the raw channel."""
-        v = self._napari_viewer()
-        pane = self._pane
-        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
-        if v is None or mosaic is None or labels is None:
-            return
-        raw = mosaic.find(_RAW_OP, channel)
-        name = f"nuclei: {channel}"
-        try:
-            for lyr in list(v.layers):
-                if getattr(lyr, "name", "") == name:
-                    v.layers.remove(lyr)
-        except Exception:                                 # noqa: BLE001
-            pass
-        kw = {"name": name}
-        try:
-            if raw is not None and getattr(raw, "scale", None) is not None:
-                kw["scale"] = tuple(raw.scale[-2:])
-            if raw is not None and getattr(raw, "translate", None) is not None:
-                kw["translate"] = tuple(raw.translate[-2:])
-        except Exception:                                 # noqa: BLE001 - overlay still lands at origin
-            pass
-        try:
-            v.add_labels(np.asarray(labels).astype("uint32"), **kw)
-        except Exception as exc:                          # noqa: BLE001 - named, never silent
-            self._say(f"could not lay the nuclei mask: {exc}")
+    # (The Detect-nuclei surface — _spot_source, _detect_nuclei, _on_nuclei_ready and
+    # the pane's Detect row — was shelved 2026-08-24 with the spot/cellpose operators.)
 
     def _napari_viewer(self):
         """The live napari viewer (or headless ``ViewerModel``) behind this window's pane.
@@ -2402,12 +2264,6 @@ class RegionViewer(QMainWindow):
             if self._worker is not None and self._worker.isRunning():
                 self._worker.stop()
                 self._worker.wait(2000)
-        except Exception:                            # noqa: BLE001
-            pass
-        try:
-            if self._spot_worker is not None and self._spot_worker.isRunning():
-                self._spot_worker.stop()
-                self._spot_worker.wait(2000)
         except Exception:                            # noqa: BLE001
             pass
         try:

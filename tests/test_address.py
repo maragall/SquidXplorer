@@ -185,12 +185,12 @@ def test_a_per_call_address_beats_the_windows_standing_one(caplog):
 def test_an_action_that_fails_says_so_rather_than_going_quiet(caplog):
     view = ViewLog(get_logger("test_address"), 1, Address("B2"))
     with caplog.at_level(logging.INFO):
-        view.started("cellpose")
-        view.failed("cellpose", "no weights")
+        view.started("decon")
+        view.failed("decon", "no weights")
 
     rec = _records(caplog)[-1]
     assert rec.levelno == logging.WARNING
-    assert rec.getMessage() == "[1] B2  cellpose  failed: no weights"
+    assert rec.getMessage() == "[1] B2  decon  failed: no weights"
 
 
 def test_a_window_logs_its_address_without_the_window_having_to_remember_to(qtbot=None):

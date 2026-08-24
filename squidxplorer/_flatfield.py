@@ -1,7 +1,9 @@
-"""Flat-field (illumination) correction as a plane-op, with per-channel profiles via for_channel.
+"""Flat-field (illumination) machinery: the profile record, estimate, parse and correction.
 
 The correction is per-pixel monotone, so it commutes with max/min/selection z-reductions
 (NOT with a mean). Estimator and .npy format are reused from tilefusion.flatfield (BaSiC).
+Stitch is the consumer (its read path corrects tiles; the GUI's profile loader installs the
+selection it reads); the standalone ``flatfield`` OPERATOR was shelved 2026-08-24.
 """
 
 from __future__ import annotations
@@ -9,12 +11,11 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Iterable, Optional
 
 import numpy as np
 
-from squidxplorer._engine import add_operator
-from squidxplorer.projection import cast_like, plane_op
+from squidxplorer.projection import cast_like
 
 # A gain below this is treated as 1.0 rather than dividing a dead pixel to the dtype ceiling.
 _MIN_GAIN = 1e-6
@@ -115,28 +116,15 @@ def correct_flatfield(plane: np.ndarray, profile: FlatfieldProfile) -> np.ndarra
     return cast_like(values, plane.dtype)
 
 
-def flatfield_op(profile: FlatfieldProfile) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
-    """Build a plane-op bound to *profile*, ready for ``add_operator``."""
-    if not isinstance(profile, FlatfieldProfile):
-        raise ValueError(f"flatfield_op needs a FlatfieldProfile, got {type(profile).__name__}")
-
-    def _flatfield(p: np.ndarray) -> np.ndarray:
-        return correct_flatfield(p, profile)
-
-    _flatfield.__name__ = f"flatfield{profile.shape}"
-    op = plane_op(_flatfield)
-    op.corrects_illumination = True
-    return op
-
-
 # ``corrects_illumination = True`` on a callable means: these pixels come out flat-fielded.
 # ``_stitch.stitch_region`` reads it to refuse a double apply (the correction is not idempotent).
 # An attribute on the callable, like ``consumes``, never a name comparison.
 
 
-# The active profiles, one per channel. ``_stitch._selected_profiles`` reads this too; the
-# per-call ``stitch_region(flatfield=...)`` argument still outranks it. Locked because
-# The per-FOV loop runs the operator on a thread pool.
+# The active profiles, one per channel — what ``_stitch._selected_profiles`` reads and the
+# GUI's "Load illumination profile" / estimate-from-plate flows install; the per-call
+# ``stitch_region(flatfield=...)`` argument still outranks it. Locked because stitch's
+# read path applies profiles on a thread pool.
 _lock = threading.Lock()
 _active: dict[str, FlatfieldProfile] = {}
 
@@ -182,57 +170,8 @@ def clear_profile() -> None:
         _active.clear()
 
 
-def _profile_for(channel: str) -> FlatfieldProfile:
-    """This channel's installed profile, or a refusal naming the channel and what is installed."""
-    profiles = active_profiles()
-    if not profiles:
-        raise ValueError(
-            f"no flat-field profile is loaded, so 'flatfield' has nothing to apply to channel "
-            f"{channel!r}. Load an acquisition's stored profile with "
-            "squidxplorer._flatfield.set_profiles(FlatfieldProfile.per_channel_from_npy(path, names)) "
-            "or estimate one from tiles with estimate_profile(planes) and install it with "
-            "set_profile(profile, channel=...). (A flat-field has no meaningful default: an "
-            "identity field would silently do nothing.)"
-        )
-    if channel not in profiles:
-        raise ValueError(
-            f"no flat-field profile is installed for channel {channel!r}; the installed "
-            f"profile(s) are for {sorted(profiles)}. Refusing to correct {channel!r} with another "
-            "channel's gain field — that is a different measurement, not a degraded one. Install "
-            f"one with set_profile(profile, channel={channel!r}), or load the acquisition's "
-            "stored per-channel profile with set_profiles(per_channel_from_npy(path, names))."
-        )
-    return profiles[channel]
-
-
-def _correct_with_active(plane: np.ndarray) -> np.ndarray:
-    """The unbound path: applies a lone installed profile, refuses on none or on several."""
-    profiles = active_profiles()
-    if len(profiles) == 1:
-        return correct_flatfield(plane, next(iter(profiles.values())))
-    if not profiles:
-        raise ValueError(
-            "no flat-field profile is loaded, so 'flatfield' has nothing to apply. Load an "
-            "acquisition's stored profile with squidxplorer._flatfield.set_profiles("
-            "FlatfieldProfile.per_channel_from_npy(path, names)) or estimate one from tiles with "
-            "estimate_profile(planes) and install it with set_profile(profile, channel=...). "
-            "(A flat-field has no meaningful default: an identity field would silently do "
-            "nothing.)"
-        )
-    raise ValueError(
-        f"'flatfield' was handed a plane without being told which channel it is, and profiles "
-        f"for {sorted(profiles)} are installed. Refusing to pick one of them: correcting a "
-        "channel with another channel's gain field is a different measurement, not a degraded "
-        "one. Run it through project_well/run_plate (which specialises the operator per "
-        "channel via for_channel), or call flatfield_op(profile) with the profile you mean."
-    )
-
-
-LAYER_KEY: str = "flatfield"
-LAYER_LABEL: str = "flat-field correction"
-
-_ACTIVE_OP = plane_op(_correct_with_active)
-_ACTIVE_OP.corrects_illumination = True
-# The acquisition path is unused: a gain field is measured, never derived from metadata.
-_ACTIVE_OP.for_channel = lambda path, channel: flatfield_op(_profile_for(str(channel)))
-add_operator(LAYER_KEY, _ACTIVE_OP, requires=("tilefusion",), extra="stitch")
+# (The registered ``flatfield`` OPERATOR — ``_ACTIVE_OP``, ``_correct_with_active``,
+# ``_profile_for``, ``flatfield_op`` — was shelved 2026-08-24. This module keeps the
+# MACHINERY stitch rides: the profile record, the BaSiC estimate, the per-channel .npy
+# parse, the correction arithmetic and the installed-profile store above. Git history
+# reinstates the operator.)

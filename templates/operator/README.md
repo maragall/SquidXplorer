@@ -25,8 +25,8 @@ templates/operator/
 ```bash
 pip install -e templates/operator          # into the environment that runs SquidXplorer
 python -c "import squidxplorer; print(squidxplorer.available_plane_operators())"
-# ['bgsub', 'cellpose', 'decon', 'decon3d', 'flatfield', 'mip', 'reference', 'spot', 'stdev']
-#                                                                                    ^^^^^^^
+# ['decon', 'mip', 'register', 'stitch', 'stdev']
+#                                             ^^^^^^^
 # it runs, headless, over a whole plate:
 squidxplorer /path/to/acquisition --operator stdev --output-folder /tmp/out
 
@@ -67,8 +67,8 @@ engine puts in the iterable**, and that is decided by one declaration you make.
 
 | `consumes` | what one call receives | what you return | result shape | examples |
 |---|---|---|---|---|
-| `frozenset({"z"})` (default) | **every z-plane of one `(t, c)`** — the whole stack | one plane | `(T, C, 1, Y, X)` — z collapses to 1 | `mip`, `reference`, `stdev` |
-| `frozenset()` | **exactly one plane** | one plane | `(T, C, Nz, Y, X)` — z survives at full depth | `decon`, `bgsub`, `flatfield`, `spot`, `cellpose` |
+| `frozenset({"z"})` (default) | **every z-plane of one `(t, c)`** — the whole stack | one plane | `(T, C, 1, Y, X)` — z collapses to 1 | `mip`, `stdev` |
+| `frozenset()` | **exactly one plane** | one plane | `(T, C, Nz, Y, X)` — z survives at full depth | plane-ops (a background subtraction, a per-plane filter) |
 
 The engine has ONE loop. It groups the FOV's planes over the axis you declared and calls you per
 group. Nothing branches on your operator's name — a test in SquidXplorer
@@ -103,9 +103,9 @@ is allowed and owns its own documented memory profile — say so in its docstrin
 | `"intensity"` (default) | the pixels measure light | napari **Image** layer: windowed, colormapped, blended additively across channels |
 | `"labels"` | the pixels are integer **object ids** | napari **Labels** layer: 0 is transparent, never windowed, never interpolated, click-to-pick |
 
-This is not cosmetic. Before this declaration existed, `spot` emitted a label image down the
-intensity path and a segmentation arrived auto-windowed by the fluorescence contrast rule, as if
-label 37 were 37 photons. Declaring `"labels"` also requires an integer dtype; a float array with
+This is not cosmetic. Before this declaration existed, the then-shipped `spot` segmenter
+emitted a label image down the intensity path and a segmentation arrived auto-windowed by the
+fluorescence contrast rule, as if label 37 were 37 photons. Declaring `"labels"` also requires an integer dtype; a float array with
 `produces="labels"` is refused by name, naming your operator.
 
 A kind SquidXplorer cannot draw is refused, not silently drawn as intensity. If you need a third
@@ -167,8 +167,8 @@ do — through `operator_kwargs` — and your operator appears under **Process w
 their declaration** without an edit anywhere in SquidXplorer.
 
 Before 2026-08-05 this paragraph documented the opposite, and it was the weakest link in this
-whole contract: this README told you to declare `params` into a GUI that ignored them, so
-`spot` and `cellpose` declared four parameters each and not one was settable from any panel.
+whole contract: this README told you to declare `params` into a GUI that ignored them, so the
+then-shipped segmenters declared four parameters each and not one was settable from any panel.
 
 **What a `Param` cannot be: a channel.** The engine calls you per `(t, c, z-group)` and hands you
 planes only, so a value bound at registration never learns which channel it is looking at. If your

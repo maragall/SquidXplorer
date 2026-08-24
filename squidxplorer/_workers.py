@@ -339,98 +339,8 @@ class _FocusWorker(QThread):
         self.ready.emit(int(best_z_i), note)
 
 
-class _SpotWorker(QThread):
-    """Run spot detection on the plane currently on screen, off the GUI thread."""
-
-    progress = Signal(int, int)                # (stages done, stages total)
-    stageChanged = Signal(str)                 # the stage's name
-    ready = Signal(str, str, object, object, object, int)
-    # ^ (region, channel, labels (H,W) int32, centroids (N,2) float, bbox_um|None, count)
-    problem = Signal(str)                      # a named failure: "<region>/<channel>: ..."
-    cancelled = Signal()
-    finished_count = Signal(str, str, int)     # (region, channel, count)
-
-    def __init__(self, region, channel, data, z_index, bbox_um, params=None, parent=None,
-                 algorithm=None):
-        super().__init__(parent)
-        self._region, self._channel = region, channel
-        self._data, self._z = data, z_index
-        self._bbox_um = bbox_um
-        self._params = params
-        # (name, segment) — resolved by the CALLER off the registry so the button's label, its
-        # params and the run agree on which algorithm this is; None falls back here.
-        self._algorithm = algorithm
-        self._stop = threading.Event()
-
-    def stop(self):
-        self._stop.set()
-
-    def run(self):
-        from squidxplorer._spots import SpotDetectionCancelled, detect_spots
-
-        where = f"{self._region}/{self._channel}"
-        algorithm, segment = self._algorithm or nuclei_operator()
-        # the progress denominator is whatever the running algorithm reports
-        reported_total = [0]
-
-        def _stage(name, done, total):
-            reported_total[0] = int(total)
-            self.stageChanged.emit(name)
-            self.progress.emit(int(done), int(total))
-
-        try:
-            plane = _full_res_mip(self._data)          # segment the MIP over z, not one z-plane
-            log.info("%s: detecting nuclei with %s on a %s MIP", where, algorithm, plane.shape)
-
-            res = detect_spots(
-                plane, self._params, segment=segment,
-                on_stage=_stage,
-                should_stop=self._stop.is_set,
-            )
-        except SpotDetectionCancelled:
-            self.cancelled.emit()
-            return
-        except Exception as exc:                   # noqa: BLE001 - NAMED, never swallowed
-            # log AND banner: the banner is where the user looks, the log is the copyable record
-            log.error("%s: spot detection failed — %s: %s", where, type(exc).__name__, exc)
-            self.problem.emit(f"{where}: spot detection failed — {type(exc).__name__}: {exc}")
-            return
-
-        # close on the same denominator the run reported
-        total = reported_total[0] or len(_spot_stages())
-        self.progress.emit(total, total)
-        self.stageChanged.emit("done")
-        log.info("%s: %d nuclei detected (%s)", where, res.count, algorithm)
-        self.ready.emit(self._region, self._channel, res.labels, res.centroids,
-                        self._bbox_um, res.count)
-        self.finished_count.emit(self._region, self._channel, res.count)
-
-
-def nuclei_operator():
-    """``(name, segment)`` the detect-nuclei button runs: ``cellpose`` when the REGISTRY says it
-    is available, else ``spot`` (the Otsu-watershed).
-
-    The choice reads ``operator_available`` — the record's own ``requires`` declaration, the
-    same one every other run surface selects on — never a private dependency probe. The names
-    are the registered operator names, so the button's label, the console line and the panel
-    whose values reach the run all agree on which algorithm this is.
-    """
-    from squidxplorer._engine import operator_available
-
-    if operator_available("cellpose")[0]:
-        from squidxplorer._cellpose import OPERATOR_NAME, cellpose_nuclei
-
-        return OPERATOR_NAME, cellpose_nuclei
-    from squidxplorer._spots import LAYER_KEY, skimage_watershed
-
-    return LAYER_KEY, skimage_watershed
-
-
-def _spot_stages():
-    """The stage list, imported lazily."""
-    from squidxplorer._spots import STAGES
-
-    return STAGES
+# (The Detect-nuclei surface — _SpotWorker, nuclei_operator, _spot_stages — was
+# shelved 2026-08-24 with the spot/cellpose operators. Git history reinstates.)
 
 
 class _FlatfieldWorker(QThread):
@@ -623,23 +533,6 @@ def _full_res_plane(data, z_index):
         raise ValueError(
             f"expected a 2-D plane to count on, got shape {plane.shape!r}. The layer's data is "
             "neither a pyramid level list, a (z, y, x) stack, nor a (y, x) plane."
-        )
-    return plane
-
-
-def _full_res_mip(data):
-    """The full-resolution MIP (max over z) behind a napari layer's ``data``."""
-    data = full_res_level(data)
-    ndim = getattr(data, "ndim", None)
-    if ndim is None:
-        data = np.asarray(data)
-        ndim = data.ndim
-    if ndim == 3:
-        data = data.max(axis=0)                        # MIP over z (lazy on a dask level)
-    plane = np.asarray(data)
-    if plane.ndim != 2:
-        raise ValueError(
-            f"expected a 2-D MIP to count on, got shape {plane.shape!r} after the z reduction."
         )
     return plane
 

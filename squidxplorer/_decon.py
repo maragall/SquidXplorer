@@ -1,7 +1,14 @@
-"""Deconvolution operators on the petakit engine with a real vectorial PSF.
+"""THE deconvolution operator (``decon``) on the petakit engine with a real vectorial PSF.
 
-``decon`` is a plane-op convolving with the in-focus PSF plane; ``decon3d`` is a
-z-reducer doing true 3-D RL. Optics are derived per channel via ``for_channel``.
+``decon`` is the volume solve: true 3-D RL over the whole z-stack, every plane kept. It is
+the ONE deconvolution since 2026-08-24 (Julio: the 2-D per-plane variant was shelved — both
+iterate per z-plane and only this one uses the complete PSF; on a 1-plane stack "3D decon
+would still use a 2D PSF, since there is no more to draw from"). ONE code path,
+:func:`deconvolve_stack`, whose PSF depth follows the stack depth — measured on n_z=1: the
+volume solve equals the old per-plane solve (float32 max abs diff 0.00195, uint16 max 1
+count, and the depth-1 3-D PSF's central plane renormalises exactly to the old in-focus
+slice). Optics are derived per channel via ``for_channel``. The old registered name
+``decon3d`` is refused BY NAME with a pointer here.
 """
 
 from __future__ import annotations
@@ -17,7 +24,7 @@ from squidxplorer import _decon_gpu
 from squidxplorer._acquisition import load_acquisition_metadata, load_objective_na
 from squidxplorer._channels import excitation_nm
 from squidxplorer._engine import add_operator
-from squidxplorer.projection import cast_like, plane_op
+from squidxplorer.projection import cast_like
 
 # RL is semi-convergent; the working point on this instrument, not a textbook default.
 DEFAULT_ITERATIONS: int = 3
@@ -139,17 +146,6 @@ def make_psf(optics: OpticsParams) -> np.ndarray:
     return np.ascontiguousarray(psf, dtype=np.float32)
 
 
-@lru_cache(maxsize=_PSF_CACHE_SIZE)
-def make_psf_2d(optics: OpticsParams) -> np.ndarray:
-    """The in-focus plane of the 3-D PSF, shaped ``(1, Y, X)`` and renormalised to sum 1."""
-    psf3 = make_psf(optics)
-    centre = psf3[psf3.shape[0] // 2]
-    total = float(centre.sum())
-    if total <= 0:
-        raise ValueError(f"the in-focus PSF plane for {optics!r} sums to {total}; cannot normalise")
-    return np.ascontiguousarray((centre / total)[None, ...], dtype=np.float32)
-
-
 def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool) -> np.ndarray:
     """One call into RL: device selection, optional FFT-length padding, and an all-zero result guard."""
     volume = np.ascontiguousarray(volume, dtype=np.float32)
@@ -176,26 +172,6 @@ def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool) -> np.
             "image that would look like a successful deconvolution."
         )
     return out
-
-
-def deconvolve_plane(
-    plane: np.ndarray,
-    optics: Optional[OpticsParams] = None,
-    iterations: int = DEFAULT_ITERATIONS,
-    *,
-    gpu: bool = True,
-) -> np.ndarray:
-    """Deconvolve one plane with the real in-focus PSF for *optics*; same shape and dtype back."""
-    if plane.ndim != 2:
-        raise ValueError(f"deconvolve_plane takes ONE 2-D plane; got shape {plane.shape}")
-    if iterations < 0:
-        raise ValueError(f"iterations must be >= 0, got {iterations}")
-    if iterations == 0:
-        return np.array(plane, copy=True)
-
-    optics = optics or active_optics()
-    out = _run(plane[None, ...], make_psf_2d(optics), iterations, gpu)[0]
-    return cast_like(out, plane.dtype)
 
 
 def deconvolve_stack(
@@ -279,7 +255,7 @@ def optics_for_channel(path, channel: str) -> OpticsParams:
         raise ValueError(
             f"cannot derive the PSF for channel {channel!r}: the operator was not told which "
             "acquisition it is reading, so the emission wavelength is unknown. Pass optics "
-            "explicitly (decon_op(optics=...)) or install an override with set_optics()."
+            "explicitly or install an override with set_optics()."
         )
     try:
         return _acquisition_optics(str(path), str(channel))
@@ -288,58 +264,35 @@ def optics_for_channel(path, channel: str) -> OpticsParams:
             f"cannot derive the PSF for channel {channel!r} of {path}: "
             f"{type(exc).__name__}: {exc}. Deconvolution needs this channel's EMISSION "
             "wavelength; refusing to substitute another channel's optics, which is a different "
-            "measurement and not a degraded one. Pass optics explicitly (decon_op(optics=...)) "
+            "measurement and not a degraded one. Pass optics explicitly "
             "or install an override with set_optics()."
         ) from exc
-
-
-def deconvolve(plane: np.ndarray, optics: Optional[OpticsParams] = None) -> np.ndarray:
-    """Deconvolve one plane at the module defaults. *optics* ``None`` -> :func:`active_optics`."""
-    return deconvolve_plane(plane, optics, DEFAULT_ITERATIONS)
 
 
 def decon_op(
     optics: Optional[OpticsParams] = None,
     iterations: int = DEFAULT_ITERATIONS,
 ) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
-    """Build a parameterised deconvolution plane-op, ready for ``add_operator``.
-
-    With ``optics=None`` the callable carries ``for_channel`` so optics are derived per channel.
-    """
-    def _decon(p: np.ndarray) -> np.ndarray:
-        return deconvolve_plane(p, optics, iterations)
-
-    _decon.__name__ = f"decon(rl,iterations={iterations})"
-    op = plane_op(_decon)
-    if optics is None:
-        op.for_channel = lambda path, channel: decon_op(
-            optics_for_channel(path, channel), iterations)
-    return op
-
-
-def decon3d_op(
-    optics: Optional[OpticsParams] = None,
-    iterations: int = DEFAULT_ITERATIONS,
-) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
-    """Build a true 3-D deconvolution operator: z-consuming, depth-keeping.
+    """Build THE deconvolution operator: the volume solve, z-consuming, depth-keeping.
 
     The whole stack is deconvolved in one 3-D solve and EVERY plane comes back (Julio,
     2026-08-21: the output is the same size as the input — the user examines the planes).
+    The PSF's depth follows the stack's, so an n_z=1 acquisition gets the 2-D in-focus solve
+    as the volume solve's own degenerate case (measured equal; see the module docstring).
     ``keeps_depth`` on the callable is the declaration ``project_well`` and the acquisition
     writer honour.
     """
-    def _decon3d(planes: Iterable[np.ndarray]) -> np.ndarray:
+    def _decon(planes: Iterable[np.ndarray]) -> np.ndarray:
         return deconvolve_stack(planes, optics, iterations, project=False)
 
-    _decon3d.__name__ = f"decon3d(rl,iterations={iterations})"
-    _decon3d.consumes = frozenset({"z"})
-    _decon3d.keeps_depth = True
+    _decon.__name__ = f"decon(rl,iterations={iterations})"
+    _decon.consumes = frozenset({"z"})
+    _decon.keeps_depth = True
     if optics is None:
-        _decon3d.for_channel = lambda path, channel: decon3d_op(
+        _decon.for_channel = lambda path, channel: decon_op(
             optics_for_channel(path, channel), iterations)
-    return _decon3d
+    return _decon
 
 
-add_operator("decon", decon_op(), requires=("petakit",), extra="decon")
-add_operator("decon3d", decon3d_op(), consumes=frozenset({"z"}), requires=("petakit",),
+add_operator("decon", decon_op(), consumes=frozenset({"z"}), requires=("petakit",),
              extra="decon")

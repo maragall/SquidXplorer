@@ -32,10 +32,10 @@ class _Reader:
 
 # ------------------------------------------------------------------ the record itself
 
-def test_capture_carries_the_runs_identity_and_environment():
-    spec = RunSpec.capture(_Reader("/data/acq"), operator="spot",
+def test_capture_carries_the_runs_identity_and_environment(blob_operator):
+    spec = RunSpec.capture(_Reader("/data/acq"), operator="blob",
                            operator_kwargs={"min_area_px": 30}, regions=["B2"], n_fovs=None)
-    assert spec.operator == "spot"
+    assert spec.operator == "blob"
     assert spec.operator_kwargs == {"min_area_px": 30}
     assert spec.regions == ["B2"]
     assert spec.n_fovs is None

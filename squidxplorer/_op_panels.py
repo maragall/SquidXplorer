@@ -106,6 +106,12 @@ def stitch_operator_kwargs(*, register, registration_channel, channels, blend_px
     return kwargs
 
 
+#: The Z-handling combo's spelling of ``z_operator=None``: fuse every acquired plane unchanged,
+#: no inner operator. NOT a registry name (the registered `keepz` identity was shelved
+#: 2026-08-24); the panel maps this label to None before anything asks the registry.
+KEEP_EVERY_PLANE = "keep every z plane"
+
+
 def stitch_refusal(name: str) -> Optional[str]:
     """The refusal sentence for *name*, mirroring stitch_region's own guard against fusing labels."""
     from squidxplorer._stitch import LABELS, _resolve_operator
@@ -228,18 +234,22 @@ class StitcherPanel(_Panel):
         self.z_operator_combo = QComboBox()
         from squidxplorer import available_plane_operators
 
+        # Not a registry name: the combo's spelling of z_operator=None — every acquired plane,
+        # fused unchanged. It replaced the registered `keepz` identity operator (2026-08-24).
+        self.z_operator_combo.addItem(KEEP_EVERY_PLANE)
         for name in sorted(available_plane_operators()):
             self.z_operator_combo.addItem(name)
-        # The declared default even on a z-stack: RegionViewer switches to keepz only when
-        # the window is actually in 3D mode, so a 2D canvas never gets a volume it can't show.
+        # The declared default even on a z-stack: RegionViewer switches to keep-every-plane
+        # only when the window is actually in 3D mode, so a 2D canvas never gets a volume it
+        # can't show.
         self.z_operator_combo.setCurrentText(_DECLARED["z_operator"])
         self.z_operator_combo.setToolTip(
             "What each FOV's z-stack becomes before registration.\n\n"
             "A z-REDUCER (mip, reference) collapses it to one plane, so the well fuses to one "
-            "image. A PLANE-OP (keepz, bgsub, decon, flatfield) keeps every plane, and the well "
-            "fuses to a volume: the pose graph is solved ONCE and every plane is fused from those "
-            "same origins, so the planes cannot drift apart.\n\n"
-            "keepz is the identity — every plane, no pixel changed.")
+            "image. A PLANE-OP (flatfield) keeps every plane, and the well fuses to a "
+            "volume: the pose graph is solved ONCE and every plane is fused from those same "
+            "origins, so the planes cannot drift apart.\n\n"
+            f"'{KEEP_EVERY_PLANE}' fuses every acquired plane unchanged (z_operator=None).")
         self.z_operator_combo.currentTextChanged.connect(self._check_z_operator)
         self.v.addLayout(_row(QLabel("Z handling:"), self.z_operator_combo))
 
@@ -381,7 +391,7 @@ class StitcherPanel(_Panel):
             w.setEnabled(bool(on))
 
     def _check_z_operator(self, name: str) -> None:
-        why = stitch_refusal(name)
+        why = None if name == KEEP_EVERY_PLANE else stitch_refusal(name)
         self.run_btn.setEnabled(why is None)
         self.say("" if why is None else why)
         self.z_note.setText(self._z_line(name))
@@ -390,6 +400,12 @@ class StitcherPanel(_Panel):
         """How many z-levels this run will stitch, read off the operator's `consumes` declaration."""
         from squidxplorer._engine import Z_REDUCER, operator_consumes
 
+        if name == KEEP_EVERY_PLANE:
+            if self._n_z <= 1:
+                return "z: this acquisition has 1 plane, so there is one plane to fuse."
+            return (f"z: all {self._n_z} planes, unchanged (z_operator=None). The pose graph is "
+                    f"solved ONCE and every plane is fused from those same origins, so the "
+                    f"planes cannot drift apart. Renderable in 3D.")
         try:
             reduces = bool(operator_consumes(name) & Z_REDUCER)
         except Exception as exc:                      # noqa: BLE001 - unknown name, reported
@@ -426,7 +442,8 @@ class StitcherPanel(_Panel):
         )
 
     def _run(self) -> None:
-        why = stitch_refusal(self.z_operator_combo.currentText())
+        chosen = self.z_operator_combo.currentText()
+        why = None if chosen == KEEP_EVERY_PLANE else stitch_refusal(chosen)
         if why is not None:
             self.say(why)
             return
@@ -435,7 +452,8 @@ class StitcherPanel(_Panel):
         except ValueError as exc:                 # a refused setting -> say it, run nothing
             self.say(str(exc))
             return
-        kwargs["z_operator"] = self.z_operator_combo.currentText()
+        # The label is the combo's spelling of z_operator=None: every acquired plane, unchanged.
+        kwargs["z_operator"] = None if chosen == KEEP_EVERY_PLANE else chosen
         self.say("")
         # regions=None means UNSCOPED, resolved against the run selector's live selection.
         self.host.run_operator("stitch", regions=None,

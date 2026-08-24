@@ -180,13 +180,13 @@ def test_a_bare_array_stream_is_refused_by_name(squid_dataset, tmp_path):
 
 @pytest.mark.parametrize("operator, routes_fused", [
     ("mip", False),          # per-FOV: the acquisition-format writer's
-    ("keepz", False),        # per-FOV, keeps z: still the acquisition-format writer's
-    ("spot", False),         # labels
+    ("planes", False),       # per-FOV, keeps z (identity fixture): still acquisition-format
+    ("blob", False),         # labels (fixture)
     ("register", False),     # saves a registered COPY; its routing is operator_saves_copy's
     ("stitch", True),
-    ("coordinate", True),
 ])
-def test_the_gate_is_declaration_driven_not_name_driven(squid_dataset, operator, routes_fused):
+def test_the_gate_is_declaration_driven_not_name_driven(squid_dataset, operator, routes_fused,
+                                                        identity_operator, blob_operator):
     root, _ = squid_dataset
     reader = open_reader(root)
     expected = root.parent / f"{operator}_{root.name}" if routes_fused else None

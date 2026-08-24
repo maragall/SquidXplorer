@@ -600,7 +600,7 @@ def fuse_region_pyramid(
     levels = [_rung(int(step), h, w, dt, _well_source) for _px, h, w, step, dt in plans]
 
     # FINER RUNGS, ON DEMAND, down to native. Budget-gated per rung because the
-    # full-materialisation consumers (the 3-D full-res swap, _full_res_mip) still take level 0
+    # full-materialisation consumers (the 3-D full-res swap) still take level 0
     # whole. ``well=None`` on purpose: a fine rung's pixels stay strided camera data, never
     # the area-averaged well image.
     native = _planned_plane(meta, region, 10 ** 9)

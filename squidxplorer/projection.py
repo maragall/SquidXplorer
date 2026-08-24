@@ -67,7 +67,7 @@ def normalise_requires(requires) -> tuple[str, ...]:
     for module in names:
         if not isinstance(module, str) or not module:
             raise ValueError(
-                f"requires must be importable MODULE names (e.g. ('cellpose',)); got {module!r}")
+                f"requires must be importable MODULE names (e.g. ('petakit',)); got {module!r}")
     return names
 
 
@@ -214,54 +214,11 @@ def _tenengrad(plane: np.ndarray) -> float:
     return float(np.square(gx).sum() + np.square(gy).sum())
 
 
-def select_reference_z(planes: Iterable[np.ndarray]) -> int:
-    """Return the position (0-based, into the iterable) of the sharpest plane by Tenengrad."""
-    best_i, best_score = None, -np.inf
-    shape = dtype = None
-    for i, plane in enumerate(planes):
-        if shape is None:
-            shape, dtype = plane.shape, plane.dtype
-        elif plane.shape != shape:
-            raise ValueError(f"plane shape {plane.shape} != first plane {shape}")
-        elif plane.dtype != dtype:
-            raise ValueError(f"plane dtype {plane.dtype} != first plane {dtype}")
-        score = _tenengrad(plane)
-        if score > best_score:
-            best_i, best_score = i, score
-    if best_i is None:
-        raise ValueError("select_reference_z requires at least one plane; got an empty iterable.")
-    return best_i
-
-
-def project_reference(planes: Iterable[np.ndarray]) -> np.ndarray:
-    """Reference-plane reduction: return the single sharpest z-plane by Tenengrad focus.
-
-    z-selecting: project_well solves the focus once per (t, fov) via ``select_index`` and reads
-    that z for every channel, so channels of one FOV stay on one plane.
-    """
-    it = iter(planes)
-    try:
-        best = next(it)
-    except StopIteration:
-        raise ValueError("project_reference requires at least one plane; got an empty iterable.")
-    best = np.array(best, copy=True)          # own buffer; never alias the caller's plane
-    best_score = _tenengrad(best)
-    for plane in it:
-        if plane.shape != best.shape:
-            raise ValueError(f"plane shape {plane.shape} != first plane {best.shape}")
-        if plane.dtype != best.dtype:
-            raise ValueError(f"plane dtype {plane.dtype} != first plane {best.dtype}")
-        score = _tenengrad(plane)
-        if score > best_score:
-            best_score, best = score, np.array(plane, copy=True)
-    return best
-
-
-# The z-selecting marker: project_well solves the z once per (t, fov) and shares it across channels.
-project_reference.select_index = select_reference_z
+# (`select_reference_z` / `project_reference` — the Tenengrad z-SELECTING reducer behind the
+# shelved `reference` operator — were deleted 2026-08-24 with project_well's whole select_index
+# arm; `_tenengrad` stays because the GUI's z-slider autofocus reads it. Git history reinstates.)
 
 project.consumes = Z_REDUCER
-project_reference.consumes = Z_REDUCER
 
 
 def project_well(
@@ -269,8 +226,6 @@ def project_well(
     region: str,
     fov: int,
     reduce: Callable[[Iterable[np.ndarray]], np.ndarray] = project,
-    reference_channel: Optional[str] = None,
-    picked_z: Optional[dict] = None,
     consumes=None,
     time_point: Optional[int] = None,
     z_level: Optional[int] = None,
@@ -279,17 +234,13 @@ def project_well(
 
     The grouping comes from the operator's ``consumes`` declaration: a z-reducer collapses z
     to 1, a plane-op keeps z at full depth. ``time_point``/``z_level`` restrict the run to one
-    timepoint / one acquisition plane (``z_level=`` is plane-ops only). ``picked_z`` receives
-    ``{(t, channel): z}`` provenance for z-selecting reductions.
+    timepoint / one acquisition plane (``z_level=`` is plane-ops only).
     """
     meta = reader.metadata
     channels = [c["name"] for c in meta["channels"]]
     z_levels = meta["z_levels"]
     n_t = meta["n_t"]
     y, x = meta["frame_shape"]
-
-    if picked_z is None:
-        picked_z = {}
 
     if consumes is None:
         consumes = getattr(reduce, "consumes", Z_REDUCER)
@@ -316,63 +267,32 @@ def project_well(
                 f"z_level={z_level} is not one of this acquisition's z levels {list(z_levels)}")
         z_levels = [z_level]
 
-    select_index = getattr(reduce, "select_index", None)
-
-    if select_index is not None and "z" not in consumes:
-        raise ValueError(
-            f"{getattr(reduce, '__name__', reduce)!r} carries select_index (it CHOOSES a z) but "
-            f"declares consumes={sorted(consumes)}; a z-selecting operator must consume z."
-        )
-
-    if select_index is None:
-        # z consumed -> one group per (t, c); z not consumed -> one group per (t, c, z).
-        z_groups = [tuple(z_levels)] if "z" in consumes else [(z_level,) for z_level in z_levels]
-        # A z-consuming operator that DECLARES ``keeps_depth`` (on the callable, like
-        # select_index) returns the whole PROCESSED stack — decon3d: true 3-D deconvolution
-        # whose every plane the user examines — so the output depth is the input's while the
-        # operator still sees all z in one call.
-        keeps_depth = bool(getattr(reduce, "keeps_depth", False)) and "z" in consumes
-        out_depth = len(z_levels) if keeps_depth else len(z_groups)
-        out = np.empty((len(timepoints), len(channels), out_depth, y, x), dtype=meta["dtype"])
-        # One specialisation per channel for operators declaring `for_channel`.
-        path = acquisition_path(reader) if hasattr(reduce, "for_channel") else None
-        per_channel = {c: bind_channel(reduce, path, c) for c in channels}
-        for t_i, t_src in enumerate(timepoints):
-            for c_i, channel in enumerate(channels):
-                op = per_channel[channel]
-                for k, group in enumerate(z_groups):
-                    planes = (reader.read(region, fov, channel, z_level, t_src) for z_level in group)
-                    if keeps_depth:
-                        stack = np.asarray(op(planes))
-                        if stack.shape != (out_depth, y, x):
-                            raise ValueError(
-                                f"{getattr(reduce, '__name__', reduce)!r} declares keeps_depth "
-                                f"and so owes a ({out_depth}, {y}, {x}) stack; it returned "
-                                f"shape {stack.shape}.")
-                        out[t_i, c_i, :] = stack
-                    else:
-                        out[t_i, c_i, k] = op(planes)  # streamed z; bounded memory
-        return out
-
-    # z-selecting: ONE focus solve per (t, fov), shared by every channel.
-    ref = channels[0] if reference_channel is None else reference_channel
-    if ref not in channels:
-        raise ValueError(
-            f"reference_channel {ref!r} is not a channel of this acquisition: {channels}"
-        )
-
-    out = np.empty((len(timepoints), len(channels), 1, y, x), dtype=meta["dtype"])
+    # z consumed -> one group per (t, c); z not consumed -> one group per (t, c, z).
+    z_groups = [tuple(z_levels)] if "z" in consumes else [(z_level,) for z_level in z_levels]
+    # A z-consuming operator that DECLARES ``keeps_depth`` (on the callable) returns the whole
+    # PROCESSED stack — decon: true 3-D deconvolution whose every plane the user examines — so
+    # the output depth is the input's while the operator still sees all z in one call.
+    keeps_depth = bool(getattr(reduce, "keeps_depth", False)) and "z" in consumes
+    out_depth = len(z_levels) if keeps_depth else len(z_groups)
+    out = np.empty((len(timepoints), len(channels), out_depth, y, x), dtype=meta["dtype"])
+    # One specialisation per channel for operators declaring `for_channel`.
+    path = acquisition_path(reader) if hasattr(reduce, "for_channel") else None
+    per_channel = {c: bind_channel(reduce, path, c) for c in channels}
     for t_i, t_src in enumerate(timepoints):
-        planes = (reader.read(region, fov, ref, z_level, t_src) for z_level in z_levels)
-        z_star = z_levels[select_index(planes)]   # position -> real z label
         for c_i, channel in enumerate(channels):
-            out[t_i, c_i, 0] = reader.read(region, fov, channel, z_star, t_src)
-            picked_z[(t_src, channel)] = z_star   # provenance: the z actually consumed
-        # One z per (t, fov) across all channels.
-        assert len({picked_z[(t_src, c)] for c in channels}) == 1, (
-            f"channel misregistration at region={region!r} fov={fov} t={t_src}: "
-            f"{ {c: picked_z[(t_src, c)] for c in channels} }"
-        )
+            op = per_channel[channel]
+            for k, group in enumerate(z_groups):
+                planes = (reader.read(region, fov, channel, z_level, t_src) for z_level in group)
+                if keeps_depth:
+                    stack = np.asarray(op(planes))
+                    if stack.shape != (out_depth, y, x):
+                        raise ValueError(
+                            f"{getattr(reduce, '__name__', reduce)!r} declares keeps_depth "
+                            f"and so owes a ({out_depth}, {y}, {x}) stack; it returned "
+                            f"shape {stack.shape}.")
+                    out[t_i, c_i, :] = stack
+                else:
+                    out[t_i, c_i, k] = op(planes)  # streamed z; bounded memory
     return out
 
 

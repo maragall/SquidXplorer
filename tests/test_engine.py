@@ -227,17 +227,7 @@ def _plus_one(plane):
 
 
 def test_shipped_operators_declare_the_z_axis():
-    # Both mip and reference consume z; z-selecting is a way of picking within z.
     assert engine.operator_consumes("mip") == frozenset({"z"})
-    assert engine.operator_consumes("reference") == frozenset({"z"})
-
-
-def test_consumes_is_orthogonal_to_select_index():
-    from squidxplorer.projection import project as mip, project_reference
-    assert getattr(mip, "select_index", None) is None
-    assert getattr(project_reference, "select_index", None) is not None
-    # ...yet they declare the same consumed axis.
-    assert engine.operator_consumes("mip") == engine.operator_consumes("reference")
 
 
 def test_add_operator_defaults_to_z_reducer():

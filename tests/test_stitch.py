@@ -270,7 +270,8 @@ def test_missing_pixel_size_refused(master):
 
 
 def test_default_operators_present():
-    assert available_region_operators() == ["coordinate", "register", "stitch"]
+    # coordinate was shelved 2026-08-24; register=False on `stitch` is the same run.
+    assert available_region_operators() == ["register", "stitch"]
 
 
 def test_add_and_resolve_region_operator(master):
@@ -417,23 +418,26 @@ def test_window_is_bounded_by_workers(master):
     assert peak <= 2, f"in-flight window ran to {peak}, expected <= 2"
 
 
-def test_stitching_a_plane_op_fuses_every_plane_instead_of_keeping_only_z0(master):
-    """A plane-op is stitched per z plane; no plane may go missing."""
-    from squidxplorer._stitch import _resolve_operator, stitch_region
-
-    plane_ops = [n for n in ("bgsub", "decon", "flatfield")
-                 if not _resolve_operator(n).consumes]
-    assert plane_ops, "expected bgsub/decon/flatfield to be plane-ops (consumes == frozenset())"
+def test_z_operator_none_fuses_every_plane_instead_of_keeping_only_z0(master):
+    """z_operator=None (the shelved `keepz`'s replacement) keeps EVERY acquired plane: each is
+    fused unchanged from the one solved geometry; no plane may go missing, no inner reducer
+    runs."""
+    from squidxplorer._stitch import stitch_region
 
     n_z = 3
     reader = _FakeReader(master)
     reader.metadata["n_z"] = n_z
     reader.metadata["z_levels"] = list(range(n_z))
-    out = stitch_region(reader, "A1", [0, 1, 2, 3], z_operator="bgsub", register=False,
+    out = stitch_region(reader, "A1", [0, 1, 2, 3], z_operator=None, register=False,
                         correct_illumination=False)
     assert out.shape[2] == n_z, (
-        f"a plane-op fused {out.shape[2]} of {n_z} z planes; keeping only plane 0 is the silent "
-        "truncation the old NotImplementedError existed to prevent")
+        f"z_operator=None fused {out.shape[2]} of {n_z} z planes; keeping only plane 0 is the "
+        "silent truncation the old NotImplementedError existed to prevent")
+    # ...and unchanged: with a z-collapsing inner operator the SAME run yields ONE plane, so
+    # the depth above is the None mode's own doing, not a fixture accident.
+    collapsed = stitch_region(reader, "A1", [0, 1, 2, 3], z_operator="mip", register=False,
+                              correct_illumination=False)
+    assert collapsed.shape[2] == 1
 
 
 # ---------------------------------------------------------------------------------------
@@ -1339,14 +1343,15 @@ def test_write_plate_refuses_a_typoed_stitch_knob_BEFORE_any_directory_exists(tm
     assert not out.exists(), "the refusal came after the writer had already made directories"
 
 
-def test_coordinate_refuses_the_registration_family_by_name():
-    """`coordinate` IS registration-off; a registration knob is a contradiction, not a no-op.
-    It used to be swallowed: `kwargs["register"] = False` silently overrode a caller's True."""
-    from squidxplorer._engine import split_operator_kwargs
+def test_the_coordinate_operator_is_shelved_whole():
+    """Absence pin (2026-08-24): the registration-off control operator is gone;
+    stitch(register=False) is the same run and stays tested above."""
+    import squidxplorer
+    import squidxplorer._stitch as stitch_mod
 
-    for knob in ("register", "registration_channel", "registration_t"):
-        with pytest.raises(ValueError, match=f"has no parameter '{knob}'"):
-            split_operator_kwargs("coordinate", {knob: 1})
+    assert "coordinate" not in squidxplorer.runnable_operators()
+    for gone in ("_coordinate_factory", "_COORDINATE_PARAMS", "_COORDINATE_ACCEPTS"):
+        assert not hasattr(stitch_mod, gone), f"{gone} is back; coordinate was shelved"
 
 
 def test_the_writer_asks_the_RECORD_for_output_depth_and_kind():
@@ -1357,8 +1362,8 @@ def test_the_writer_asks_the_RECORD_for_output_depth_and_kind():
 
     assert operator_output("mip") == (True, "intensity")
     assert operator_output("stitch") == (True, "intensity")          # declared default: mip
-    assert operator_output("stitch", {"z_operator": "keepz"}) == (False, "intensity")
-    assert operator_output("coordinate") == (True, "intensity")
+    # z_operator=None: keep every plane, fused unchanged — full z, intensity
+    assert operator_output("stitch", {"z_operator": None}) == (False, "intensity")
 
 
 def test_an_edgeless_anchor_does_not_let_the_affine_stomp_the_solved_component(master, monkeypatch):

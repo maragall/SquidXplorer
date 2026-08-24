@@ -15,8 +15,7 @@ from bootstrap import cuda12_available
 
 Probe = Callable[[], tuple[bool, str]]
 
-# Which rows start ticked lives with the extra, not per operator: core + stitch + decon in,
-# segment out (cellpose's torch payload, excluded for size).
+# Which rows start ticked lives with the extra, not per operator: core + stitch + decon in.
 DEFAULT_CHECKED = frozenset({"core", "stitch", "decon"})
 
 # petakit is cupy-cuda12x: "has a GPU" is not enough, the driver must speak CUDA 12.
