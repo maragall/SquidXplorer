@@ -653,3 +653,70 @@ def test_the_immersion_table_is_value_first_with_the_medium_beside_it():
                                      1.473: "glycerol", 1.515: "oil"}
     assert medium_for_ni(1.515) == "oil"
     assert medium_for_ni(1.2345) == "ni 1.234", "an off-table index is named by its value"
+
+
+# --------------------------------------------------------------------------------------
+# Forward-model verification of the 3-D PSF and the volume solve, pinned (2026-08-24).
+# Julio doubted the 2D/3D PSF logic; this is the measured proof, compacted so it cannot rot
+# (the 16-plane reference run: RMSE 23.0 -> 9.4; axial own/neighbour ratio 1.10 -> 5.19
+# against truth's 5.24). Real 25x PLANAPO optics: water, NA 0.85, dz 3 um.
+# --------------------------------------------------------------------------------------
+
+_PSF3D_OPTICS = OpticsParams(na=0.85, wavelength_um=0.670, dxy_um=0.325, dz_um=3.0,
+                             nz=8, ni=1.33)
+
+
+def test_the_3d_psf_is_a_normalised_axially_centred_kernel():
+    """The PSF the solve builds: depth 2*nz-1 (every plane can borrow from every other),
+    unit energy, and per-plane energy symmetric about a centroid ON the centre plane. An
+    off-centre or lopsided PSF reassigns light to the wrong z, which renders as a solve
+    that 'sharpens' by moving structure between planes."""
+    psf = make_psf(_PSF3D_OPTICS)
+    assert psf.shape[0] == 2 * _PSF3D_OPTICS.nz - 1
+    assert float(psf.sum()) == pytest.approx(1.0, abs=1e-3)
+    per_plane = psf.sum(axis=(1, 2)).astype(np.float64)
+    np.testing.assert_allclose(per_plane, per_plane[::-1], atol=1e-6 * per_plane.max())
+    centroid = float((np.arange(psf.shape[0]) * per_plane).sum() / per_plane.sum())
+    assert centroid == pytest.approx(psf.shape[0] // 2, abs=0.05)
+
+
+def test_the_volume_solve_moves_light_back_to_its_own_plane():
+    """Blur a known sparse 3-D bead phantom with the EXACT PSF, restore with the volume
+    solve, and measure both lateral fit (RMSE) and AXIAL specificity (each bead's energy in
+    its own plane against its two neighbours). Measured at these settings: RMSE 30.5 -> 15.4;
+    axial ratio truth 4.72, blurred 1.13, restored 4.38."""
+    nz = _PSF3D_OPTICS.nz
+    psf = make_psf(_PSF3D_OPTICS)
+    rng = np.random.default_rng(1)
+    truth = np.full((nz, 64, 64), 20.0, np.float32)
+    for _ in range(12):
+        z, y, x = rng.integers(2, nz - 2), rng.integers(8, 56), rng.integers(8, 56)
+        truth[z, y, x] += rng.uniform(500, 3000)
+    blurred = scipy_signal.fftconvolve(truth, psf, mode="same").astype(np.float32)
+
+    restored = deconvolve_stack(blurred, _PSF3D_OPTICS, iterations=10, gpu=False,
+                                project=False)
+
+    def rmse(a, b):
+        return float(np.sqrt(np.mean((np.asarray(a, np.float64)
+                                      - np.asarray(b, np.float64)) ** 2)))
+
+    assert rmse(restored, truth) < 0.65 * rmse(blurred, truth), (
+        f"RMSE vs truth barely moved: blurred {rmse(blurred, truth):.1f}, "
+        f"restored {rmse(restored, truth):.1f}")
+
+    beads = [(z, y, x) for z in range(2, nz - 2) for y in range(8, 56) for x in range(8, 56)
+             if truth[z, y, x] > 100]
+    assert beads, "the phantom lost its beads; the test's premise is stale"
+
+    def axial_ratio(vol):
+        own = neigh = 0.0
+        for z, y, x in beads:
+            own += float(vol[z, y - 1:y + 2, x - 1:x + 2].sum())
+            neigh += float(vol[z - 1, y - 1:y + 2, x - 1:x + 2].sum()
+                           + vol[z + 1, y - 1:y + 2, x - 1:x + 2].sum())
+        return own / max(neigh, 1e-9)
+
+    assert axial_ratio(restored) > 3.0 * axial_ratio(blurred), (
+        f"axial energy did not return to its plane: truth {axial_ratio(truth):.2f}, "
+        f"blurred {axial_ratio(blurred):.2f}, restored {axial_ratio(restored):.2f}")
