@@ -204,8 +204,14 @@ def deconvolve_stack(
     iterations: int = DEFAULT_ITERATIONS,
     *,
     gpu: bool = True,
+    project: bool = True,
 ) -> np.ndarray:
-    """True 3-D deconvolution of a whole z-stack with the full 3-D PSF, then a MIP (one plane back)."""
+    """True 3-D deconvolution of a whole z-stack with the full 3-D PSF.
+
+    ``project=True`` (the historical default) returns the MIP; ``project=False`` returns the
+    whole deconvolved stack — same shape as the input, the output the user examines plane by
+    plane (the format contract: SquidXplorer writes in the format it ingests).
+    """
     stack = planes if isinstance(planes, np.ndarray) else np.asarray(list(planes))
     if stack.ndim != 3 or stack.shape[0] < 1:
         raise ValueError(f"deconvolve_stack needs (Z, Y, X); got shape {stack.shape}")
@@ -213,7 +219,7 @@ def deconvolve_stack(
         raise ValueError(f"iterations must be >= 0, got {iterations}")
     dtype = stack.dtype
     if iterations == 0:
-        return stack.max(axis=0)
+        return stack.max(axis=0) if project else stack
 
     optics = optics or active_optics()
     # Bind the PSF's axial extent to the actual stack depth.
@@ -221,7 +227,7 @@ def deconvolve_stack(
         optics = OpticsParams(optics.na, optics.wavelength_um, optics.dxy_um,
                               optics.dz_um, int(stack.shape[0]), optics.ni)
     out = _run(stack, make_psf(optics), iterations, gpu)
-    return cast_like(out.max(axis=0), dtype)
+    return cast_like(out.max(axis=0) if project else out, dtype)
 
 
 # The override optics: an escape hatch checked first by optics_for_channel, empty by default.
@@ -315,12 +321,19 @@ def decon3d_op(
     optics: Optional[OpticsParams] = None,
     iterations: int = DEFAULT_ITERATIONS,
 ) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
-    """Build a true 3-D deconvolution operator: a z-reducer (``consumes={"z"}``)."""
+    """Build a true 3-D deconvolution operator: z-consuming, depth-keeping.
+
+    The whole stack is deconvolved in one 3-D solve and EVERY plane comes back (Julio,
+    2026-08-21: the output is the same size as the input — the user examines the planes).
+    ``keeps_depth`` on the callable is the declaration ``project_well`` and the acquisition
+    writer honour.
+    """
     def _decon3d(planes: Iterable[np.ndarray]) -> np.ndarray:
-        return deconvolve_stack(planes, optics, iterations)
+        return deconvolve_stack(planes, optics, iterations, project=False)
 
     _decon3d.__name__ = f"decon3d(rl,iterations={iterations})"
     _decon3d.consumes = frozenset({"z"})
+    _decon3d.keeps_depth = True
     if optics is None:
         _decon3d.for_channel = lambda path, channel: decon3d_op(
             optics_for_channel(path, channel), iterations)

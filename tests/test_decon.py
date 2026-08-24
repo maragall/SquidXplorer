@@ -99,6 +99,22 @@ def test_zero_iterations_is_the_identity():
     assert np.array_equal(deconvolve_plane(blurred, FAST_OPTICS, iterations=0), blurred)
 
 
+def test_deconvolve_stack_project_false_keeps_every_plane():
+    """The format contract's decon3d shape: output the same size as the input."""
+    stack = np.stack([_blur_with_real_psf(_ground_truth()).astype(np.uint16)] * 3)
+    out = deconvolve_stack(stack, FAST_OPTICS, iterations=0, project=False)
+    assert out.shape == stack.shape
+    np.testing.assert_array_equal(out, stack)
+
+
+def test_decon3d_op_declares_keeps_depth():
+    from squidxplorer._decon import decon3d_op
+
+    op = decon3d_op(FAST_OPTICS, iterations=0)
+    assert getattr(op, "keeps_depth", False) is True, \
+        "decon3d must declare the whole deconvolved stack comes back"
+
+
 def test_rl_conserves_total_intensity_to_within_a_few_percent():
     blurred = _blur_with_real_psf(_ground_truth())
     restored = deconvolve_plane(blurred, FAST_OPTICS, iterations=30)
@@ -309,11 +325,12 @@ def test_decon3d_collapses_z_and_sharpens_more_than_the_2d_plane_op(squid_datase
 
 
 def test_decon3d_op_receives_the_stack_through_project_well(squid_dataset):
+    # Full depth since 2026-08-21: the deconvolved output is the SAME SIZE as the input.
     root, _ = squid_dataset
     reader = open_reader(root)
     out = project_well(reader, "B2", 0, reduce=decon3d_op(FAST_OPTICS, iterations=2))
     n_c = len(reader.metadata["channels"])
-    assert out.shape == (reader.metadata["n_t"], n_c, 1, 4, 4)
+    assert out.shape == (reader.metadata["n_t"], n_c, reader.metadata["n_z"], 4, 4)
 
 
 def test_deconvolve_stack_rejects_a_2d_input():
@@ -401,16 +418,16 @@ def test_the_registered_decon3d_also_gets_per_channel_optics(tmp_path):
 
     out = project_well(reader, "manual0", 0,
                        reduce=_resolve_operator("decon3d").fn, consumes=Z_REDUCER)
-    assert out.shape[2] == 1
+    assert out.shape[2] == reader.metadata["n_z"]     # full depth since 2026-08-21
 
     c638 = names.index("Fluorescence_638_nm_Ex")
     stack = np.stack([reader.read("manual0", 0, names[c638], z, 0)
                       for z in reader.metadata["z_levels"]])
     per_channel = deconvolve_stack(stack, optics_for_channel(root, names[c638]),
-                                   DEFAULT_ITERATIONS)
-    shipped = deconvolve_stack(stack, DEFAULT_OPTICS, DEFAULT_ITERATIONS)
+                                   DEFAULT_ITERATIONS, project=False)
+    shipped = deconvolve_stack(stack, DEFAULT_OPTICS, DEFAULT_ITERATIONS, project=False)
     assert not np.array_equal(per_channel, shipped)
-    assert np.array_equal(out[0, c638, 0], per_channel)
+    assert np.array_equal(out[0, c638], per_channel)
 
 
 def test_optics_are_derived_per_channel_on_the_real_acquisition(real_dataset):

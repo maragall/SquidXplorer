@@ -327,7 +327,13 @@ def project_well(
     if select_index is None:
         # z consumed -> one group per (t, c); z not consumed -> one group per (t, c, z).
         z_groups = [tuple(z_levels)] if "z" in consumes else [(z_level,) for z_level in z_levels]
-        out = np.empty((len(timepoints), len(channels), len(z_groups), y, x), dtype=meta["dtype"])
+        # A z-consuming operator that DECLARES ``keeps_depth`` (on the callable, like
+        # select_index) returns the whole PROCESSED stack — decon3d: true 3-D deconvolution
+        # whose every plane the user examines — so the output depth is the input's while the
+        # operator still sees all z in one call.
+        keeps_depth = bool(getattr(reduce, "keeps_depth", False)) and "z" in consumes
+        out_depth = len(z_levels) if keeps_depth else len(z_groups)
+        out = np.empty((len(timepoints), len(channels), out_depth, y, x), dtype=meta["dtype"])
         # One specialisation per channel for operators declaring `for_channel`.
         path = acquisition_path(reader) if hasattr(reduce, "for_channel") else None
         per_channel = {c: bind_channel(reduce, path, c) for c in channels}
@@ -336,7 +342,16 @@ def project_well(
                 op = per_channel[channel]
                 for k, group in enumerate(z_groups):
                     planes = (reader.read(region, fov, channel, z_level, t_src) for z_level in group)
-                    out[t_i, c_i, k] = op(planes)  # streamed z; bounded memory
+                    if keeps_depth:
+                        stack = np.asarray(op(planes))
+                        if stack.shape != (out_depth, y, x):
+                            raise ValueError(
+                                f"{getattr(reduce, '__name__', reduce)!r} declares keeps_depth "
+                                f"and so owes a ({out_depth}, {y}, {x}) stack; it returned "
+                                f"shape {stack.shape}.")
+                        out[t_i, c_i, :] = stack
+                    else:
+                        out[t_i, c_i, k] = op(planes)  # streamed z; bounded memory
         return out
 
     # z-selecting: ONE focus solve per (t, fov), shared by every channel.
