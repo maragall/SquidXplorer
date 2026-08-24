@@ -177,21 +177,22 @@ def test_reveal_keeps_a_maximised_deck_maximised(qapp, napari_pane_stub, squid_d
 
 # --- the operator panel is the home of the per-window controls -----------------------------------
 
-def test_the_operator_panel_adopts_the_panes_detect_row(qapp, napari_pane_stub, squid_dataset):
-    """The Detect row moves out of the window body into the operator surface (the dock)."""
+def test_the_operator_panel_carries_no_detect_row(qapp, napari_pane_stub, squid_dataset):
+    """Absence pin (2026-08-24): the Detect surface was shelved with spot/cellpose. A stray
+    ``detect_row`` on a pane is NOT adopted, and the per-window operator surface survives it."""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
     v = views[0]
     try:
         row = QWidget()
-        v._pane.detect_row = row
-        v._op_panel = None                       # rebuild: the stub pane had no row at spawn
+        v._pane.detect_row = row                 # a foreign attribute nothing reads any more
+        v._op_panel = None                       # rebuild
         panel = v.operator_panel()
         p = row.parentWidget()
         while p is not None and p is not panel:
             p = p.parentWidget()
-        assert p is panel, "the pane's Detect row was not adopted into the operator panel"
-        # The panel carries the whole per-window operator surface.
+        assert p is None, "the shelved Detect row was adopted into the operator panel"
+        # The panel still carries the whole per-window operator surface.
         assert v._op_combo is not None and v._save_chk is not None
         assert v._btn_controls is not None
     finally:
