@@ -530,6 +530,75 @@ def test_the_flat_mosaic_leaves_the_tree_while_3d_is_up(mosaic):
     assert shown.visible is False
 
 
+def _opened_volume(mosaic, channels=("c0",)):
+    """A `BrickedVolume` OPENED over an empty scene — the 3D child-tab flow, where the 2D
+    mosaic has not landed yet. The 8x8 window plans as ONE brick, so its key matches."""
+    from squidxplorer._brick_view import BrickedVolume
+
+    vol = BrickedVolume(
+        mosaic, reader=None, meta={}, region="A1", window_px=(0, 8, 0, 8),
+        channels=list(channels), scale=(1.5, 0.75, 0.75), origin_um=(0.0, 0.0, 0.0),
+        limit=2048, budget_bytes=1 << 30, op="raw",
+    )
+    vol._loader.start = lambda *a, **k: None
+    vol._loader.stop = lambda *a, **k: None
+    vol._loader.wait = lambda *a, **k: True
+    vol._frame_camera = lambda *a, **k: None
+    vol.open()
+    return vol
+
+
+def test_a_mosaic_landing_mid_volume_neither_shows_nor_strands_the_bricks(mosaic):
+    """THE 2026-08-24 sequel to the brick-add failure: the 3D child tab's own 2D mosaic
+    lands AFTER open (the fuse finishes late). ``add_mosaic`` finds a BRICK as the
+    ``(op, channel)`` representative, sees a multiscale mismatch and removes EVERY holder —
+    measured on the 25x 54-z set: all bricks of the channel gone from the viewer while the
+    volume's books still claimed them resident, so every refresh 'updated' removed layers
+    and 3D never refined to native. Two rules, one gesture: a brick the pane removed is
+    FORGOTTEN (so the next settle re-reads it), and the arriving layer gets the open()
+    treatment — hidden, identity surrendered, both restored by close()."""
+    import numpy as np
+
+    from squidxplorer._napari_view import MosaicKey, key_of
+
+    vol = _opened_volume(mosaic, ("c0",))
+    brick = vol._bricks[0]
+    vol._on_brick(vol._offset_brick(brick), "c0", _scene_stack(1, (4, 8, 8)),
+                  step=1, epoch=vol._epoch)
+    brick_layer = vol._layers[("c0", brick.key)]
+    assert any(l is brick_layer for l in mosaic.model.layers)
+
+    arriving = mosaic.add_mosaic(
+        "raw", "c0", [np.zeros((4, 16, 16), np.uint16), np.zeros((4, 8, 8), np.uint16)],
+        multiscale=True, bbox_um=(0.0, 0.0, 12.0, 12.0))
+
+    # Premise: the replace path really did wipe the brick out of the viewer.
+    assert not any(l is brick_layer for l in mosaic.model.layers), (
+        "add_mosaic no longer removes a mismatched identity; this test's premise is stale")
+    # Rule 1: the books agree with the viewer, and the loader idle pays the owed refresh.
+    assert ("c0", brick.key) not in vol._layers, (
+        "the volume still claims a brick the pane removed — no refresh will re-read it")
+    requests = []
+    vol._loader.request = lambda jobs, epoch: requests.append(list(jobs))
+    vol._on_idle(vol._epoch)
+    assert any(b.key == vol._offset_brick(brick).key and ch == "c0"
+               for req in requests for (b, ch, _s) in req), (
+        "the heal never re-queued the wiped brick")
+    # Rule 2: the arrival is treated exactly like a layer present at open().
+    assert key_of(arriving) is None, "the arriving 2D mosaic kept the bricks' identity"
+    assert arriving.visible is False, "the arriving 2D mosaic paints over the volume"
+    # The re-delivered brick is a layer again, holding the identity.
+    vol._on_brick(vol._offset_brick(brick), "c0", _scene_stack(2, (4, 8, 8)),
+                  step=1, epoch=vol._epoch)
+    healed = vol._layers[("c0", brick.key)]
+    assert any(l is healed for l in mosaic.model.layers)
+    assert key_of(healed) == MosaicKey("raw", "c0")
+
+    vol.close()
+    assert key_of(arriving) == MosaicKey("raw", "c0"), "2D never got its identity back"
+    assert arriving.visible is True, "2D never came back on"
+
+
 def test_the_mosaic_gets_its_identity_and_visibility_BACK_on_close(mosaic):
     from squidxplorer._napari_view import MosaicKey, key_of
 
