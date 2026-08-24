@@ -1023,15 +1023,16 @@ class PlateWindow(QMainWindow):
         self._rescale_fonts()
 
     # -- the Operators cards: a scrollable launcher, living in the VIEWS window's dock ------------
-    def _build_operator_cards(self) -> QWidget:
+    def _build_operator_cards(self, dock=None) -> QWidget:
         """The Operators card launcher: a scrollable list of operator blocks — no header, no
-        footer (Julio, 2026-07-23). Each block opens that operator's panel AS A TAB IN THE PLATE
-        WINDOW (`_activate_operator` is unchanged); operators apply to the plate SELECTION
-        (Cmd/Ctrl-A picks the whole plate). Since 2026-08-19 the launcher lives in the VIEWS
-        window as a collapsible right-edge dock (`_operator_dock`), built here because the cards
-        are the PLATE's capability list; only the pixels moved. Julio earlier rejected a
-        collapsible operators chip in the window's centre-top toolbar; this right-edge dock is
-        the explicitly requested different thing.
+        footer (Julio, 2026-07-23). Each block opens that operator's panel IN ITS OWN DOCK's
+        panel page (Julio, 2026-08-24: "the UI appears in the plate window, rather than as a tab
+        in that same collapsible dock" — a complaint, so the tab route died for card clicks);
+        operators apply to the plate SELECTION (Cmd/Ctrl-A picks the whole plate). Since
+        2026-08-19 the launcher lives in the VIEWS window as a collapsible right-edge dock
+        (`_operator_dock`), built here because the cards are the PLATE's capability list. Julio
+        earlier rejected a collapsible operators chip in the window's centre-top toolbar; this
+        right-edge dock is the explicitly requested different thing.
 
         Gallery View is NOT a card (it arranges windows, see the View menu — 2026-08-02, "I
         guess I don't understand how this can be treated as an operator in bulk").
@@ -1059,7 +1060,8 @@ class PlateWindow(QMainWindow):
             card.setCursor(Qt.PointingHandCursor)
             card.setStyleSheet(_CARD_QSS)
             card.setMinimumHeight(54)
-            card.clicked.connect(lambda _=False, k=op.key: self._activate_operator(k))
+            card.clicked.connect(lambda _=False, k=op.key, d=dock:
+                                 self._activate_operator(k, dock=d))
             sv.addWidget(card)
             self._op_cards[op.key] = card
         sv.addStretch(1)
@@ -1082,7 +1084,10 @@ class PlateWindow(QMainWindow):
         from squidxplorer._operator_dock import OperatorDock
 
         try:
-            dock = OperatorDock(host, cards=self._build_operator_cards())
+            # The dock exists BEFORE its cards so each card's click can name the dock it lives
+            # in — a clicked card opens its panel on THAT dock's panel page (2026-08-24).
+            dock = OperatorDock(host)
+            dock.set_cards(self._build_operator_cards(dock=dock))
         except Exception as exc:                         # noqa: BLE001 - a dock is never worth a crash
             log.warning("could not build the operator dock: %s: %s", type(exc).__name__, exc)
             return None
@@ -1681,18 +1686,26 @@ class PlateWindow(QMainWindow):
             parts.append(f"{name}={value}")
         return " · ".join(parts)
 
-    def _activate_operator(self, key: str):
-        """Operator card / menu clicked: open the operator's UI tab.
+    def _activate_operator(self, key: str, dock=None):
+        """Operator card / menu clicked: open the operator's UI.
 
-        Two sources, in this order, and NEITHER of them is silent:
+        Two panel sources, in this order, and NEITHER of them is silent:
 
         1. a HAND-WRITTEN panel, named by the ``Operation`` template's ``build_tab``. These do more
            than parameter entry (``StitcherPanel`` converts units and refuses a plane-op;
-           ``DeconQCPanel`` runs a QC loop and publishes a picture into pane 3), so they win.
+           ``DeconQCPanel`` runs the turbo QC sweep inline), so they win.
         2. otherwise a panel built FROM THE DECLARATION — :class:`squidxplorer._param_panel
            .GenericOperatorPanel` over the operator's ``params``. This is how ``spot``, ``cellpose``
            and an operator discovered from somebody else's package get real controls without an
            edit here.
+
+        WHERE it opens (2026-08-24, Julio: "When I click on an operator on the operator
+        collapsible dock, the UI appears in the plate window, rather than as a tab in that same
+        collapsible dock" — a complaint): a card click passes its own *dock* and the panel opens
+        on that dock's panel page. Without a *dock* (menus, a view's ⚙ controls) the panel opens
+        where it already lives — the hosting dock if one holds it, else a plate tab as before.
+        ONE live panel per key either way: the widget stays in ``_op_tabs``, so
+        ``operator_kwargs_for`` and app-exit disposal see it wherever it is hosted.
 
         This method used to end at step 1 with a bare ``if op is not None:``, so a key the card
         table did not know made the click land on NOTHING: no tab, no error, no line in the
@@ -1703,16 +1716,59 @@ class PlateWindow(QMainWindow):
             return
         op = _OPERATIONS_BY_KEY.get(key)
         if op is not None:
-            self._open_op_tab(op.key, op.label, getattr(self, op.build_tab))
-            return
-        from squidxplorer._param_panel import GenericOperatorPanel, panel_refusal
+            key, title, builder = op.key, op.label, getattr(self, op.build_tab)
+        else:
+            from squidxplorer._param_panel import GenericOperatorPanel, panel_refusal
 
-        why = panel_refusal(key)
-        if why:
-            self._readout.setText(why)
+            why = panel_refusal(key)
+            if why:
+                self._readout.setText(why)
+                return
+            title, builder = operator_label(key), (lambda k=key: GenericOperatorPanel(self, k))
+        if dock is None:
+            dock = self._dock_hosting(key)     # a dock-homed panel stays home for menu opens
+        if dock is not None:
+            self._open_op_in_dock(key, title, builder, dock)
+        else:
+            self._open_op_tab(key, title, builder)
+
+    def _dock_hosting(self, key: str):
+        """The operator dock currently hosting *key*'s panel, or ``None``."""
+        panel = (getattr(self, "_op_tabs", None) or {}).get(str(key))
+        if panel is None:
+            return None
+        for dock in getattr(self, "_op_docks", []):
+            if _widget_alive(dock) and dock.panel() is panel:
+                return dock
+        return None
+
+    def _open_op_in_dock(self, key: str, title: str, builder, dock) -> None:
+        """Open (or re-show) *key*'s panel on *dock*'s panel page.
+
+        The panel is built once and FILED IN ``_op_tabs`` like a tab-hosted one — that registry
+        is what ``operator_kwargs_for`` reads at run launch and what ``closeEvent`` disposes, so
+        a dock-hosted panel's parameters reach the run and its worker is joined at exit. A panel
+        currently open as a plate tab (or on another dock) MOVES here: one live panel per key,
+        or two surfaces would disagree about the parameters of one run.
+        """
+        win = self._floating.get(key)
+        if win is not None:                    # detached into its own window: raise it instead
+            win.raise_()
+            win.activateWindow()
             return
-        self._open_op_tab(key, operator_label(key),
-                          lambda k=key: GenericOperatorPanel(self, k))
+        w = self._op_tabs.get(key)
+        if w is None:
+            w = builder()
+            self._op_tabs[key] = w
+        else:
+            i = self._left_tabs.indexOf(w)
+            if i >= 0:                         # leaves the plate's bar: the dock is its home now
+                self._left_tabs.removeTab(i)
+                self._sync_left_tabs_visible()
+            other = self._dock_hosting(key)
+            if other is not None and other is not dock:
+                other.release_panel()
+        dock.show_panel(w, title)
 
     def _op_tab_shell(self, title: str, blurb: str) -> tuple:
         """A standard operator-UI tab body: title + blurb, returns (widget, vbox) to fill."""
@@ -1757,12 +1813,13 @@ class PlateWindow(QMainWindow):
         return RegisterPanel(self)
 
     def _build_decon_tab(self) -> QWidget:
-        """The RL semi-convergence loop's controls (IMA-252 + IMA-decon-stitch-ui).
+        """The RL semi-convergence sweep's controls (IMA-252 + IMA-decon-stitch-ui).
 
-        The controls are here; the picture they produce -- the deconvolved 2-D image in turbo
-        with the x-z and y-z strips concatenated -- opens as a tab beside them via
-        :meth:`publish_qc_result`. It was `_build_plane_op_tab` (a preview button and nothing
-        else), which gave no way to choose an iteration count at all.
+        The picture the sweep produces -- the deconvolved image in turbo with the x-z and y-z
+        strips, steppable iteration by iteration -- lives INLINE in the panel (2026-08-24), so
+        the whole choose-the-iteration loop travels with the panel into the operator dock. It
+        was `_build_plane_op_tab` (a preview button and nothing else), which gave no way to
+        choose an iteration count at all.
         """
         from squidxplorer._op_panels import DeconQCPanel
 
