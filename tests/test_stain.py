@@ -99,3 +99,59 @@ def test_a_grayscale_png_is_a_refusal(tmp_path):
     png = tmp_path / "gray.png"
     Image.fromarray(np.full((80, 80), 128, np.uint8)).save(png)
     assert stain_lut(png) is None
+
+
+# --- Chroma ratio luminance damping -----------------------------------------------------------
+#
+# The overview PNG's overlap zones hold NEIGHBOR frames' pixels (later-overwrites-earlier), and
+# its 2 um blur smears tissue chroma over lumen edges. A tissue ratio (R/G ~ 3) landing on a
+# BRIGHT file pixel clips to the dtype ceiling and glows hot magenta (measured: 27k px at the
+# uint8 ceiling on FOV 72 of the 20x trichrome set, 96% in the overlap band). The ratio's
+# confidence is the luminance agreement between the PNG and the file's own plane.
+
+
+def _chroma_source(tmp_path, png_rgb):
+    from squidxplorer._stain import ChromaSource
+
+    path = tmp_path / "overview.png"
+    Image.fromarray(png_rgb).save(path)
+    return ChromaSource(path, top_left_mm_yx=(0.0, 0.0), resolution_um=2.0)
+
+
+def _flat_png(shape, r, g, b):
+    png = np.zeros(shape + (3,), np.uint8)
+    png[..., 0], png[..., 1], png[..., 2] = r, g, b
+    return png
+
+
+def test_a_mismatched_overview_luminance_damps_the_chroma_ratio(tmp_path):
+    """Where the file's plane is BRIGHTER than the PNG luminance that measured the ratio (the
+    PNG holds another frame's tissue there), the ratio is pulled toward neutral by the
+    luminance agreement — the bright pixel must not glow at the dtype ceiling."""
+    # PNG all "dark tissue": G=50, R=150 (ratio 3.0), B=25 (ratio 0.5).
+    src = _chroma_source(tmp_path, _flat_png((30, 30), r=150, g=50, b=25))
+    # Plane 16x16 at 2 um (1:1 with the PNG): cols 0..11 dark (40, agrees with the PNG's
+    # luminance), cols 12..15 bright (100, the PNG lied about this area).
+    plane = np.full((16, 16), 40, np.uint8)
+    plane[:, 12:] = 100
+    # gain = median(G/plane) = 50/40 = 1.25 (the dark majority).
+    out_r = src.component_plane(plane, 0, "manual", 0, 30.0, 30.0, 2.0)
+    out_b = src.component_plane(plane, 2, "manual", 0, 30.0, 30.0, 2.0)
+    # Agreeing luminance keeps the full measured chroma: weight 50/(40*1.25) = 1.
+    assert np.array_equal(out_r[:, :11], np.full((16, 11), 120, np.uint8))   # 40 * 3.0
+    assert np.array_equal(out_b[:, :11], np.full((16, 11), 20, np.uint8))    # 40 * 0.5
+    # Mismatched luminance damps: weight 50/(100*1.25) = 0.4, ratio 1 + 2.0*0.4 = 1.8,
+    # NOT the undamped 100*3.0 = 255-clipped glow.
+    assert np.array_equal(out_r[:, 13:], np.full((16, 3), 180, np.uint8))
+    assert np.array_equal(out_b[:, 13:], np.full((16, 3), 80, np.uint8))     # 1 - 0.5*0.4
+
+
+def test_a_uniformly_scaled_window_keeps_the_full_ratio(tmp_path):
+    """PNG luminance that is one consistent scale of the plane is agreement, not mismatch:
+    the gain absorbs the scale and the measured ratios apply in full."""
+    src = _chroma_source(tmp_path, _flat_png((30, 30), r=150, g=100, b=50))
+    plane = np.full((16, 16), 80, np.uint8)                      # gain 100/80, weight 1
+    out_r = src.component_plane(plane, 0, "manual", 0, 30.0, 30.0, 2.0)
+    out_b = src.component_plane(plane, 2, "manual", 0, 30.0, 30.0, 2.0)
+    assert np.array_equal(out_r, np.full((16, 16), 120, np.uint8))           # 80 * 1.5
+    assert np.array_equal(out_b, np.full((16, 16), 40, np.uint8))            # 80 * 0.5

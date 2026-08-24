@@ -203,6 +203,34 @@ _CHROMA_G_FLOOR = 2.0
 _CHROMA_CACHE_MAX = 32
 
 
+def _luminance_weight(png_g: np.ndarray, plane: np.ndarray) -> np.ndarray:
+    """[0, 1] confidence that each PNG pixel's ratio describes THIS plane's content.
+
+    The overview's overlap zones hold NEIGHBOR frames' pixels (later-overwrites-earlier), and
+    its 2 um blur smears tissue over lumen edges — so a tissue ratio (R/G ~ 3, honestly
+    measured in DARK png content) can land on a BRIGHT file pixel, clip at the dtype ceiling
+    and glow hot magenta (measured: FOV 72 of the 20x trichrome set, 27k px at the uint8
+    ceiling, 96% in the FOV-overlap band; damping removed all but 2 and RAISED the
+    overview-window correlation, R 0.39 -> 0.56, B 0.51 -> 0.67).
+
+    Weight = clip(G_png / (plane * gain), 0, 1) on the PNG grid, gain the median G_png/plane
+    over covered pixels: a PNG darker than the file's own luminance is distrust, scaled; the
+    reverse mismatch (PNG brighter) only desaturates and is left alone. A window with no
+    covered pixels, or a degenerate gain, damps nothing.
+    """
+    h, w = png_g.shape
+    ys = np.linspace(0.0, plane.shape[0] - 1.0, h).astype(np.intp)
+    xs = np.linspace(0.0, plane.shape[1] - 1.0, w).astype(np.intp)
+    coarse = plane[np.ix_(ys, xs)].astype(np.float32)
+    covered = (png_g > _CHROMA_G_FLOOR) & (coarse > 0)
+    if not covered.any():
+        return np.ones_like(png_g, dtype=np.float32)
+    gain = float(np.median(png_g[covered] / coarse[covered]))
+    if not np.isfinite(gain) or gain <= 0:
+        return np.ones_like(png_g, dtype=np.float32)
+    return np.clip(png_g / np.maximum(coarse * gain, 1e-6), 0.0, 1.0).astype(np.float32)
+
+
 def _upsample_bilinear(a: np.ndarray, shape: tuple) -> np.ndarray:
     """Bilinear upsample of a small 2-D array to *shape* (numpy only; chroma is low-frequency)."""
     h, w = a.shape
@@ -272,7 +300,7 @@ class ChromaSource:
         self._res_um = float(resolution_um)
         self._png: Optional[np.ndarray] = None
         self._size: Optional[tuple] = None
-        #: (region, fov) -> (2, h, w) float32 [R/G, B/G] window; bounded LRU.
+        #: (region, fov) -> (3, h, w) float32 [R/G, B/G, PNG G] window; bounded LRU.
         self._windows: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
 
     @property
@@ -321,14 +349,20 @@ class ChromaSource:
 
     def _ratios(self, region: str, fov: int, x_um: float, y_um: float, frame_shape: tuple,
                 pixel_size_um: float) -> np.ndarray:
-        """The FOV's (2, h, w) float32 [R/G, B/G] window at PNG resolution, cached (LRU)."""
+        """The FOV's (3, h, w) float32 [R/G, B/G, PNG G] window at PNG resolution, cached (LRU).
+
+        Row 2 is the PNG's own green — the luminance each ratio was measured at, what
+        :func:`_luminance_weight` weighs the ratio's trust by. Zero outside coverage: an
+        uncovered cell's ratio is neutral 1.0 and its weight is moot.
+        """
         key = (str(region), int(fov))
         cached = self._windows.get(key)
         if cached is not None:
             self._windows.move_to_end(key)
             return cached
         r0, c0, h, w = self._window_box(x_um, y_um, frame_shape, pixel_size_um)
-        out = np.ones((2, h, w), dtype=np.float32)
+        out = np.ones((3, h, w), dtype=np.float32)
+        out[2] = 0.0
         rows, cols = self._png_size()
         ra, rb = max(r0, 0), min(r0 + h, rows)
         ca, cb = max(c0, 0), min(c0 + w, cols)
@@ -340,6 +374,7 @@ class ChromaSource:
                 for i, comp in enumerate((0, 2)):
                     ratio = np.where(usable, crop[..., comp] / np.maximum(g, 1.0), 1.0)
                     out[i, ra - r0:rb - r0, ca - c0:cb - c0] = np.clip(ratio, 0.0, _RATIO_MAX)
+            out[2, ra - r0:rb - r0, ca - c0:cb - c0] = g
         if len(self._windows) >= _CHROMA_CACHE_MAX:
             self._windows.popitem(last=False)
         self._windows[key] = out
@@ -350,12 +385,16 @@ class ChromaSource:
         """One chroma component of a color-recorded-gray plane, in the plane's own dtype.
 
         Component 1 (G) is the file's own pixels untouched; 0 (R) and 2 (B) scale them by the
-        upsampled local ratio. The result is clipped to the dtype's range and cast back.
+        upsampled local ratio, damped toward neutral where the PNG's luminance disagrees with
+        the plane's own (see :func:`_luminance_weight` — the overlap-band hot-magenta fix).
+        The result is clipped to the dtype's range and cast back.
         """
         if component == 1:
             return plane
         ratios = self._ratios(region, fov, x_um, y_um, plane.shape, pixel_size_um)
-        ratio = _upsample_bilinear(ratios[0 if component == 0 else 1], plane.shape)
+        weight = _luminance_weight(ratios[2], plane)
+        damped = 1.0 + (ratios[0 if component == 0 else 1] - 1.0) * weight
+        ratio = _upsample_bilinear(damped, plane.shape)
         out = plane.astype(np.float32) * ratio
         if plane.dtype.kind in "iu":
             # ROUND, never truncate: bilinear weights in float32 leave 1.0 as 0.99999994, and a
