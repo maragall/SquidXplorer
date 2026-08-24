@@ -330,12 +330,24 @@ class MosaicLayers:
             pass
 
     def _reslice_hidden_layers(self, event=None) -> None:
-        """Force-refresh hidden >2-D layers whose slice disagrees with their slice input after a 2D/3D flip."""
+        """Force-refresh hidden >2-D layers whose slice disagrees with their slice input after a 2D/3D flip.
+
+        SYNCHRONOUS on purpose: this exists so the very next thumbnail write sees a
+        consistent slice (the measured 2026-08-06 crash), and under async slicing
+        ``refresh(force=True)`` reroutes to the pool regardless of ``force`` — an
+        eventually-consistent reslice reopens exactly the race this closed.
+        """
         for ly in self._all_ours():
             try:
                 if bool(getattr(ly, "visible", False)) or int(getattr(ly, "ndim", 0)) <= 2:
                     continue
-                ly.refresh(force=True)
+                refresh_sync = getattr(ly, "_refresh_sync", None)
+                if callable(refresh_sync):
+                    # refresh(force=True)'s full flag set: force alone refreshes NOTHING.
+                    refresh_sync(thumbnail=True, data_displayed=True, highlight=True,
+                                 extent=True, force=True)
+                else:                            # napari moved the sync body: the old call
+                    ly.refresh(force=True)
             except Exception as exc:             # noqa: BLE001 - one odd layer is not the pane
                 log.warning("could not re-slice %s after a 2D/3D flip: %s",
                             getattr(ly, "name", "layer"), exc)

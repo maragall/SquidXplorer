@@ -528,6 +528,43 @@ def gl_available(env: Optional[dict] = None) -> tuple[bool, str]:
     return True, ""
 
 
+def attach_async_slice_apply(viewer):
+    """The Qt half a headless ``ViewerModel`` lacks: APPLY async slice responses.
+
+    napari's ONLY consumer of ``_layer_slicer.events.ready`` is ``QtViewer._on_slice_ready``,
+    so a bare ``ViewerModel`` computes async slices that never land on the layer. This mirrors
+    that handler verbatim, ALWAYS marshalled to the main thread: an inline apply from the
+    slicing thread reaches Qt-connected listeners and aborts the process (measured: SIGABRT
+    mid-suite). A caller with no running event loop pumps ``QApplication.processEvents`` to
+    drain the queued applies. Returns the handler; a napari that moved the seam degrades to
+    sync-only slicing with a named log line, never a crash.
+    """
+    try:
+        from superqt.utils import ensure_main_thread
+
+        @ensure_main_thread
+        def _apply(event) -> None:
+            for weak_layer, response in event.value.items():
+                layer = weak_layer()
+                if layer is None:
+                    continue
+                layer._update_slice_response(response)
+                layer._update_loaded_slice_id(response.request_id)
+                layer.events.set_data()
+                layer._refresh_sync(data_displayed=False, thumbnail=True,
+                                    highlight=True, extent=True)
+
+        viewer._layer_slicer.events.ready.connect(_apply)
+        return _apply
+    except AttributeError as exc:                # napari moved the slicer seam
+        from squidxplorer._logpane import get_logger
+
+        get_logger("napari_pane").warning(
+            "async slice responses cannot be applied on this napari (%s); the headless "
+            "pane stays synchronous.", exc)
+        return None
+
+
 def model_pane_class():
     """The ONE test adapter at the pane seam: a pane whose napari CANVAS is absent but whose
     model (``napari.components.ViewerModel``, Qt-free) and ``MosaicLayers`` are real.
@@ -550,6 +587,8 @@ def model_pane_class():
         def __init__(self):
             super().__init__()
             self._viewer = ViewerModel()
+            # The QtViewer half: without it, async slices compute and never land.
+            self._async_apply = attach_async_slice_apply(self._viewer)
             self.mosaic = MosaicLayers(self._viewer)
             self.detect_channel = None
             self.detect_button = None
