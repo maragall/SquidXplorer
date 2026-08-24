@@ -105,6 +105,18 @@ def test_a_fused_save_reports_off_its_own_manifest(squid_dataset, tmp_path):
     assert exit_code(manifest) == EXIT_OK
 
 
+def test_a_register_save_reports_without_a_writer_manifest(squid_dataset, tmp_path):
+    """register's save artifact is its own stitched_ copy, so the runner hands back no
+    writer manifest — the CLI must word that rather than crash (found by the 2026-08-24
+    blast harness: AttributeError 'NoneType' .items in _command)."""
+    pytest.importorskip("tilefusion")
+    root, _ = squid_dataset
+    manifest = run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path),
+                                     operator="register"))
+    assert manifest["outcome"] in ("ok", "partial")
+    assert exit_code(manifest) in (EXIT_OK, EXIT_PARTIAL)
+
+
 def test_run_writes_navigable_plate(squid_dataset, tmp_path):
     root, _ = squid_dataset                       # tiny real acquisition (B2, B3)
     params = ProcessParameters(input_folder=str(root), output_folder=str(tmp_path), tiff=False)

@@ -476,8 +476,10 @@ class EngineExecutor:
                 on_well=self.on_well, on_error=on_error, stop=self.stop)
             landed = result.landed
             if cmd.save:
+                # A save may carry NO writer manifest (register: the artifact is its own
+                # stitched_ copy, reported by the operator) — word that, never crash.
                 data = {"manifest": {k: (str(v) if hasattr(v, "__fspath__") else v)
-                                     for k, v in result.manifest.items()}}
+                                     for k, v in (result.manifest or {}).items()}}
             else:
                 data = {"n_fields": landed}   # PREVIEW headless: computed, counted, nothing retained
             outcome, detail = result.outcome, result.detail
