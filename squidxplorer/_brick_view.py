@@ -133,6 +133,8 @@ class BrickedVolume:
         #: (layer, identity) for every pane layer whose `(op, channel)` we took while 3D is up.
         self._surrendered: list = []
         self._closed = False
+        self._adding_brick = False       # our own add_image must not get the arrival treatment
+        self._heal_pending = False       # a pane removal owes a refresh; paid on loader idle
         self._t_open: Optional[float] = None
         self._t_first: Optional[float] = None
         self._t_settled: Optional[float] = None
@@ -170,6 +172,16 @@ class BrickedVolume:
                     ly.visible = False
             except Exception:                           # noqa: BLE001 - a layer we cannot hide is
                 pass                                    # cosmetic clutter, not a failure to render
+        # The scene can GROW and SHRINK under the volume: the 3D child tab's own 2D mosaic
+        # lands AFTER open (the fuse finishes late), and its add_mosaic finds a BRICK as the
+        # identity's representative, sees a multiscale mismatch, and removes every holder.
+        # Arrivals get exactly the open() treatment; a removed brick is forgotten so the next
+        # refresh re-reads it instead of updating a layer no viewer holds.
+        try:
+            self._viewer.layers.events.inserted.connect(self._on_pane_insert)
+            self._viewer.layers.events.removed.connect(self._on_pane_removal)
+        except Exception:                               # noqa: BLE001 - a model without list
+            pass                                        # events still renders static bricks
         try:
             self._viewer.dims.ndisplay = 3
         except Exception as exc:                        # noqa: BLE001 - named, never silent
@@ -230,6 +242,11 @@ class BrickedVolume:
         if self._closed:
             return
         self._closed = True
+        for name, cb in (("inserted", self._on_pane_insert), ("removed", self._on_pane_removal)):
+            try:
+                getattr(self._viewer.layers.events, name).disconnect(cb)
+            except Exception:                           # noqa: BLE001 - never connected
+                pass
         self._loader.stop()
         self._loader.wait(2000)
         for key in list(self._layers):
@@ -255,6 +272,44 @@ class BrickedVolume:
             except Exception:                           # noqa: BLE001 - the layer may be gone
                 pass
         self._hidden = []
+
+    # -- the scene changes under the volume ----------------------------------------------
+    def _on_pane_insert(self, event=None) -> None:
+        """A pane layer arriving WHILE the volume is up gets the open() treatment: identity
+        surrendered, hidden, both restored by close(). A visible identity layer beside the
+        bricks double-renders the region and splits the identity open() just took."""
+        if self._closed or self._adding_brick:
+            return
+        ly = getattr(event, "value", None)
+        if ly is None:
+            return
+        from squidxplorer._napari_view import META_KEY
+
+        try:
+            meta = getattr(ly, "metadata", None)
+            if isinstance(meta, dict) and META_KEY in meta:
+                self._surrendered.append((ly, meta.pop(META_KEY)))
+            if ly.visible:
+                self._hidden.append(ly)
+                ly.visible = False
+        except Exception:                               # noqa: BLE001 - same license as open():
+            pass                                        # clutter, not a failure to render
+
+    def _on_pane_removal(self, event=None) -> None:
+        """The pane removed a layer under us (add_mosaic's multiscale replace removes every
+        holder of the identity, bricks included): a brick whose layer is gone is NOT resident,
+        whatever the books say. Forget it so the next refresh re-reads it — the books claiming
+        residency is exactly how a wiped brick was 'updated' forever and 3D never refined."""
+        ly = getattr(event, "value", None)
+        if ly is None:
+            return
+        for key, ours in list(self._layers.items()):
+            if ours is ly:
+                self._layers.pop(key, None)
+                self._steps.pop(key, None)
+                self._heal_pending = True
+                log.info("3D bricks: the pane removed brick %s,%s/%s under the volume; "
+                         "re-reading on the next settle", key[1][0], key[1][1], key[0])
 
     # -- the camera decides what is resident ---------------------------------------------
     def view_um(self) -> Optional[tuple]:
@@ -439,10 +494,17 @@ class BrickedVolume:
         if clim is not None:
             kwargs["contrast_limits"] = tuple(clim)
         try:
+            self._adding_brick = True                   # our own insert is not an "arrival"
             layer = self._viewer.add_image(arr, **kwargs)
         except Exception as exc:                        # noqa: BLE001 - named, never a silent hole
+            # The banner keeps its one line; the log keeps the WHOLE traceback — `{exc}` alone
+            # is how a 12-brick failure shipped with an uninformative log (2026-08-24).
+            log.warning("3D: brick %s,%s could not be added", key[1][0], key[1][1],
+                        exc_info=True)
             self._say(f"3D: brick {key[1][0]},{key[1][1]} could not be added: {exc}")
             return
+        finally:
+            self._adding_brick = False
         pin_max_compositing(self._viewer, layer)
         # BEFORE `adopt`, deliberately. napari sized this layer's contrast_limits_range from ONE
         # brick, so a brick cut from a dim corner carries a range narrower than the channel's
@@ -487,6 +549,13 @@ class BrickedVolume:
             log.info("3D bricks: first pixels in %.0f ms", self._t_first * 1000)
 
     def _on_idle(self, epoch: int) -> None:
+        # The heal is paid HERE, not inside the removal event: re-adding layers while the
+        # pane's own remove loop iterates would mutate napari's list under its iteration.
+        # Idle is a queued signal (every 50 ms while the loader runs), so the heal lands on
+        # the GUI thread after the removal finished.
+        if self._heal_pending and not self._closed:
+            self._heal_pending = False
+            self.refresh()
         if self._t_settled is None and self._t_open is not None and epoch == self._epoch \
                 and self._layers:
             self._t_settled = time.perf_counter() - self._t_open

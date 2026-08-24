@@ -1508,6 +1508,53 @@ def test_the_3d_swap_actually_swaps_a_pyramid_napari_handed_back(layers):
     assert [tuple(np.asarray(lv).shape) for lv in raw.data] == [(10, 64, 64), (10, 32, 32)]
 
 
+def test_the_3d_swap_leaves_data_level_a_valid_index_so_later_adds_survive(layers):
+    """THE 2026-08-24 brick failure, headless. napari's ``Image.data`` setter never resets
+    ``_data_level`` ("we don't support changing multiscale in an Image instance"), so the 3D
+    swap's ``multiscale = False; data = chosen`` left the layer claiming the PYRAMID's level
+    while ``level_shapes`` has one row. QtViewer rebuilds every layer's overlays inside EVERY
+    ``add_image`` (``_update_scenegraph``), and the overlay's bounds read is
+    ``level_shapes[data_level]`` — so one swapped mosaic made every subsequent brick add raise
+    ``IndexError: index 1 is out of bounds for axis 0 with size 1`` (live: index 2, 12 bricks,
+    the 25x 54-z set; 3D never refined past the swapped stride-2 volume).
+
+    MUTATION: drop the ``data_level`` reset from ``_swap_layer_scale`` -> the overlay read
+    below raises -> red.
+    """
+    raw = layers.add_mosaic("raw", "405", _z_stack_pyramid(), multiscale=True,
+                            bbox_um=_Z_BBOX, z_scale_um=2.0)
+    assert int(raw.data_level) == 1, (
+        "napari no longer opens a pyramid at its coarsest level; this test's premise is stale")
+
+    layers.render_max_res_3d(True)
+
+    assert int(raw.data_level) < len(raw.level_shapes), (
+        f"the swapped layer claims level {int(raw.data_level)} of "
+        f"{len(raw.level_shapes)} — the state every later add_image trips over")
+    # The exact read QtViewer's overlay creation makes on every add_image.
+    raw._display_bounding_box_augmented_data_level(raw._slice_input.displayed)
+    layers.model.add_image(np.zeros((10, 8, 8), np.uint16))
+
+    layers.render_max_res_3d(False)
+    assert int(raw.data_level) < len(raw.level_shapes)
+    raw._display_bounding_box_augmented_data_level(raw._slice_input.displayed)
+
+
+def test_a_z_collapse_leaves_data_level_a_valid_index_too(layers):
+    """``_collapse_layer_z`` makes the same multiscale -> single-scale flip as the 3D swap
+    (one plane instead of one volume), so it poisons ``data_level`` the same way in 2D."""
+    layers.add_mosaic("raw", "405", _z_stack_pyramid(), multiscale=True,
+                      bbox_um=_Z_BBOX, z_scale_um=2.0)
+    layers.add_mosaic("mip", "405", np.zeros((64, 64), np.uint16), bbox_um=_Z_BBOX)
+    layers.show_op("mip")                    # collapses raw's z axis (mip reduces z)
+
+    raw = layers.find("raw", "405")
+    assert raw.multiscale is False, "the collapse never ran; this test's premise is stale"
+    assert int(raw.data_level) < len(raw.level_shapes), (
+        f"the collapsed layer claims level {int(raw.data_level)} of {len(raw.level_shapes)}")
+    raw._display_bounding_box_augmented_data_level(raw._slice_input.displayed)
+
+
 def test_full_res_level_takes_level_zero_off_napari_s_own_container():
     """``np.asarray(MultiScaleData)`` returns the COARSEST level (``__array__`` is
     ``_data[-1]``), so treating a non-list Sequence as a plain array silently substitutes the

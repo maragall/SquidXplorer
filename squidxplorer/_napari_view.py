@@ -616,6 +616,23 @@ class MosaicLayers:
                 self._swap_layer_scale(ly, full_res=bool(on), limit=limit)
 
     @staticmethod
+    def _reset_data_level(ly: Any) -> None:
+        """Make ``data_level`` a valid index again after a multiscale -> single-scale flip.
+
+        napari's ``Image.data`` setter never resets ``_data_level`` ("we don't support
+        changing multiscale in an Image instance"), so the flip leaves the layer claiming
+        the pyramid's old level while ``level_shapes`` has one row. QtViewer rebuilds every
+        layer's overlays inside EVERY ``add_image`` (``_update_scenegraph``) and the bounds
+        read is ``level_shapes[data_level]`` — one stale layer made each later add raise
+        IndexError (2026-08-24: all 12 bricks of the 25x 54-z set refused, 3D never native).
+        """
+        try:
+            if int(ly.data_level) >= len(ly.level_shapes):
+                ly.data_level = 0
+        except Exception:                        # noqa: BLE001 - not a scalar-field layer
+            pass
+
+    @staticmethod
     def _fits_texture(level: Any, limit: int) -> bool:
         shp = getattr(level, "shape", None)
         if not shp:
@@ -645,6 +662,7 @@ class MosaicLayers:
                         break
                 ly.multiscale = False
                 ly.data = chosen
+                self._reset_data_level(ly)
                 log.info("napari 3D: rendering %s at %s (fills the %d px GPU texture budget; "
                          "full native res needs a crop: draw an ROI and open it)",
                          getattr(ly, "name", "layer"), tuple(getattr(chosen, "shape", ())), limit)
@@ -701,6 +719,7 @@ class MosaicLayers:
             ly.metadata = meta
             ly.multiscale = False
             ly.data = plane
+            self._reset_data_level(ly)
             # The coarsest level's own pixel size, not level 0's.
             fine_h, fine_w = int(levels[0].shape[-2]), int(levels[0].shape[-1])
             ly.scale = (scale[-2] * fine_h / float(plane.shape[-2]),
