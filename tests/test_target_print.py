@@ -249,7 +249,7 @@ def test_open_views_with_no_windows_still_refuses_in_a_sentence(qapp, squid_data
     try:
         assert win._print_open_views_target("Run decon") is None
         assert win._readout.text() == (
-            "Run on open views: no windows are open — open some first.")
+            "Run on open views: no windows are open - open some first.")
     finally:
         win._stop_worker(); win.close()
 
