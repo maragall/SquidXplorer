@@ -64,7 +64,7 @@ def _legacy_metadata(root: Path) -> dict:
         f"acquisition.yaml not found in {root}; using the legacy '{_LEGACY_PARAMS}'. "
         "pixel_size_um is derived as sensor_pixel_size_um / magnification"
         f" ({sensor} / {magnification})" + (
-            " — the legacy format records no binning, so on a binned acquisition this is wrong "
+            " - the legacy format records no binning, so on a binned acquisition this is wrong "
             "by the binning factor." if pixel is not None else
             ", and this file is missing one of those, so the pixel size is unknown.")
     )
@@ -87,7 +87,7 @@ def load_acquisition_metadata(root) -> dict:
             return _legacy_metadata(root)
         raise FileNotFoundError(
             f"acquisition.yaml not found in {root}, and neither is the legacy "
-            f"'{_LEGACY_PARAMS}' — one of the two is required. If this folder is a parent or a "
+            f"'{_LEGACY_PARAMS}' - one of the two is required. If this folder is a parent or a "
             "subfolder of the acquisition, open the acquisition folder itself."
         )
 
@@ -139,7 +139,7 @@ class DisplayChannel(BaseModel):
     """Human label for the UI. Falls back to ``name`` when the channel YAML has none."""
 
     display_color: str
-    """Hex colour, e.g. ``#1FFF00``. Never a placeholder — see :func:`resolve_channels`."""
+    """Hex colour, e.g. ``#1FFF00``. Never a placeholder - see :func:`resolve_channels`."""
 
     exposure_time_ms: Optional[float] = None
     """Camera exposure (ms) when the channel YAML records one."""
@@ -187,10 +187,10 @@ class Acquisition(BaseModel):
     """Well / region ids, plate-ordered."""
 
     fovs_per_region: dict[str, list[int]]
-    """``{region: [fov, ...]}``. Must cover every region — see the validator."""
+    """``{region: [fov, ...]}``. Must cover every region - see the validator."""
 
     fov_positions_um: dict[tuple[str, int], tuple[float, float]]
-    """``{(region, fov): (x_um, y_um)}`` — stage MICROMETRES; ``{}`` when unusable."""
+    """``{(region, fov): (x_um, y_um)}`` - stage MICROMETRES; ``{}`` when unusable."""
 
     channels: list[DisplayChannel]
     """Acquisition channels, in C-axis order."""
@@ -211,7 +211,7 @@ class Acquisition(BaseModel):
     """e.g. ``"24 well plate"``. Optional: an OME/NGFF store need not declare one."""
 
     frame_shape: tuple[int, int]
-    """One FOV's ``(height, width)`` in pixels — from a real decoded frame, not declared."""
+    """One FOV's ``(height, width)`` in pixels - from a real decoded frame, not declared."""
 
     dtype: np.dtype
     """Native pixel dtype. A real ``np.dtype``, because consumers allocate against it."""
@@ -236,7 +236,7 @@ class Acquisition(BaseModel):
         missing = [r for r in self.regions if r not in self.fovs_per_region]
         if missing:
             raise ValueError(
-                f"fovs_per_region has no entry for region(s) {missing[:8]} — a region with no "
+                f"fovs_per_region has no entry for region(s) {missing[:8]} - a region with no "
                 "FOV list renders as a blank well rather than as an error. The reader must "
                 "list every region it reports."
             )
@@ -253,7 +253,7 @@ class Acquisition(BaseModel):
             raise ValueError(
                 "pixel_size_um is required here, but this acquisition has none. Without it "
                 "micrometres cannot be converted to pixels and every FOV would be placed at "
-                "the same spot — a plausible-looking but wrong image. Add "
+                "the same spot - a plausible-looking but wrong image. Add "
                 "objective.pixel_size_um to acquisition.yaml."
             )
         return float(self.pixel_size_um)
@@ -264,7 +264,7 @@ class Acquisition(BaseModel):
             raise ValueError(
                 f"dz_um is required here, but this acquisition has dz_um={self.dz_um!r}. "
                 "Defaulting it to 1.0 would render an anisotropic z-stack as an isotropic "
-                "volume — on the tissue set, dz 1.5um against pixel 0.752um, i.e. 2x squashed "
+                "volume - on the tissue set, dz 1.5um against pixel 0.752um, i.e. 2x squashed "
                 "in z, with nothing said. A 0.0 step is stored honestly on a single-plane "
                 "acquisition but cannot be used as a scale either. Add a real "
                 "z_stack.delta_z_mm to acquisition.yaml."

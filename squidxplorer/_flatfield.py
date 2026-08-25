@@ -35,7 +35,7 @@ class FlatfieldProfile:
         if not np.isfinite(mean) or abs(mean - 1.0) > 1e-3:
             raise ValueError(
                 f"flatfield must be normalised to mean 1.0 (got {mean:.4f}); a profile whose "
-                "mean is not 1 rescales the whole image — a brightness change masquerading as "
+                "mean is not 1 rescales the whole image - a brightness change masquerading as "
                 "a correction. Divide by its mean first."
             )
         object.__setattr__(self, "flatfield", ff)

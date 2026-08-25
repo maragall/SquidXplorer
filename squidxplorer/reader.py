@@ -201,7 +201,7 @@ def _positions_from_fov_column(reader, fovs_per_region: dict, fov_col, x_col, y_
                     f"{_COORDS_NAME} line {line_no}: region {region!r} fov {fov} appears at two "
                     f"conflicting stage positions ({seen[fov][0]} and {key} mm). A repeated fov id "
                     "is normal (one row per z-level) only when the position is identical; differing "
-                    "positions mean the file is corrupt or concatenated — refusing to pick one."
+                    "positions mean the file is corrupt or concatenated - refusing to pick one."
                 )
             continue                        # same position repeated (one row per z / per t)
         seen[fov] = (key, (x * _MM_TO_UM, y * _MM_TO_UM))
@@ -449,7 +449,7 @@ def _pad_to_plan(fovs: dict, z_levels: list, n_t: int, *, planned: dict, acq: di
     if padded:
         warnings.warn(
             f"partial acquisition: padded to the planned final state ({'; '.join(padded)}). "
-            "Unwritten fields render BLACK — this is a stopped run being explored, not a "
+            "Unwritten fields render BLACK - this is a stopped run being explored, not a "
             "finished one.")
     elif not planned and not declared_nz and not declared_nt:
         _log.info(
@@ -501,7 +501,7 @@ def _mismatch_message(mismatched: dict) -> str:
     return (
         f"{_COORDS_NAME}: {parts}. "
         "Without a 'fov' column the Nth position must be the Nth FOV, so a count "
-        "mismatch means the mapping is unknowable — refusing to place FOVs at "
+        "mismatch means the mapping is unknowable - refusing to place FOVs at "
         "positions that would look plausible but be wrong."
     )
 
@@ -521,7 +521,7 @@ def _fov_positions_um_or_empty(root, fovs_per_region: dict, *, prefer_planned: b
                                                         prefer_planned=prefer_planned)
     except ValueError as e:
         warnings.warn(
-            f"{_COORDS_NAME} is unusable ({e}) — continuing WITHOUT stage positions: the "
+            f"{_COORDS_NAME} is unusable ({e}) - continuing WITHOUT stage positions: the "
             "acquisition still opens, but multi-FOV wells render as a single tile instead of "
             "a coordinate-placed mosaic."
         )
@@ -531,7 +531,7 @@ def _fov_positions_um_or_empty(root, fovs_per_region: dict, *, prefer_planned: b
         kept = sorted({region for region, _ in positions})
         warnings.warn(
             f"{_COORDS_NAME} is unusable for {len(mismatched)} of "
-            f"{len(mismatched) + len(kept)} region(s) ({_mismatch_message(mismatched)}) — "
+            f"{len(mismatched) + len(kept)} region(s) ({_mismatch_message(mismatched)}) - "
             f"those regions render as a single tile instead of a coordinate-placed mosaic. "
             f"Kept stage positions for: {', '.join(kept) if kept else '(none)'}."
         )
@@ -621,7 +621,7 @@ def open_reader(path, *, pad_partial: bool = False) -> SquidAcquisitionReader:
                 f"({{region}}_{{fov}}_{{z}}_{{channel}}.tiff) and {stacks} multi-page stack(s) "
                 "({region}_{fov}_stack.tiff). Squid writes one or the other per acquisition, so "
                 "this folder holds two runs. Reading the individual TIFFs and IGNORING the "
-                "stacks — split them into separate folders to read the stacks."
+                "stacks - split them into separate folders to read the stacks."
             )
         # Seed the reader with the listing already paid for above.
         return SquidReader(path, _scanned=(folder, entries), pad_partial=pad_partial)
@@ -846,7 +846,7 @@ class SquidReader(_PadPartialMixin):
             elif ch_sample.dtype != sample.dtype:
                 raise ValueError(
                     f"{self._path}: channels disagree about dtype ({sample.dtype} vs "
-                    f"{ch_sample.dtype} in {ch_path.name}). One acquisition, one dtype — a mixed "
+                    f"{ch_sample.dtype} in {ch_path.name}). One acquisition, one dtype - a mixed "
                     "set cannot be composited or windowed as one; refused rather than upcast."
                 )
         resolved = resolve_channels(sorted(channels), load_channel_yaml(self._path))
@@ -1052,7 +1052,7 @@ def _page_json(page, path: Path, page_index: int) -> dict:
         f"{_TAG_IMAGE_DESCRIPTION}) holding JSON with a 'z_level' key. Squid's MULTI_PAGE_TIFF "
         "writer records z_level/channel/region_id/fov/x_mm/y_mm/z_mm/time on every page; without "
         "it the page's place in the (z, channel) grid is unknowable. Refusing to guess from page "
-        "order — a guessed order silently mis-assigns channels."
+        "order - a guessed order silently mis-assigns channels."
     )
 
 
@@ -1065,7 +1065,7 @@ def _page_channel(page, payload: dict, path: Path, page_index: int) -> str:
         raise ValueError(
             f"{path.name} page {page_index} disagrees with itself about the channel: PageName "
             f"(tag {_TAG_PAGE_NAME}) says {from_tag!r} but ImageDescription JSON says "
-            f"{from_json!r}. Refusing to pick one — a mislabelled channel is invisible downstream."
+            f"{from_json!r}. Refusing to pick one - a mislabelled channel is invisible downstream."
         )
     name = from_tag or from_json
     if not name:
@@ -1444,7 +1444,7 @@ def _unit_to_um(unit) -> float:
     if factor is None:
         warnings.warn(
             f"OME-NGFF space axis unit {unit!r} is not a length this reader converts; treating "
-            "the value as micrometres. Physical placement may be wrong — check the store."
+            "the value as micrometres. Physical placement may be wrong - check the store."
         )
         return 1.0
     return factor
@@ -1639,7 +1639,7 @@ class SquidZarrReader(_PadPartialMixin):
             raise ValueError(
                 f"{sixd!s} is Squid's non-standard 6D layout (build_6d_zarr_path) but its "
                 f"multiscales axes are {ms.axis_names}, not the expected FTCZYX with 'fov' "
-                "leading. Refusing to guess which axis is the FOV — guessing draws every field "
+                "leading. Refusing to guess which axis is the FOV - guessing draws every field "
                 "at the wrong index without erroring."
             )
         return int(self._array(sixd).shape[0])

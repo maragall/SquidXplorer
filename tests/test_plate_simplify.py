@@ -199,6 +199,54 @@ def test_the_operator_panel_carries_no_detect_row(qapp, napari_pane_stub, squid_
         shutdown_plate_window(qapp, win)
 
 
+def _combo_index_for(combo, key: str):
+    return next((i for i in range(combo.count()) if combo.itemData(i) == key), None)
+
+
+def test_the_operator_row_offers_iterations_for_a_declaring_operator(qapp, napari_pane_stub,
+                                                                     squid_dataset):
+    """Julio (2026-08-24): "the operators for this window in deconvolution should have like a
+    decorator that lets the user configure iterations by clicking." The row shows an inline
+    iterations spin for ANY operator declaring an int `iterations` Param (declaration-driven,
+    never a name match), seeded at the run's live value, and a write goes through the plate
+    panel — the run's single source of truth — so `operator_kwargs_for` hands the run that
+    exact number. An operator declaring no iterations hides it."""
+    from squidxplorer._decon import DEFAULT_ITERATIONS
+
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    v = views[0]
+    try:
+        v.operator_panel()
+        combo = v._op_combo
+        i = _combo_index_for(combo, "decon")
+        assert i is not None, f"decon is not in the window's operator dropdown: " \
+                              f"{[combo.itemData(k) for k in range(combo.count())]}"
+        combo.setCurrentIndex(i)
+        assert not v._iter_spin.isHidden(), "no inline iterations control beside the dropdown"
+        assert v._iter_spin.value() == DEFAULT_ITERATIONS, (
+            "the spin does not open at the run's declared default")
+
+        v._iter_spin.setValue(7)
+        assert win.operator_kwargs_for("decon") == {"iterations": 7}, (
+            "the inline spin's value is not what the run would get — two sources of truth")
+        # ONE source of truth: the plate's own decon panel spin holds the same number.
+        assert win._op_tabs["decon"].run_iter_spin.value() == 7
+
+        # ...and the QC's 'use k iterations' adoption shows back up in the window's spin.
+        win._op_tabs["decon"]._adopt_iterations(5)
+        v._refresh_controls_note()
+        assert v._iter_spin.value() == 5
+
+        j = _combo_index_for(combo, "mip")
+        if j is not None:
+            combo.setCurrentIndex(j)
+            assert v._iter_spin.isHidden(), (
+                "an operator declaring no iterations still shows the iterations spin")
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
 def test_the_operator_panel_docstring_names_its_home(qapp, napari_pane_stub, squid_dataset):
     """The Detect-row adoption above holds wherever the panel lives; its home is the view's own
     LEFT column now (Julio: "The operators for this window row should also be on the left

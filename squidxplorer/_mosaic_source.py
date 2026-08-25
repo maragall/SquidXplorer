@@ -109,12 +109,12 @@ def fuse_region_mosaic(
         try:
             frame = reader.read(region, fov, channel, z_level, time_point)
         except Exception as exc:                 # noqa: BLE001 - one bad FOV must not lose a well
-            _log.warning("mosaic %s/%s: FOV %s could not be read (%s: %s) — it is a BLACK HOLE in "
+            _log.warning("mosaic %s/%s: FOV %s could not be read (%s: %s) - it is a BLACK HOLE in "
                          "this mosaic, not an empty field.", region, channel, fov,
                          type(exc).__name__, exc)
             continue          # leave zeros: the hole stays put, and the line above says it is one
         if frame is None:
-            _log.warning("mosaic %s/%s: FOV %s read as None — it is a BLACK HOLE in this mosaic, "
+            _log.warning("mosaic %s/%s: FOV %s read as None - it is a BLACK HOLE in this mosaic, "
                          "not an empty field.", region, channel, fov)
             continue
         frame = np.asarray(frame)
@@ -211,7 +211,7 @@ class MemoryBoundedLRUCache:
             raise ValueError(
                 f"cannot cache a {item_size / 1e6:.1f} MB plane: that is larger than the whole "
                 f"{self._max_memory / 1e6:.1f} MB cache budget. Raise the budget or lower "
-                "max_px — a cache that silently stores nothing is just a slow viewer."
+                "max_px - a cache that silently stores nothing is just a slow viewer."
             )
         with self._lock:
             if key in self._cache:
@@ -421,7 +421,7 @@ class _WindowedLevel:
             try:
                 sub = self._sub(fov)
             except Exception as exc:             # noqa: BLE001 - a black hole, as in _fuse_levels
-                _log.warning("mosaic %s/%s z=%s step=%s: fov %s unreadable (%s) — a BLACK HOLE.",
+                _log.warning("mosaic %s/%s z=%s step=%s: fov %s unreadable (%s) - a BLACK HOLE.",
                              self._region, self._channel, self._z, step, fov, exc)
                 failed.append((fov, exc))
                 continue
@@ -438,7 +438,7 @@ class _WindowedLevel:
             why = "; ".join(f"fov {f}: {type(e).__name__}: {e}" for f, e in failed[:3])
             raise ValueError(
                 f"{self._region}/{self._channel} z={self._z}: no FOV under this window could "
-                f"be read ({len(failed)} of {touched} failed) — {why}")
+                f"be read ({len(failed)} of {touched} failed) - {why}")
         # A full-window compute IS the whole plane: cache it so the next pull (napari asks for
         # the coarsest rung per thumbnail) costs a lookup even after the frames evict.
         if (ys, xs) == (slice(0, self.shape[0]), slice(0, self.shape[1])) \
@@ -493,7 +493,7 @@ def _fuse_levels(reader: Any, meta: dict, region: str, channel: str, z_level: in
                 outs[px][r0:r1, c0:c1] = sub[: r1 - r0, : c1 - c0]
 
     if unreadable and len(unreadable) < len(fovs):
-        _log.warning("mosaic %s/%s z=%s: %d of %d FOV(s) could not be read — they are BLACK HOLES "
+        _log.warning("mosaic %s/%s z=%s: %d of %d FOV(s) could not be read - they are BLACK HOLES "
                      "in this mosaic, not empty fields. First: fov %s: %s",
                      region, channel, z_level, len(unreadable), len(fovs),
                      unreadable[0][0], unreadable[0][1])
@@ -503,7 +503,7 @@ def _fuse_levels(reader: Any, meta: dict, region: str, channel: str, z_level: in
         why = "; ".join(f"fov {f}: {m}" for f, m in unreadable[:3])
         raise ValueError(
             f"{region}/{channel} z={z_level}: no FOV in the region could be read "
-            f"({len(unreadable)} of {len(fovs)} failed) — {why}"
+            f"({len(unreadable)} of {len(fovs)} failed) - {why}"
         )
     return outs
 

@@ -141,7 +141,7 @@ def _build_fov_slider(*, on_change=None, parent=None):
             """
             n = len(self._fovs)
             if n == 0:
-                return "no FOVs here — there is nothing to step through."
+                return "no FOVs here - there is nothing to step through."
             if n == 1:
                 return "this region has one FOV; there is nothing to play through."
             return None

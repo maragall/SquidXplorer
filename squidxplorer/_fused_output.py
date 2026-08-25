@@ -108,7 +108,7 @@ def _refuse_decimated(operator: str, region, placement: Placement, native_px: fl
         raise ValueError(
             f"operator {operator!r} streamed region {region!r} at "
             f"{placement.pixel_size_um} um/px where the acquisition's native pitch is "
-            f"{native_px} um/px — a decimated LOOK, not the mosaic of record. The fused format "
+            f"{native_px} um/px - a decimated LOOK, not the mosaic of record. The fused format "
             "stores native resolution only; save as an OME-Zarr plate (write_plate) instead.")
 
 
@@ -215,7 +215,7 @@ def write_fused_acquisition(reader, operator: str, dst, *, regions=None,
         path = dst
     else:
         path = tmp   # left under the .partial name on purpose: it must not read as finished
-    _log.info("fused save: %s — %d of %d region mosaic(s) written as Squid OME-TIFF.",
+    _log.info("fused save: %s - %d of %d region mosaic(s) written as Squid OME-TIFF.",
               path.name, n_written, owed)
     return {
         "path": str(path),

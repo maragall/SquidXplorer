@@ -1004,6 +1004,14 @@ per run; composition stays refused. Owed: per-set disk estimate; a set-run cance
   recorded at launch), and the window save box's tooltip names stitched_<acq> instead of
   implying an OME-Zarr when a copy-saving operator is selected.
 
+## No em or en dashes in GUI strings (Julio, 2026-08-24)
+
+Every user-facing string — widget text, tooltips, captions, banners, refusals, and anything
+that reaches the log panel — uses commas, colons, periods, or hyphens, never `—` or `–`.
+Enforced by `tests/test_console_readable.py::test_no_gui_string_carries_an_em_or_en_dash`,
+which sweeps every non-docstring string literal in `squidxplorer/` (a dash in a Python string
+is prose bound for a human surface). Docstrings and comments are out of scope.
+
 ## Agent skills
 
 ### Issue tracker

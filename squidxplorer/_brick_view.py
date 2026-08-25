@@ -361,7 +361,7 @@ class BrickedVolume:
             # Once per open: every camera settle re-runs this, and the same sentence on every
             # zoom gesture is noise over a working volume.
             self._noted_dropped = True
-            self._say(f"3D: {budget.dropped} brick(s) left out — the visible volume does not fit "
+            self._say(f"3D: {budget.dropped} brick(s) left out - the visible volume does not fit "
                       f"the {self._budget / 1e6:.0f} MB budget even at stride {budget.step}.")
         self._step = budget.step
         keep = {b.key for b in budget.bricks}
@@ -559,7 +559,7 @@ class BrickedVolume:
         if self._t_settled is None and self._t_open is not None and epoch == self._epoch \
                 and self._layers:
             self._t_settled = time.perf_counter() - self._t_open
-            log.info("3D bricks: fully resolved in %.0f ms — %d layer(s), stride %d, %.0f MB "
+            log.info("3D bricks: fully resolved in %.0f ms - %d layer(s), stride %d, %.0f MB "
                      "resident", self._t_settled * 1000, len(self._layers), self._step,
                      self.resident_bytes / 1e6)
 

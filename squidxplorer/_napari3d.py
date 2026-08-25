@@ -400,7 +400,7 @@ def open_native_3d(
             except Exception:                           # noqa: BLE001 - fall back to the whole FOV
                 crop = None
 
-    title = f"3D native (napari) — {region} / fov {fov}" + (" / ROI" if crop else "")
+    title = f"3D native (napari) - {region} / fov {fov}" + (" / ROI" if crop else "")
     viewer = napari.Viewer(ndisplay=3, title=title)
     n_z = 1
     first_shape: Optional[tuple] = None
@@ -522,7 +522,7 @@ def open_native_3d_volume(
             if not single:
                 pin_max_compositing(viewer, layer)
     if len(bricks) > 1:
-        log.info("3D volume: %dx%d px is over the %d px texture limit — rendered as %d brick(s) "
+        log.info("3D volume: %dx%d px is over the %d px texture limit - rendered as %d brick(s) "
                  "per channel at NATIVE resolution (GL max compositing, no seam).",
                  y, x, limit, len(bricks))
     if not viewer.layers:

@@ -259,7 +259,7 @@ def project_well(
             raise ValueError(
                 f"z_level={z_level} selects ONE acquisition plane, which is only meaningful for a "
                 f"plane-op. {getattr(reduce, '__name__', reduce)!r} declares "
-                f"consumes={sorted(consumes)} — it REDUCES over z, so restricting it to one plane "
+                f"consumes={sorted(consumes)} - it REDUCES over z, so restricting it to one plane "
                 "would silently change what it computes. Drop z_level=, or use a plane-op."
             )
         if z_level not in z_levels:

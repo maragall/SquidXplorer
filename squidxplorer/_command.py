@@ -194,7 +194,7 @@ class RunOperator(Command):
         where = (f"{len(self.regions)} named region(s)" if self.regions is not None
                  else f"scope {self.scope!r}")
         return (f"run {self.operator} on {where}"
-                + (" (save)" if self.save else " (preview — not saved)"))
+                + (" (save)" if self.save else " (preview - not saved)"))
 
 
 class StopRun(Command):
@@ -267,7 +267,7 @@ class CommandBus:
         handler = getattr(self.executor, f"do_{command.kind}", None)
         if not callable(handler):
             return _refuse(command.kind, NOT_SUPPORTED_HERE,
-                           f"the {self.surface} surface cannot run {command.kind!r} — it can run: "
+                           f"the {self.surface} surface cannot run {command.kind!r} - it can run: "
                            f"{', '.join(self.supported()) or 'nothing'}")
         logger.info("%s: %s", self.surface, command.describe())
         try:
@@ -275,14 +275,14 @@ class CommandBus:
         except KeyboardInterrupt:
             # Ctrl-C is a BaseException, so the `except Exception` below never sees it.
             logger.warning("%s interrupted by the user", command.kind)
-            return _refuse(command.kind, CANCELLED, "interrupted (Ctrl-C) — nothing more was run")
+            return _refuse(command.kind, CANCELLED, "interrupted (Ctrl-C) - nothing more was run")
         except Exception as exc:            # noqa: BLE001 - an executor bug is a refusal, not a crash
             logger.exception("%s raised out of %s", command.kind, self.surface)
             return _refuse(command.kind, FAILED, f"{type(exc).__name__}: {exc}")
         if not isinstance(result, CommandResult):
             return _refuse(command.kind, FAILED,
                            f"the {self.surface} surface returned {type(result).__name__}, not a "
-                           "CommandResult — every command returns a result")
+                           "CommandResult - every command returns a result")
         return result
 
 
@@ -299,7 +299,7 @@ def resolve_target(command: "RunOperator", *, selection=None, current_region=Non
         regions = [str(r) for r in command.regions]
         if not regions:
             return None, _refuse(kind, EMPTY_SCOPE,
-                                 "an empty region list is not 'everything' — say so with "
+                                 "an empty region list is not 'everything' - say so with "
                                  "regions=null or scope='whole dataset' if that is what you mean")
     else:
         regions, problem = _run_scope.resolve_run_scope(
@@ -356,7 +356,7 @@ class EngineExecutor:
         self._reader = open_reader(cmd.path)
         meta = self._reader.metadata
         regions = list(meta["regions"])
-        return _done(cmd.kind, f"opened {cmd.path} — {len(regions)} region(s)",
+        return _done(cmd.kind, f"opened {cmd.path} - {len(regions)} region(s)",
                      path=cmd.path, n_regions=len(regions), regions=regions,
                      channels=[c["name"] for c in meta["channels"]],
                      wellplate_format=str(meta.get("wellplate_format", "")))
@@ -392,9 +392,9 @@ class EngineExecutor:
         meta = self._meta()
         if meta is None:
             return _refuse(cmd.kind, NO_ACQUISITION,
-                           "nothing is open — run open_acquisition first")
+                           "nothing is open - run open_acquisition first")
         regions = list(meta["regions"])
-        return _done(cmd.kind, f"{self._path} — {len(regions)} region(s)",
+        return _done(cmd.kind, f"{self._path} - {len(regions)} region(s)",
                      surface=self.surface, path=self._path, regions=regions,
                      n_regions=len(regions),
                      channels=[c["name"] for c in meta["channels"]],
@@ -425,7 +425,7 @@ class EngineExecutor:
         meta = self._meta()
         if meta is None:
             return _refuse(cmd.kind, NO_ACQUISITION,
-                           "nothing is open — run open_acquisition first")
+                           "nothing is open - run open_acquisition first")
         runnable = runnable_operators()
         if cmd.operator not in runnable:
             # Resolve for the refusal: a chain expression gets the engine's own explanation.
@@ -435,7 +435,7 @@ class EngineExecutor:
                 _resolve_operator(cmd.operator)
             except (KeyError, TypeError):
                 return _refuse(cmd.kind, UNKNOWN_OPERATOR,
-                               f"{cmd.operator!r} is not a runnable operator — this application can "
+                               f"{cmd.operator!r} is not a runnable operator - this application can "
                                f"run: {', '.join(runnable)}", available=runnable)
             except ValueError as exc:
                 return _refuse(cmd.kind, BAD_COMMAND, str(exc), operator=cmd.operator)
@@ -457,7 +457,7 @@ class EngineExecutor:
         if cmd.save:
             if not cmd.output_folder:
                 return _refuse(cmd.kind, BAD_COMMAND,
-                               "save=true needs an output_folder — a headless run has no dialog "
+                               "save=true needs an output_folder - a headless run has no dialog "
                                "to ask, and the output can be hundreds of GB")
             from pathlib import Path
 

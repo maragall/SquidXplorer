@@ -268,7 +268,7 @@ class StitcherPanel(_Panel):
         self.register_cb.setChecked(STITCH_DEFAULTS["register"])
         self.register_cb.setToolTip(
             "On: phase-correlate overlapping pairs and solve a global pose graph.\n"
-            "Off: pure coordinate placement from the stage — the honest control for judging "
+            "Off: pure coordinate placement from the stage - the honest control for judging "
             "whether registration actually helped.")
         self.register_cb.toggled.connect(self._on_register_toggled)
         self.v.addWidget(self.register_cb)
@@ -278,7 +278,7 @@ class StitcherPanel(_Panel):
             self.reg_channel_combo.addItem(name)
         self.reg_channel_combo.setToolTip(
             "ONE channel drives the geometry and every channel is then fused with that one "
-            "solution — channels of a FOV share a sensor and must not get disagreeing "
+            "solution - channels of a FOV share a sensor and must not get disagreeing "
             "placements.")
         self.v.addLayout(_row(QLabel("Registration channel:"), self.reg_channel_combo))
 
@@ -420,7 +420,7 @@ class StitcherPanel(_Panel):
         if self._n_z <= 1:
             return "z: this acquisition has 1 plane, so there is one plane to fuse."
         return (f"z: all {self._n_z} planes. maragall/stitcher runs on each z-level "
-                f"independently — the pose graph is solved ONCE and every plane is fused from "
+                f"independently - the pose graph is solved ONCE and every plane is fused from "
                 f"those same origins, so the planes cannot drift apart. Renderable in 3D.")
 
     def kwargs(self) -> dict:
@@ -473,7 +473,8 @@ class QCFrame(NamedTuple):
     volume: object             # (Z, Y, X) the deconvolved crop the sections were cut from
     centre: tuple              # (z, y, x) in `volume`: the brightest structure RL was judged at
     view_half: object          # the lateral half-width the composite was cut to, or None
-    delta: object = None       # mean |Δ| against the previous iteration's volume, or None
+    delta: object = None       # mean |delta| against the previous iteration's volume, or None
+    fov_origin: object = None  # (y0, x0) of the crop inside its FOV frame, in FOV pixels
 
 
 class _DeconQCWorker(QThread):
@@ -523,6 +524,10 @@ class _DeconQCWorker(QThread):
             volumes = _run(crop, make_psf(optics), int(iterations), gpu=gpu,
                            snapshot_iters=snaps)
             centre_t = tuple(int(v) for v in centre)
+            # Where the crop sits inside its FOV frame, recoverable from the two centres —
+            # what places the sweep's data preview at its true stage position in a view.
+            origin = (int(centre_full[1]) - int(centre[1]),
+                      int(centre_full[2]) - int(centre[2]))
             previous = np.ascontiguousarray(crop, dtype=np.float32)
             for k in snaps:
                 if self.isInterruptionRequested():
@@ -534,7 +539,7 @@ class _DeconQCWorker(QThread):
                 previous = volume
                 self.done.emit(int(k),
                                QCFrame(qc_composite(volume, centre, view_half=view_half),
-                                       volume, centre_t, view_half, delta),
+                                       volume, centre_t, view_half, delta, origin),
                                float(ratio))
             self.sweep_done.emit(len(snaps))
         except Exception as exc:                  # reported as a sentence, never swallowed
@@ -570,6 +575,7 @@ class DeconQCResultView(QWidget):
     whole preview exists so the user can decide how many iterations the real run gets."""
 
     useIterations = Signal(int)            # the displayed k, adopted as the run's iterations
+    iterationDisplayed = Signal(int)       # a capture was (re)painted: the data preview follows
 
     def __init__(self, subject: str):
         super().__init__()
@@ -661,7 +667,7 @@ class DeconQCResultView(QWidget):
         self.use_btn = QPushButton("Use these iterations")
         self.use_btn.setCursor(Qt.PointingHandCursor)
         self.use_btn.setToolTip(
-            "Adopt the DISPLAYED iteration count as the decon run's iterations parameter — "
+            "Adopt the DISPLAYED iteration count as the decon run's iterations parameter - "
             "the whole preview exists to make this choice.")
         self.use_btn.setVisible(False)
         self.use_btn.clicked.connect(self._on_use)
@@ -669,7 +675,7 @@ class DeconQCResultView(QWidget):
 
     def show_iteration(self, iterations: int, composite, ratio: float,
                        kind: str, verdict: str, volume=None, centre=None,
-                       view_half=None, gap: int = 2, delta=None) -> None:
+                       view_half=None, gap: int = 2, delta=None, fov_origin=None) -> None:
         """Display one iteration's composite and remember it, so the loop can be compared and
         the stepper can revisit it. Passing volume/centre/view_half makes the picture
         clickable; omitting them leaves it static (the older three-argument call shape)."""
@@ -679,6 +685,7 @@ class DeconQCResultView(QWidget):
             "volume": None if volume is None else np.asarray(volume),
             "centre": None if centre is None else tuple(int(v) for v in centre),
             "view_half": view_half, "gap": int(gap), "delta": delta,
+            "fov_origin": None if fov_origin is None else tuple(int(v) for v in fov_origin),
         }
         self.history.append((k, float(ratio)))
         self.trail_label.setText("  ".join(f"k={kk}: {r:.3f}" for kk, r in self.history))
@@ -713,6 +720,11 @@ class DeconQCResultView(QWidget):
         self.iter_slider.setValue(int(k))
         self.iter_slider.blockSignals(False)
         self._sync_crosshair_label()
+        self.iterationDisplayed.emit(int(k))
+
+    def capture(self, k: int) -> Optional[dict]:
+        """The stored record for iteration *k* (volume, fov_origin, ...), or None."""
+        return self._records.get(int(k))
 
     def _step(self, direction: int) -> None:
         if self._shown_k is None:
@@ -796,6 +808,7 @@ class DeconQCPanel(_Panel):
         self._worker = None
         self._view = None
         self._view_subject = None
+        self._sweep_at = None            # (region, fov, channel) the captures belong to
 
         self.v.addWidget(_head("WHERE TO MEASURE"))
         self.region_combo = QComboBox()
@@ -804,7 +817,7 @@ class DeconQCPanel(_Panel):
         self.fov_spin = QSpinBox()
         self.fov_spin.setRange(0, 9999)
         self.fov_spin.setToolTip(
-            "The QC runs on ONE FOV. A recommendation is for THIS sample at THIS exposure — "
+            "The QC runs on ONE FOV. A recommendation is for THIS sample at THIS exposure - "
             "SNR and structure decide the answer, so it is never a global default.")
         self.v.addLayout(_row(QLabel("Region:"), self.region_combo,
                               QLabel("FOV:"), self.fov_spin))
@@ -813,11 +826,16 @@ class DeconQCPanel(_Panel):
         for name in _channel_names(host):
             self.channel_combo.addItem(name)
         self.channel_combo.setToolTip(
-            "The emission wavelength of this channel sets the PSF. The kernel is a VECTORIAL "
-            "PSF computed from the acquisition's own optics, not a Gaussian.")
+            "The PREVIEW channel: the sweep solves this one channel only. The emission "
+            "wavelength of this channel sets its PSF; the kernel is a VECTORIAL PSF computed "
+            "from the acquisition's own optics, not a Gaussian.")
         self.channel_combo.currentTextChanged.connect(
             lambda *_: self._refresh_optics_note())
         self.v.addLayout(_row(QLabel("Channel:"), self.channel_combo))
+        # The preview-vs-run contract, in plain words: Julio (2026-08-24) read a one-channel
+        # preview as "decon was running on only one channel".
+        self.preview_note = _wrapped("", _SUB)
+        self.v.addWidget(self.preview_note)
 
         # -- optics: the immersion index is CHOSEN, never silently inferred off the NA
         # (Julio, 2026-08-24: "Let it assume air, but user can then click water or oil").
@@ -859,6 +877,11 @@ class DeconQCPanel(_Panel):
         # set recorded as 20x/NA 0.8) should be caught by eye here, not discovered in a halo.
         self.optics_note = _wrapped("", _SUB)
         self.v.addWidget(self.optics_note)
+        # The FINAL values after the NI/NA choices above — what the PSF is actually built
+        # from (Julio, 2026-08-24: "the decon UI should show the final magnification / psf
+        # parameters"). Refreshed live by every NI, NA and channel change.
+        self.effective_note = _wrapped("", "color:#e6edf3;font-size:12px;font-weight:700;")
+        self.v.addWidget(self.effective_note)
 
         self.v.addWidget(_head("QC SWEEP"))
         self.iter_spin = QSpinBox()
@@ -880,7 +903,7 @@ class DeconQCPanel(_Panel):
 
         self.cpu_cb = QCheckBox("Force CPU (disable GPU)")
         self.cpu_cb.setToolTip(
-            "Selects a BACKEND, not an algorithm — the RL update is identical either way.")
+            "Selects a BACKEND, not an algorithm - the RL update is identical either way.")
         self.v.addWidget(self.cpu_cb)
 
         self.run_btn = QPushButton("Deconvolve and show the turbo x-z / y-z sweep")
@@ -909,13 +932,13 @@ class DeconQCPanel(_Panel):
         self.run_iter_spin.setRange(1, 100)
         self.run_iter_spin.setValue(DEFAULT_ITERATIONS)
         self.run_iter_spin.setToolTip(
-            "THE iteration count a decon run uses while this panel is open — the run dispatch "
+            "THE iteration count a decon run uses while this panel is open - the run dispatch "
             "reads it off this panel (operator_kwargs_for), so what you adopted from the sweep "
             "is what the run gets. Closed panel = the declared default.")
         self.v.addLayout(_row(QLabel("Runs use:"), self.run_iter_spin))
         self.v.addWidget(_wrapped(
             "Judge the sweep above, step to the iteration that looks right, and press its "
-            "'use k iterations' button — the count lands here and every decon run launched "
+            "'use k iterations' button - the count lands here and every decon run launched "
             "from a view's Run button uses it. Nothing is written next to the acquisition; "
             "the datasets are opened read only.", _SUB))
         self.v.addStretch(1)
@@ -939,22 +962,69 @@ class DeconQCPanel(_Panel):
         except Exception as exc:               # noqa: BLE001 - shown as a sentence, not hidden
             return None, f"{exc}"
 
+    def _sensor_pixel_um(self):
+        """``sensor_pixel_size_um`` from 'acquisition parameters.json', or None — never guessed."""
+        import json as _json
+        from pathlib import Path as _Path
+
+        dataset = getattr(self.host, "_acq_path", None)
+        if not dataset:
+            return None
+        try:
+            params = _json.loads((_Path(str(dataset)) / "acquisition parameters.json").read_text())
+            value = float(params.get("sensor_pixel_size_um"))
+            return value if value > 0 else None
+        except Exception:                      # noqa: BLE001 - absent file/key: no magnification
+            return None
+
+    def _effective_optics(self):
+        """The recorded optics WITH the session's NI/NA applied — what the solve will use.
+
+        ``(OpticsParams, "")``, or ``(None, why)`` when unreadable or physically refused."""
+        from squidxplorer._decon import apply_session_optics
+
+        optics, why = self._recorded_optics()
+        if optics is None:
+            return None, why
+        try:
+            return apply_session_optics(optics), ""
+        except ValueError as exc:              # NA impossible in this medium: the named refusal
+            return None, str(exc)
+
     def _refresh_optics_note(self) -> None:
-        """The auto-derived optics, on screen BEFORE a run, plus the NA-vs-ni physics check."""
+        """The auto-derived optics AND the final PSF parameters, on screen BEFORE a run."""
         from squidxplorer._decon import medium_for_ni, session_na
 
+        channel = self.channel_combo.currentText()
+        self.preview_note.setText(
+            f"preview: {channel} only. Run deconvolves every channel, each with its own PSF "
+            "(wavelength per channel)." if channel else "")
         optics, why = self._recorded_optics()
         if optics is None:
             self.optics_note.setText(f"recorded optics unreadable: {why}")
         else:
             self.optics_note.setText(
                 f"recorded: NA {optics.na:.2f} · emission {optics.wavelength_um:.3f} µm · "
-                f"pixel {optics.dxy_um:.3f} µm · dz {optics.dz_um:.2f} µm — check these "
+                f"pixel {optics.dxy_um:.3f} µm · dz {optics.dz_um:.2f} µm. Check these "
                 "against the objective actually used; a wrong rig profile shows up here.")
+        effective, e_why = self._effective_optics()
+        if effective is None:
+            self.effective_note.setText("" if optics is None
+                                        else f"the solve will refuse: {e_why}")
+        else:
+            ni = effective.ni if effective.ni is not None else float(self.ni_combo.currentData())
+            sensor = self._sensor_pixel_um()
+            mag = (f" · magnification {sensor / effective.dxy_um:.1f}x "
+                   f"(sensor {sensor:g} µm / pixel)" if sensor else "")
+            self.effective_note.setText(
+                f"the solve will use: NA {effective.na:.2f} · {medium_for_ni(ni)} "
+                f"(ni {float(ni):.3f}) · emission {effective.wavelength_um:.3f} µm "
+                f"({channel}) · pixel {effective.dxy_um:.3f} µm · dz {effective.dz_um:.2f} µm "
+                f"· nz {int(effective.nz)}{mag}")
         na = session_na() or (optics.na if optics is not None else None)
         ni = float(self.ni_combo.currentData())
         if na is not None and na > ni + 1e-9:
-            self.say(f"NA {na:.2f} is impossible in {medium_for_ni(ni)} (ni {ni:.3f}) — pick "
+            self.say(f"NA {na:.2f} is impossible in {medium_for_ni(ni)} (ni {ni:.3f}): pick "
                      "the objective's actual immersion. The solve will refuse until they agree.")
 
     def _on_ni_changed(self, *_) -> None:
@@ -976,22 +1046,26 @@ class DeconQCPanel(_Panel):
     def run(self) -> None:
         dataset = getattr(self.host, "_acq_path", None)
         if not dataset:
-            self.say("no acquisition is open — deconvolution needs the dataset folder to read "
+            self.say("no acquisition is open - deconvolution needs the dataset folder to read "
                      "its optics (NA, emission wavelength, pixel size, z-step) from.")
             return
         if self._worker is not None and self._worker.isRunning():
-            self.say("a deconvolution is already running — let it finish before adding an "
+            self.say("a deconvolution is already running - let it finish before adding an "
                      "iteration.")
             return
 
         iterations = self.iter_spin.value()
         subject = self._subject()
+        # What the sweep's captures BELONG to, for the in-view data preview's placement.
+        self._sweep_at = (self.region_combo.currentText(), int(self.fov_spin.value()),
+                          self.channel_combo.currentText())
         if self._view is None or self._view_subject != subject:
             if self._view is not None:
                 self._view_slot.removeWidget(self._view)
                 self._view.deleteLater()
             self._view = DeconQCResultView(subject)
             self._view.useIterations.connect(self._adopt_iterations)
+            self._view.iterationDisplayed.connect(self._push_view_preview)
             self._view_subject = subject
             self._view_slot.addWidget(self._view)
 
@@ -1016,8 +1090,67 @@ class DeconQCPanel(_Panel):
         self._view.show_iteration(iterations, frame.composite, ratio, kind, verdict,
                                   volume=frame.volume, centre=frame.centre,
                                   view_half=frame.view_half,
-                                  delta=getattr(frame, "delta", None))
+                                  delta=getattr(frame, "delta", None),
+                                  fov_origin=getattr(frame, "fov_origin", None))
         self.say(verdict)
+
+    #: The layer key the sweep's in-view data preview lands under. Not a registered operator
+    #: on purpose: `operator_reduces_depth` answers False for an unknown key, so the preview
+    #: volume keeps its z and can be opened in 3D like any depth-keeping layer.
+    PREVIEW_OP = "decon QC"
+
+    def _preview_view(self):
+        """A live view showing the sweep's region, the active one preferred; else None."""
+        manager = getattr(self.host, "_viewer_manager", None)
+        if manager is None or self._sweep_at is None:
+            return None
+        region = self._sweep_at[0]
+        try:
+            candidates = [manager.active_view()] + list(manager.windows())
+        except Exception:                      # noqa: BLE001 - a manager double without windows()
+            return None
+        for win in candidates:
+            if win is not None and region in list(getattr(win, "_regions", []) or []):
+                return win
+        return None
+
+    def _push_view_preview(self, k: int) -> None:
+        """Land the DISPLAYED iteration's deconvolved crop in a view, at its true stage
+        position, as a real layer — the sweep is judged on actual data at real size (Julio,
+        2026-08-24: "see the actual data preview as we sweep"). Stepping the slider swaps the
+        layer's pixels; nothing is re-solved."""
+        view = self._view
+        rec = view.capture(k) if view is not None else None
+        if rec is None or rec.get("volume") is None or rec.get("fov_origin") is None \
+                or self._sweep_at is None:
+            return
+        target = self._preview_view()
+        if target is None:
+            return                             # no view over that region: the panel still shows it
+        region, fov, channel = self._sweep_at
+        meta = getattr(target, "_meta", None) or {}
+        px = meta.get("pixel_size_um")
+        mosaic = getattr(getattr(target, "_pane", None), "mosaic", None)
+        if mosaic is None or not px:
+            return
+        try:
+            from squidxplorer._mosaic_source import mosaic_fov_bboxes_um
+
+            box = mosaic_fov_bboxes_um(meta, region).get(int(fov))
+            if box is None:
+                return
+            fx0, fy0 = float(box[0]), float(box[1])
+            volume = rec["volume"]
+            y0, x0 = (int(v) for v in rec["fov_origin"])
+            h, w = int(volume.shape[-2]), int(volume.shape[-1])
+            bbox = (fx0 + x0 * float(px), fy0 + y0 * float(px),
+                    fx0 + (x0 + w) * float(px), fy0 + (y0 + h) * float(px))
+            mosaic.add_result("intensity", self.PREVIEW_OP, channel, volume,
+                              bbox_um=bbox, z_scale_um=meta.get("dz_um") or None,
+                              colormap="turbo")
+        except Exception as exc:               # noqa: BLE001 - the preview is a nicety, SAID
+            self.say(f"the sweep's data preview could not reach the view: "
+                     f"{type(exc).__name__}: {exc}")
 
     def _on_sweep_done(self, n: int) -> None:
         self.progress.setVisible(False)
@@ -1027,11 +1160,20 @@ class DeconQCPanel(_Panel):
         """The QC's chosen count becomes THE run's iterations (read via ``kwargs``)."""
         self.run_iter_spin.setValue(int(k))
         self.say(f"decon runs will use {int(k)} iteration" + ("s" if int(k) != 1 else "")
-                 + " — adopted from the QC sweep; a view's Run button reads it off this panel.")
+                 + " - adopted from the QC sweep; a view's Run button reads it off this panel.")
 
     def kwargs(self) -> dict:
         """The decon run's parameters, read by ``operator_kwargs_for('decon')`` at launch."""
         return {"iterations": int(self.run_iter_spin.value())}
+
+    def set_param(self, name: str, value) -> Optional[str]:
+        """Write ONE run parameter into this panel — the run's single source of truth — so a
+        view's inline iterations control edits the SAME number the QC's 'use k' button writes.
+        Returns a refusal sentence for a name this panel does not hold."""
+        if str(name) == "iterations":
+            self.run_iter_spin.setValue(int(value))
+            return None
+        return f"the decon panel holds no parameter {name!r}; it declares ['iterations']."
 
     def _on_failed(self, message: str) -> None:
         self.progress.setVisible(False)

@@ -139,7 +139,7 @@ class GalleryWindow(QMainWindow):
         self._first_paint_ms: Optional[float] = None
         self._colors = self._channel_colors(meta)
 
-        self.setWindowTitle(f"{title} — Gallery View")
+        self.setWindowTitle(f"{title} - Gallery View")
         self._build()
         self.restart()
 
@@ -337,7 +337,7 @@ class GalleryWindow(QMainWindow):
         self._first_paint_ms = None
         self._lay_out_grid()
         if self._scope.is_empty():
-            self._say("Nothing in scope — select some wells on the plate, or open an acquisition.")
+            self._say("Nothing in scope - select some wells on the plate, or open an acquisition.")
             return
         self._started_at = time.perf_counter()
         log.info("gallery: %s", self._scope.describe(self._meta))
@@ -385,7 +385,7 @@ class GalleryWindow(QMainWindow):
         first = "" if self._first_paint_ms is None else f"first paint {self._first_paint_ms:.0f} ms; "
         note = ""
         if self._dropped:
-            note = (f" — {self._dropped} further region(s) are NOT shown "
+            note = (f" - {self._dropped} further region(s) are NOT shown "
                     f"(cap {MAX_GALLERY_CELLS} cells); select fewer wells to choose which.")
         holes = sum(len(c.unreadable) for c in self._cells.values())
         if holes:
@@ -437,7 +437,7 @@ class GalleryWindow(QMainWindow):
                 f"{cell.shape[1]}x{cell.shape[0]} px (1/{cell.step:g} of "
                 f"{cell.full_shape[1]}x{cell.full_shape[0]})",
                 f"{cell.n_fovs} FOV in scope",
-                f"window {lo:.0f}–{hi:.0f} ({self._contrast_mode})"]
+                f"window {lo:.0f}-{hi:.0f} ({self._contrast_mode})"]
         if cell.unreadable and self._holes.isChecked():
             bits.append(f"{len(cell.unreadable)} FOV unreadable: {list(cell.unreadable)[:5]}")
         return "\n".join(bits)
@@ -490,7 +490,7 @@ class GalleryWindow(QMainWindow):
         """Point an OPEN gallery at a new scope. The re-open gesture, so ids and geometry survive."""
         self._scope, self._dropped = scope.capped(MAX_GALLERY_CELLS)
         if title:
-            self.setWindowTitle(f"{title} — Gallery View")
+            self.setWindowTitle(f"{title} - Gallery View")
         n_t = int((self._meta or {}).get("n_t", 1) or 1)
         self._t.setRange(0, max(0, n_t - 1))
         self._t.setValue(min(scope.time_point, n_t - 1))

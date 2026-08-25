@@ -242,7 +242,7 @@ class CanvasLoupe(QObject):
             return
         nxt = self._mag_index + step
         if not 0 <= nxt < len(_MAG_LADDER):
-            self._say(f"the loupe is at {_MAG_LADDER[self._mag_index]:g}× — "
+            self._say(f"the loupe is at {_MAG_LADDER[self._mag_index]:g}× - "
                       f"that is as far as it {'magnifies' if step > 0 else 'zooms out'}.")
             return
         self._mag_index = nxt
@@ -345,7 +345,7 @@ class CanvasLoupe(QObject):
         # and does nothing; a message per wheel tick is noise. Once per ask.
         if capped_at_native(mag, _MAG_LADDER[self._mag_index]) and not self._said_native:
             self._said_native = True
-            self._say(f"the loupe is at native resolution here — {mag:.1f}× is all "
+            self._say(f"the loupe is at native resolution here - {mag:.1f}× is all "
                       f"{_MAG_LADDER[self._mag_index]:g}× can give without inventing pixels. "
                       f"Zoom the canvas out for it to gain more.")
 

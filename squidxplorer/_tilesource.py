@@ -76,7 +76,7 @@ def _check_micrometres(bboxes: dict, frame_extent_um: float) -> None:
     pitch = min(_min_axis_pitch(centres[:, 0]), _min_axis_pitch(centres[:, 1]))
     if pitch < frame_extent_um / _MM_PITCH_RATIO:
         raise ValueError(
-            f"FOV pitch is {pitch:.4g} µm for a {frame_extent_um:.4g} µm frame — a stage does not "
+            f"FOV pitch is {pitch:.4g} µm for a {frame_extent_um:.4g} µm frame - a stage does not "
             "step 1/100th of a field. These positions are almost certainly MILLIMETRES stored under "
             "a `_um` key; the reader converts coordinates.csv at the producer "
             "(squidxplorer.reader.load_fov_positions_um). Refusing to build a 1000x-too-small plate."
@@ -146,7 +146,7 @@ def plate_ladder(metadata: Mapping, *, tile_px: int = DEFAULT_TILE_PX,
         raise ValueError(
             "no fov_positions_um in the metadata: without stage coordinates every FOV would sit at "
             "the same spot and the plate view would be a single stacked pile. (coordinates.csv "
-            "missing or unusable — see squidxplorer.reader._fov_positions_um_or_empty.)")
+            "missing or unusable - see squidxplorer.reader._fov_positions_um_or_empty.)")
     pixel_size_um = metadata.get("pixel_size_um")
     if not pixel_size_um:
         raise ValueError("pixel_size_um is required to size an FOV in µm; acquisition.yaml has none.")

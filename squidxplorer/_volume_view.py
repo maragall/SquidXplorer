@@ -231,12 +231,12 @@ def _open_bricked(win, region: str, window: tuple, *, scene_from=None, what: str
     vol = win._native3d
     n = getattr(vol, "brick_count", 0)
     if src_pitch is None:
-        voxels = (f"Voxels at {px:.3f} um/px, the acquisition's own — read straight from the "
+        voxels = (f"Voxels at {px:.3f} um/px, the acquisition's own - read straight from the "
                   f"reader.")
     else:
         spy, spx = (_conv.display_um(v) for v in src_pitch)
         coarser = ("" if max(spy, spx) <= px * 1.001 else
-                   f" — COARSER than the acquisition's {px:.3f} um/px, because a displayed "
+                   f" - COARSER than the acquisition's {px:.3f} um/px, because a displayed "
                    f"operator layer is the fused preview at its own decimation")
         voxels = (f"Voxels at {spy:.3f} x {spx:.3f} um/px, read off the '{source}' "
                   f"layer{coarser}.")
@@ -278,7 +278,7 @@ def volume_source(win, window: tuple):
     except Exception:                                # noqa: BLE001
         pass
     if origin is None:
-        win._say(f"3D: '{op}' cannot be placed — this region has no stage positions.")
+        win._say(f"3D: '{op}' cannot be placed - this region has no stage positions.")
         return None, None, None
     srcs: dict = {}
     for ch in mosaic.channels(op):
@@ -342,7 +342,7 @@ def displayed_pitch_um(win, layer, *, what: str):
     except (TypeError, ValueError, IndexError):
         win._say(f"3D refused: {what} carries no napari scale, so the micrometres per "
                  f"displayed pixel are unknown. The acquisition's pixel_size_um is NOT that "
-                 f"number — the mosaic on screen is fused at its own decimation — so "
+                 f"number - the mosaic on screen is fused at its own decimation - so "
                  f"there is nothing honest to render this volume at.")
         return None
     if not (py > 0 and px > 0):
@@ -387,7 +387,7 @@ def render_roi_volume(win, mosaic, contrast_by: dict, colormap_by: dict) -> None
         replace_native3d(win, lambda: open_native_3d_volume(
             {n: np.asarray(v) for n, v in volumes.items()},
             scale=(dz, py_um, px_um),
-            title=f"3D ROI — {win._view_label(win._regions)}",
+            title=f"3D ROI - {win._view_label(win._regions)}",
             contrast_by_channel=contrast_by or None,
             colormap_by_channel=colormap_by or None,
             max_texture=max_tex,

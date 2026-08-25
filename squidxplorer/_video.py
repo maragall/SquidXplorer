@@ -152,7 +152,7 @@ def region_movie_frames(
 
     names = list(channels) if channels is not None else [c["name"] for c in meta["channels"]]
     if not names:
-        raise ValueError(f"{region}: no channels to record — every channel is hidden.")
+        raise ValueError(f"{region}: no channels to record - every channel is hidden.")
     colors = _channel_colors(meta, names, rgb_by_channel)
 
     z_levels = list(meta.get("z_levels") or [0])
@@ -175,7 +175,7 @@ def region_movie_frames(
             if fused is None:
                 # same "not derivable, do not guess" signal the mosaic path returns
                 raise ValueError(
-                    f"{region}: no stage positions / pixel size — there is no mosaic to record.")
+                    f"{region}: no stage positions / pixel size - there is no mosaic to record.")
             planes.append(fused[0])
         store = np.stack(planes)
         if latched is None:

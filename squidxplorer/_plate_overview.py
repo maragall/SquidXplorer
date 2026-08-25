@@ -913,7 +913,7 @@ class PlateOverview(QWidget):
             return
         on = bool(on)
         if not on and not any(bool(v) for i, v in enumerate(self._mask) if i != ch):
-            log.debug("plate: keeping channel %d on — it is the last one lit, and a plate with "
+            log.debug("plate: keeping channel %d on - it is the last one lit, and a plate with "
                       "no channels is a black navigator", ch)
             return
         self._mask[ch] = on

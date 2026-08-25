@@ -154,13 +154,13 @@ def estimate_region_flatfield(
     rng = np.random.default_rng(_FF_SEED)
     picked = [fovs[i] for i in sorted(rng.choice(len(fovs), size=n, replace=False))]
 
-    _log.info("Flatfield: no profile in hand — estimating %d channel profile(s) from %d raw "
+    _log.info("Flatfield: no profile in hand - estimating %d channel profile(s) from %d raw "
               "tile(s) of region %s at z=%d (tilefusion BaSiC). Stitching starts after this.",
               len(channels), n, region, z_level)
     profiles = {}
     for i, c in enumerate(channels, 1):
         name = all_channels[c]
-        _log.info("Flatfield: channel %d of %d (%s) — reading %d raw tile(s)…",
+        _log.info("Flatfield: channel %d of %d (%s) - reading %d raw tile(s)…",
                   i, len(channels), name, n)
         stack = np.stack([reader.read(region, f, name, z_level, time_point) for f in picked])
         t0 = time.perf_counter()
@@ -222,7 +222,7 @@ def resolve_flatfield(reader, region: str, fovs: Sequence[int], *, channels=None
 
     selected = _selected_profiles(names)
     if selected is not None:
-        _log.info("Flatfield: using the profile(s) selected in the GUI — one %dx%d field per "
+        _log.info("Flatfield: using the profile(s) selected in the GUI - one %dx%d field per "
                   "channel for all %d channel(s) (%s). Clear them to fall back to this "
                   "acquisition's stored profile.",
                   *next(iter(selected.values())).shape, len(names), ", ".join(names))
@@ -529,7 +529,7 @@ def stitch_region(
     if _op.produces == LABELS:
         raise ValueError(
             f"operator {z_operator!r} produces label images (integer object ids), and fusion blends "
-            "overlapping tiles by a weighted average — the mean of two label ids is a third, "
+            "overlapping tiles by a weighted average - the mean of two label ids is a third, "
             "nonexistent object, and per-FOV ids collide across every seam. Stitching labels needs "
             "id reconciliation across seams, which this operator does not do. Segment per FOV "
             f"instead (write_plate(operator={z_operator!r})), or stitch an intensity operator."
@@ -540,7 +540,7 @@ def stitch_region(
         raise ValueError(
             f"z_operator {z_operator!r} flat-field corrects its input, and stitching's read path is "
             "ALSO correcting (correct_illumination is on by default). The correction is not "
-            "idempotent — applying it twice changes ~89% of pixels by up to 23 counts, silently. "
+            "idempotent - applying it twice changes ~89% of pixels by up to 23 counts, silently. "
             "Pick ONE: correct_illumination=False to let the operator do it, or a z operator that "
             "does not correct (e.g. 'mip') and let the read path do it, which is where TileFusion "
             "applies it and the only place registration can benefit from it."
@@ -840,7 +840,7 @@ def _stitch_plate(
             selected = _selected_profiles(names)
             if selected is not None:
                 operator_kwargs["flatfield"] = selected
-                _log.info("Flatfield: using the profile selected in the GUI for the whole plate — "
+                _log.info("Flatfield: using the profile selected in the GUI for the whole plate - "
                           "%d channel(s), one %dx%d gain field each.",
                           len(selected), *next(iter(selected.values())).shape)
             elif path is not None and path.exists():
@@ -849,12 +849,12 @@ def _stitch_plate(
                 _log.info("Flatfield: loaded %d plate-wide profile(s) from %s.",
                           len(names), path.name)
             else:
-                _log.info("Flatfield: no stored profile — estimating one plate-wide profile per "
+                _log.info("Flatfield: no stored profile - estimating one plate-wide profile per "
                           "channel from %d tile(s) across %d well(s) at z=%d (tilefusion BaSiC). "
                           "Stitching starts after this.", len(picked), len(wells), z)
                 profiles = {}
                 for i, name in enumerate(names, 1):
-                    _log.info("Flatfield: channel %d of %d (%s) — reading %d raw tile(s)…",
+                    _log.info("Flatfield: channel %d of %d (%s) - reading %d raw tile(s)…",
                               i, len(names), name, len(picked))
                     stack = np.stack([reader.read(r, f, name, z, 0) for r, f in picked])
                     t0 = time.perf_counter()

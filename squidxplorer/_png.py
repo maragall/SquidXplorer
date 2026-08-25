@@ -52,14 +52,14 @@ def render_view_png(
     Materialises each channel's full-resolution plane, so call this off the Qt thread.
     """
     if not channels:
-        raise ValueError("no channels to export — every channel is hidden.")
+        raise ValueError("no channels to export - every channel is hidden.")
     from squidxplorer._workers import _full_res_plane  # the one layer-data plane rule
 
     planes = [np.asarray(_full_res_plane(c.data, int(z_index))) for c in channels]
     shapes = {p.shape for p in planes}
     if len(shapes) > 1:
         raise ValueError(
-            f"the visible channels disagree on shape ({sorted(shapes)}) — one image cannot "
+            f"the visible channels disagree on shape ({sorted(shapes)}) - one image cannot "
             "hold them.")
     h, w = planes[0].shape
     step = max(1, -(-max(h, w) // max(1, int(max_px))))    # ceil

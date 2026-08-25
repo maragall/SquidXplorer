@@ -166,7 +166,7 @@ def _declare(name: str, fn, *, consumes, produces, params, requires, extra,
         raise ValueError(
             f"{kind} name {name!r} contains {reserved[0]!r}: '{_CHAIN_CHARS}' are expression "
             "punctuation in a recipe label ('spot(min_area_px=80)'), so a name carrying one "
-            "would not round-trip through RecipeChain.parse — it is refused here rather than "
+            "would not round-trip through RecipeChain.parse - it is refused here rather than "
             "left to be ambiguous everywhere a recipe is written down.")
     if not callable(fn):
         raise ValueError(f"{kind} for {name!r} is not callable: {fn!r}")
@@ -344,9 +344,26 @@ def operator_output(name: str, operator_kwargs: Optional[dict] = None) -> tuple[
         if inner_name is None:
             # z_operator=None: keep every acquired plane, fused unchanged — full z, intensity.
             return False, INTENSITY
-        inner = _resolve_operator(inner_name)
-        return "z" in inner.consumes, inner.produces
-    return "z" in op.consumes, op.produces
+        op = _resolve_operator(inner_name)
+    # A z-consumer declaring ``keeps_depth`` on its callable (decon: the whole deconvolved
+    # stack, same size as the input) eats the z AXIS without collapsing the OUTPUT — the same
+    # declaration project_well and the acquisition writer honour. Reading consumes alone here
+    # made write_plate declare n_z=1 against a full-depth stream and made the display side
+    # flatten a decon volume on its own visibility toggle (2026-08-24).
+    keeps_depth = bool(getattr(op.fn, "keeps_depth", False))
+    return "z" in op.consumes and not keeps_depth, op.produces
+
+
+def operator_reduces_depth(name: str) -> bool:
+    """Does *name*'s OUTPUT collapse z to one plane, whatever a run's kwargs?
+
+    The NAME-ONLY half of :func:`operator_output`, for callers that hold no kwargs (the
+    display side's layer keys). An operator with ``inner_param`` answers False here — its
+    depth depends on the run's inner choice, which a name cannot know, so the layer's own
+    data decides. A z-consumer declaring ``keeps_depth`` (decon) keeps its planes.
+    """
+    op = _resolve_operator(name)
+    return "z" in op.consumes and not bool(getattr(op.fn, "keeps_depth", False))
 
 
 def bind_operator(name: str, operator_kwargs: Optional[dict] = None) -> OperatorFn:
@@ -365,17 +382,17 @@ def _resolve_operator(name) -> Operator:
     if name == "decon3d":
         raise KeyError(
             "operator 'decon3d' was renamed to 'decon' (2026-08-24): 'decon' IS the volume "
-            "solve now — true 3-D RL over the whole stack, every plane kept, and on an n_z=1 "
+            "solve now - true 3-D RL over the whole stack, every plane kept, and on an n_z=1 "
             "acquisition it equals the old per-plane result. Run operator='decon'.")
     if any(char in name for char in _CHAIN_CHARS):
         raise ValueError(
             f"{name!r} is a chain expression, and operator chaining was removed: an operator is "
-            "ONE registered name. Compose in Python instead — wrap the steps in one callable and "
+            "ONE registered name. Compose in Python instead - wrap the steps in one callable and "
             "register it (squidxplorer.projection.plane_op + squidxplorer.add_operator, a few "
             "lines).")
     raise KeyError(
         f"unknown operator {name!r}; available: {runnable_operators()}. "
-        "Add new modes with squidxplorer.add_operator(name, fn) — or "
+        "Add new modes with squidxplorer.add_operator(name, fn) - or "
         "squidxplorer.add_region_operator(name, fn) for one that fuses a whole well."
     )
 
@@ -419,8 +436,8 @@ def run_plate(
             raise ValueError(
                 f"a region operator fuses whole wells: n_fovs={n_fovs!r} would silently crop "
                 f"each well to its first {n_fovs} FOV(s) in row-major order, which is not a "
-                "thing anyone draws. Select FOVs with regions={region: [fov, ...]} — the one "
-                "spelling of a FOV subset — or pass n_fovs=None for every FOV.")
+                "thing anyone draws. Select FOVs with regions={region: [fov, ...]} - the one "
+                "spelling of a FOV subset - or pass n_fovs=None for every FOV.")
         return _stitch_plate(reader, n_fovs=None, workers=1 if workers is None else workers,
                              operator=operator, on_error=on_error, regions=regions,
                              **(operator_kwargs or {}))
@@ -453,7 +470,7 @@ def _project_plate(
     # A region operator is a whole-well callable; this loop hands out planes.
     if "fov" in op.consumes:
         raise ValueError(
-            f"{operator!r} consumes fov — it fuses a whole well's FOVs and takes "
+            f"{operator!r} consumes fov - it fuses a whole well's FOVs and takes "
             "(reader, region, fovs), which is not what the per-FOV loop hands an operator. Run "
             f"it with squidxplorer.run_plate(reader, operator={operator!r}).")
     fn = bind_operator(operator, operator_kwargs)

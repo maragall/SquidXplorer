@@ -55,7 +55,7 @@ def verdict(landed: int, owed: int, skipped: int, stopped: bool) -> "tuple[str, 
     if stopped:
         return STOPPED, ""
     if landed == 0 and owed:
-        return PARTIAL, f"produced nothing — all {owed} target(s) skipped"
+        return PARTIAL, f"produced nothing - all {owed} target(s) skipped"
     if skipped:
         return PARTIAL, f"{skipped} well(s) skipped"
     return OK, ""
@@ -133,7 +133,7 @@ class RunMetrics:
         # Absent rather than 0.0 s: a zero would read as the best result in the log.
         if self.first_paint_seconds is not None:
             parts.append(f"first paint {human_seconds(self.first_paint_seconds)}")
-        parts.append(self.outcome if not self.detail else f"{self.outcome} — {self.detail}")
+        parts.append(self.outcome if not self.detail else f"{self.outcome} - {self.detail}")
         return " · ".join(parts)
 
     def as_dict(self) -> dict:
@@ -332,7 +332,7 @@ class measure_run:
 
     def __enter__(self) -> RunRecorder:
         if self._announce:
-            self._log.info("%s: starting — %s", self._recorder.operator,
+            self._log.info("%s: starting - %s", self._recorder.operator,
                            self._recorder.target or "no target named")
         self._sampler.start()
         # perf_counter, not time.time: immune to backwards NTP clock steps.
@@ -468,8 +468,8 @@ def compare_table(metrics: Optional[MetricsLog] = None) -> str:
     for r in rows:
         lines.append(
             f"{r['operator']:<16}{r['runs']:>6}{r['timed']:>6}{r['failures']:>6}"
-            f"{(human_seconds(r['median_seconds']) if r['median_seconds'] is not None else '—'):>12}"
-            f"{(human_seconds(r['best_seconds']) if r['best_seconds'] is not None else '—'):>12}"
+            f"{(human_seconds(r['median_seconds']) if r['median_seconds'] is not None else ' - '):>12}"
+            f"{(human_seconds(r['best_seconds']) if r['best_seconds'] is not None else ' - '):>12}"
             f"{human_bytes(r['peak_rss']):>14}"
         )
     return "\n".join(lines)

@@ -141,7 +141,7 @@ def clamp_last_roi(win, layer) -> None:
         win._clamping = False
     span = limit * px
     win._say(f"ROI held to the 3D ceiling: {limit} x {limit} px ({span:.0f} x {span:.0f} um) "
-             f"at the acquisition's own {px:g} um/px — the largest volume this GPU renders "
+             f"at the acquisition's own {px:g} um/px - the largest volume this GPU renders "
              f"from one texture, and 3D reads those voxels from the reader, not from the "
              f"decimated mosaic you are drawing on.")
 
@@ -173,8 +173,8 @@ def roi_cost_line(win, layer) -> str:
     edge = limit if single else _bricks.DEFAULT_BRICK_EDGE
     n = len(_bricks.plan(h, w, limit=limit, edge=edge))
     how = ("fits ONE texture" if single
-           else f"{n} bricks (over the {limit} px texture limit — bricked, not refused)")
-    return f"R{len(rects)}: {h} x {w} px ({h_um:.0f} x {w_um:.0f} um), {nz} z — 3D: {how}."
+           else f"{n} bricks (over the {limit} px texture limit - bricked, not refused)")
+    return f"R{len(rects)}: {h} x {w} px ({h_um:.0f} x {w_um:.0f} um), {nz} z - 3D: {how}."
 
 
 def new_roi(win) -> None:
@@ -242,7 +242,7 @@ def open_roi_children(win) -> None:
     layer = win._roi_layer
     rects = list(getattr(layer, "data", []) or []) if layer is not None else []
     if v is None or layer is None or layer not in list(v.layers) or not rects:
-        win._say("no ROI to open — draw one with '▭ new' first.")
+        win._say("no ROI to open - draw one with '▭ new' first.")
         return
     if win._manager is None:
         win._say(f"{len(rects)} ROI(s) drawn, but this window has no manager to open children.")

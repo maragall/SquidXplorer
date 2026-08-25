@@ -71,7 +71,7 @@ def load_operator_plugins(group: str = GROUP) -> list[str]:
                 raise OperatorPluginError(
                     f"operator plugin {_describe(ep)} raised while registering its operators: "
                     f"{type(exc).__name__}: {exc}. "
-                    f"A name that is already taken is the common cause — every registrar refuses a "
+                    f"A name that is already taken is the common cause - every registrar refuses a "
                     f"duplicate rather than clobbering it. "
                     f"{DISABLE_ENV}=1 starts squidxplorer without any plugins."
                 ) from exc

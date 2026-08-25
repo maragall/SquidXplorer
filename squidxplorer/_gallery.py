@@ -172,7 +172,7 @@ class GalleryScope:
         what = "selection" if self.from_selection else "whole acquisition"
         n_fov = sum(len(f) for _r, f in self.fovs)
         line = (f"{len(self.regions)} region(s), {n_fov} FOV(s), {len(self.channels)} channel(s), "
-                f"t={self.time_point}, {self.projection} — {what}")
+                f"t={self.time_point}, {self.projection} - {what}")
         if meta is not None:
             cropped = self.crops(meta)
             if cropped:

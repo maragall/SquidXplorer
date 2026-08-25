@@ -126,8 +126,8 @@ def verify_napari_bindings(modules: Optional[dict] = None) -> None:
         raise NapariBindingError(
             "napari's API has moved under us; the mosaic view cannot be trusted to render.\n"
             "Missing or de-exported: " + ", ".join(missing) + "\n"
-            "This is a hard failure on purpose. The alternative — binding to whatever is there "
-            "and hoping — is how `_voxel_scale` ran every time and did nothing for its whole life."
+            "This is a hard failure on purpose. The alternative - binding to whatever is there "
+            "and hoping - is how `_voxel_scale` ran every time and did nothing for its whole life."
         )
 
 
@@ -324,6 +324,8 @@ class MosaicLayers:
         self._selection_following = False
         # op -> one-line color-provenance note (see set_color_note below).
         self._color_notes: dict[str, str] = {}
+        # channel -> the op a channel-OFF toggle hid, so channel-ON brings the SAME thing back.
+        self._channel_relight: dict[str, str] = {}
         try:
             model.dims.events.ndisplay.connect(self._reslice_hidden_layers)
         except Exception:                        # noqa: BLE001 - a stub model with no dims events
@@ -730,12 +732,19 @@ class MosaicLayers:
 
     @staticmethod
     def _reduces_z(op: str) -> bool:
-        """Does the operator behind this layer key declare ``consumes={"z"}``? Declaration, never name."""
-        from squidxplorer._engine import Z_REDUCER, operator_consumes
+        """Does this layer key's operator OUTPUT collapse z? Declaration, never name.
+
+        ``operator_reduces_depth``, not ``operator_consumes``: decon eats the z axis
+        (``consumes={"z"}``) yet declares ``keeps_depth`` — every plane comes back. Reading the
+        consumed axis here flattened a decon volume's every brick to one plane on its own
+        visibility toggle, and made ``volume_source`` refuse to render it in 3D (2026-08-24).
+        Name-only on purpose: a layer key carries no run kwargs, so an inner_param operator
+        (stitch) answers False and the layer's own data decides."""
+        from squidxplorer._engine import operator_reduces_depth
         from squidxplorer._operations import operator_name
 
         try:
-            return bool(operator_consumes(operator_name(str(op))) & Z_REDUCER)
+            return bool(operator_reduces_depth(operator_name(str(op))))
         except Exception:                        # noqa: BLE001 - "raw", "computed", an unknown key
             return False
 
@@ -1180,7 +1189,13 @@ class MosaicLayers:
         return self.channels(op)
 
     def visible_op(self) -> Optional[str]:
-        for ly in self.ours():
+        """The op of the TOPMOST visible layer — what the user's last gesture lit.
+
+        Topmost, not first-in-list: a result covering a SUBSET of raw's channels darkens raw
+        only on its own channels, so raw stays lit on the rest. Reading the bottom-most
+        visible layer then answered "raw" while the user was looking at the result — 3D
+        rendered raw and every "shown layer" consumer drove the wrong op (2026-08-24)."""
+        for ly in reversed(self.ours()):
             if ly.visible:
                 k = key_of(ly)
                 assert k is not None
@@ -1188,15 +1203,40 @@ class MosaicLayers:
         return None
 
     def set_channel_visible(self, channel: str, visible: bool) -> None:
-        """Show/hide one channel across the visible processing layer only."""
-        current = self.visible_op()
-        if current is None:
+        """Show/hide one channel: hide what the channel is SHOWING, bring the same thing back.
+
+        Resolved per CHANNEL, not through ``visible_op()``: with a subset-channel result lit,
+        the window-level op is not the op rendering every channel, so OFF wrote an already-dark
+        layer (a measured no-op) and ON lit raw beside the result — whose arrival then darkened
+        the result through the exclusive-op rule. OFF remembers which op it hid; ON re-lights
+        that op's layer, falling back to the shown op's, then the channel's topmost layer."""
+        peers = [ly for ly in self.ours()
+                 if (k := key_of(ly)) is not None and k.channel == channel]
+        if not peers:
             return
-        for ly in self.group(current):
-            k = key_of(ly)
-            assert k is not None
-            if k.channel == channel:
-                ly.visible = bool(visible)
+        if not visible:
+            lit = [ly for ly in peers if bool(getattr(ly, "visible", False))]
+            for ly in lit:
+                ly.visible = False
+            if lit:
+                k = key_of(lit[-1])              # the topmost hidden: what ON brings back
+                assert k is not None
+                self._channel_relight[channel] = k.op
+            return
+        want = self._channel_relight.pop(channel, None)
+        target = None
+        if want is not None:
+            target = next((ly for ly in reversed(peers)
+                           if (k := key_of(ly)) is not None and k.op == want), None)
+        if target is None:
+            current = self.visible_op()
+            if current is not None:
+                target = next((ly for ly in reversed(peers)
+                               if (k := key_of(ly)) is not None and k.op == current), None)
+        if target is None:
+            target = peers[-1]
+        # ONE layer is written; the identity mirror carries it to every sibling (bricks).
+        target.visible = True
 
     def contrast(self, channel: str) -> Optional[tuple[float, float]]:
         peers = self._by_channel.get(channel) or []
@@ -1427,7 +1467,7 @@ def pyramid_levels(data: Any) -> Optional[list]:
     if isinstance(data, (str, bytes)) or not isinstance(data, _SequenceABC):
         return None
     if len(data) == 0:
-        raise ValueError("the layer holds an EMPTY multiscale pyramid — nothing to read.")
+        raise ValueError("the layer holds an EMPTY multiscale pyramid - nothing to read.")
     return list(data) if int(getattr(data[0], "ndim", 0)) >= 2 else None
 
 

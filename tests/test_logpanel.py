@@ -84,7 +84,7 @@ def test_the_view_is_bounded_no_matter_how_many_lines(qapp, bus):
 def test_the_memory_readout_is_a_real_sentence():
     line = memory_line()
     assert line.startswith("mem")
-    assert "GiB" in line or "MiB" in line or line == "mem —"
+    assert "GiB" in line or "MiB" in line or line == "mem -"
 
 
 def test_the_activity_line_follows_the_activity_registry(qapp, bus):

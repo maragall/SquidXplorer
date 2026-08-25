@@ -47,7 +47,7 @@ def memory_line() -> str:
         return (f"mem {human_bytes(rss)}  ·  {human_bytes(vm.available)} free "
                 f"of {human_bytes(vm.total)}")
     except Exception:                       # noqa: BLE001 - psutil missing/refused: say so, don't crash
-        return "mem —"
+        return "mem -"
 
 
 class _LogBridge(QObject):

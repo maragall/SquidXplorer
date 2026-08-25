@@ -147,7 +147,7 @@ class _OperatorWorker(QThread):
 
     def _on_error(self, region, fov, exc):
         """Skip a failed well, mark its dot failed, and keep the run alive."""
-        log.warning("%s: region %s FOV %s was skipped — %s: %s",
+        log.warning("%s: region %s FOV %s was skipped - %s: %s",
                     self._operator, region, fov, type(exc).__name__, exc)
         with self._lock:
             self._failed_regions.add(region)
@@ -285,7 +285,7 @@ class _MosaicWorker(QThread):
                 continue
             if res is None:
                 self.problem.emit(
-                    f"{self._region}: no stage positions / pixel size — mosaic not derivable."
+                    f"{self._region}: no stage positions / pixel size - mosaic not derivable."
                 )
                 continue
             levels, _step, _nz = res
@@ -330,7 +330,7 @@ class _FocusWorker(QThread):
         if read == 0:
             # never return a default z when nothing could be read
             self.problem.emit(
-                f"{self._region}:{self._fov} — not one z plane of {self._channel} could be "
+                f"{self._region}:{self._fov} - not one z plane of {self._channel} could be "
                 f"read, so there is no sharpest plane. ({'; '.join(failures[:3])})")
             return
         note = ("" if not failures else
@@ -391,7 +391,7 @@ class _FlatfieldWorker(QThread):
             if unreadable:
                 # …but it is not invisible either
                 log.warning("flat-field %s: %d of %d sample tiles were unreadable and were left "
-                            "out of the estimate — first: %s",
+                            "out of the estimate - first: %s",
                             self._channel, len(unreadable), len(sample), unreadable[0])
             if len(tiles) < 3:
                 self.problem.emit(

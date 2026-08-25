@@ -22,6 +22,7 @@ from qtpy.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -454,7 +455,7 @@ class RegionViewer(QMainWindow):
 
         pane, mode, message = make_pane(show_docks=True)
         if pane is None or not getattr(pane, "ok", False):
-            msg = QLabel(f"napari viewer unavailable — {message}")
+            msg = QLabel(f"napari viewer unavailable - {message}")
             msg.setAlignment(Qt.AlignCenter)
             msg.setWordWrap(True)
             msg.setStyleSheet("color:#ffd7d7;background:#3a2020;padding:16px;font-size:13px;")
@@ -623,7 +624,7 @@ class RegionViewer(QMainWindow):
         self._btn_png = self._chip(
             "⎙ png", "Save what this window is showing as a high-resolution PNG: the visible "
             "layer's own full-resolution pixels (long side capped at 8192 px), with the channels "
-            "that are visible and the contrast that is set — not a screenshot of the canvas. "
+            "that are visible and the contrast that is set - not a screenshot of the canvas. "
             "Runs off the UI thread.", self._save_png)
         # FOVs. The ROI chips beside it are for a box the user draws; this is for the boxes the
         # ACQUISITION already drew. On a sparse run — the AF sweep sets are 16 fields at 7x the
@@ -652,7 +653,7 @@ class RegionViewer(QMainWindow):
             self._chip("⊙ select", "Select ROIs: click one, then press Delete to remove it.",
                        self._select_rois),
             self._chip("✕ clear", "Remove all ROIs in this window.", self._clear_rois),
-            self._chip("→ window", "Open the drawn ROI(s) as child window(s) — the next "
+            self._chip("→ window", "Open the drawn ROI(s) as child window(s) - the next "
                        "level of the view tree.", self._open_roi_children),
             self._btn_fovs,
             self._btn_copy_luts, self._btn_paste_luts,
@@ -714,6 +715,23 @@ class RegionViewer(QMainWindow):
             self._op_combo.addItem("no operators", None)
             self._op_combo.setEnabled(False)
         opr.addWidget(self._op_combo, 1)
+        # The one-click parameter beside the dropdown (Julio, 2026-08-24: "the operators for
+        # this window in deconvolution should have like a decorator that lets the user
+        # configure iterations by clicking"). Shown for any operator DECLARING an integer
+        # `iterations` Param; writes through the plate panel, the run's single source of
+        # truth, so this, ⚙ controls and the QC's 'use k' button edit one number.
+        self._iter_spin = QSpinBox()
+        self._iter_spin.setPrefix("iterations: ")
+        self._iter_spin.setRange(1, 100)
+        self._iter_spin.setStyleSheet(
+            "QSpinBox{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
+            "border-radius:4px;font-size:11px;padding:1px 2px;}")
+        self._iter_spin.setToolTip(
+            "The iteration count the Run button uses: the same number the plate's decon "
+            "controls and the QC sweep's 'use k iterations' button set.")
+        self._iter_spin.setVisible(False)
+        self._iter_spin.valueChanged.connect(self._on_quick_iterations)
+        opr.addWidget(self._iter_spin)
         self._btn_controls = self._chip(
             "⚙ controls", "Bring the plate window forward AND open the controls for the operator "
             "this window is showing, so its parameters (iterations, thresholds) are one click "
@@ -761,7 +779,7 @@ class RegionViewer(QMainWindow):
         picked = sum(len(v) for v in scoped.values())
         if picked >= total:
             return regions
-        self._say(f"ROI: running on {picked} of {total} field(s) — the ones your box touches.")
+        self._say(f"ROI: running on {picked} of {total} field(s) - the ones your box touches.")
         return scoped
 
     def _plate_operator_kwargs(self, key: str) -> dict:
@@ -812,7 +830,7 @@ class RegionViewer(QMainWindow):
         if not reduces:
             return {}
         self._say(f"3D: stitching all {int((self._meta or {}).get('n_z') or 1)} z-planes "
-                  f"(z_operator=None, every plane kept) — one pose graph, every plane fused "
+                  f"(z_operator=None, every plane kept) - one pose graph, every plane fused "
                   f"from it.")
         return {"z_operator": None}
 
@@ -832,10 +850,66 @@ class RegionViewer(QMainWindow):
         combo = getattr(self, "_op_combo", None)
         key = combo.currentData() if combo is not None else None
         self._refresh_save_tooltip(key)
+        self._refresh_quick_iterations(key)
         if not key:
             note.setText("")
             return
         note.setText(f"{self._render_mode.upper()} · {self._params_summary(str(key))}")
+
+    def _iterations_param(self, key):
+        """The integer ``iterations`` :class:`Param` the selected operator DECLARES, or None.
+
+        Declaration-driven, never an operator-name match: any operator (a plugin's included)
+        declaring an int ``iterations`` gets the row's inline control for free."""
+        if not key:
+            return None
+        try:
+            from squidxplorer._engine import operator_params
+            from squidxplorer._operations import operator_name
+
+            return next((p for p in operator_params(operator_name(str(key)))
+                         if p.name == "iterations" and isinstance(p.default, int)
+                         and not isinstance(p.default, bool)), None)
+        except Exception:                        # noqa: BLE001 - an unknown key has no params
+            return None
+
+    def _refresh_quick_iterations(self, key) -> None:
+        """Show the inline iterations spin for a declaring operator, at the run's LIVE value."""
+        spin = getattr(self, "_iter_spin", None)
+        if spin is None:
+            return
+        param = self._iterations_param(key)
+        if param is None:
+            spin.setVisible(False)
+            return
+        value = self._plate_operator_kwargs(str(key)).get("iterations", param.default)
+        spin.blockSignals(True)                  # a sync is not the user's gesture
+        try:
+            spin.setValue(int(value))
+        except (TypeError, ValueError):
+            spin.setValue(int(param.default))
+        finally:
+            spin.blockSignals(False)
+        spin.setVisible(True)
+
+    def _on_quick_iterations(self, value: int) -> None:
+        """The inline spin edits the plate panel's own widget: ONE source of truth."""
+        combo = getattr(self, "_op_combo", None)
+        key = combo.currentData() if combo is not None else None
+        if not key:
+            return
+        from squidxplorer._operations import operator_name
+
+        plate = self._plate()
+        writer = getattr(plate, "set_operator_param", None)
+        if not callable(writer):
+            self._say("iterations: there is no plate window holding the operator controls.")
+            return
+        why = writer(operator_name(str(key)), "iterations", int(value))
+        if why:
+            self._say(f"iterations: {why}")
+            return
+        self._refresh_controls_note()            # the note repeats what the run now gets
 
     _SAVE_TIP_PLATE = ("Off = preview only (nothing written to disk). On = persist the "
                        "operator result as an OME-Zarr.")
@@ -900,7 +974,7 @@ class RegionViewer(QMainWindow):
             self._say(f"controls: could not open {key}: {exc}")
             return
         self._refresh_controls_note()
-        self._say(f"controls: {combo.currentText()} — open on the plate window. This window will "
+        self._say(f"controls: {combo.currentText()} - open on the plate window. This window will "
                   f"run it {self._render_mode.upper()} with {self._params_summary(str(key))}.")
 
     def _refresh_record_chip(self) -> None:
@@ -919,7 +993,7 @@ class RegionViewer(QMainWindow):
         problem = encoder_problem()
         if problem:
             btn.setEnabled(False)
-            btn.setToolTip(f"No mp4 encoder on this machine — {problem}")
+            btn.setToolTip(f"No mp4 encoder on this machine - {problem}")
             return
         axis = default_axis(meta)
         n = axis_length(meta, axis)
@@ -1039,19 +1113,19 @@ class RegionViewer(QMainWindow):
 
         worker = self._png_worker
         if worker is not None and worker.isRunning():
-            self._say("png: an export is already running — it will say when it lands.")
+            self._say("png: an export is already running - it will say when it lands.")
             return
         if self._reader is None or self._meta is None:
             self._say("png: show a region in this view first, then save a PNG.")
             return
         if self._render_mode == "3d":
-            self._say("png: this view is showing a 3D volume — volume export is out of scope. "
+            self._say("png: this view is showing a 3D volume - volume export is out of scope. "
                       "Switch the view to 2D to save a PNG of a plane.")
             return
         mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
         op = mosaic.visible_op() if mosaic is not None else None
         if op is None:
-            self._say("png: no visible layer to export — every layer of this view is hidden.")
+            self._say("png: no visible layer to export - every layer of this view is hidden.")
             return
         problem = png_problem()
         if problem:
@@ -1224,7 +1298,7 @@ class RegionViewer(QMainWindow):
                 return ""
             src = getattr(self._reader, "source_id", None)
             acq = Path(str(src)).name if src else "<folder>"
-            return (f"{action}: preview only — tick save to write stitched_{acq} "
+            return (f"{action}: preview only - tick save to write stitched_{acq} "
                     "(hardlinked copy with registered coordinates).")
         except Exception:                            # noqa: BLE001 - a hint, never a crash
             return ""
@@ -1354,7 +1428,7 @@ class RegionViewer(QMainWindow):
             res = fuse_region_pyramid(self._reader, meta2, str(region), str(channel),
                                       time_point=int(placement.reg_t or 0))
         except Exception as exc:                 # noqa: BLE001 - the paste is a fine fallback
-            log.warning("[%s] %s: registered pyramid not built (%s) — keeping the paste.",
+            log.warning("[%s] %s: registered pyramid not built (%s) - keeping the paste.",
                         self.window_id, op, exc)
             return None
         return res[0] if res else None
@@ -1396,7 +1470,7 @@ class RegionViewer(QMainWindow):
     def _set_ndisplay(self, n: int) -> None:
         v = self._napari_viewer()
         if v is None:
-            self._say(f"cannot switch to {n}D — the napari viewer isn't available here.")
+            self._say(f"cannot switch to {n}D - the napari viewer isn't available here.")
             return
         try:
             v.dims.ndisplay = int(n)
@@ -1443,7 +1517,7 @@ class RegionViewer(QMainWindow):
             dims = v.dims
             nsteps = tuple(int(n) for n in (getattr(dims, "nsteps", ()) or ()))
             if len(nsteps) < 3 or nsteps[0] < 2:
-                self._say(f"sharpest plane is z={z_index}, but no z slider could be moved — "
+                self._say(f"sharpest plane is z={z_index}, but no z slider could be moved - "
                           "this view is showing a single plane.")
                 return
             step = list(dims.current_step)
@@ -1470,7 +1544,7 @@ class RegionViewer(QMainWindow):
     #: count changes whenever the plate navigates this window somewhere else, so the two are
     #: joined at refresh time rather than the chip's tooltip being re-derived from its own text.
     _FOVS_TIP = ("Open a child view that steps the camera through this region's FOVs one at a "
-                 "time, framed to fill the canvas — for checking focus field by field without "
+                 "time, framed to fill the canvas - for checking focus field by field without "
                  "zooming in and out. Press play on its FOV slider to walk them; the mosaic is "
                  "loaded once, so stepping is instant.")
 
@@ -1487,7 +1561,7 @@ class RegionViewer(QMainWindow):
             return
         if self._fov_mode:
             btn.setEnabled(False)
-            btn.setToolTip("This view already steps through FOVs — use the slider at the bottom.")
+            btn.setToolTip("This view already steps through FOVs - use the slider at the bottom.")
             return
         if self._manager is None:
             btn.setEnabled(False)
@@ -1887,12 +1961,12 @@ class RegionViewer(QMainWindow):
         """This window's per-channel look into THE clipboard. One button, no options."""
         n = _lut_clipboard.copy_luts(self)
         self._say(f"copied {n} channel LUT(s)." if n
-                  else "nothing to copy — this window has no channel layers yet.")
+                  else "nothing to copy - this window has no channel layers yet.")
 
     def _paste_luts(self) -> None:
         """THE clipboard onto this window's channels. The plate follows the same write."""
         if not _lut_clipboard.CLIPBOARD:
-            self._say("the LUT clipboard is empty — copy LUTs from a window first.")
+            self._say("the LUT clipboard is empty - copy LUTs from a window first.")
             return
         applied = _lut_clipboard.paste_luts(self)
         if applied is None:
@@ -2614,7 +2688,7 @@ class ViewerManager(QObject):
                             win.window_id, op, region, exc)
         if added:
             win._say(f"reused {added} already-computed layer(s) for {region} "
-                     "(no recompute) — toggle them in the layers panel.")
+                     "(no recompute) - toggle them in the layers panel.")
         return added
 
     @property
@@ -2848,7 +2922,7 @@ class StatusRow(QObject):
         pct = max(0, min(100, int(round(frac * 100))))
         self._mem_bar.setValue(pct)
         warn = pct >= 85
-        self._mem_label.setText("Memory — HIGH, close a view" if warn else "Memory")
+        self._mem_label.setText("Memory - HIGH, close a view" if warn else "Memory")
         color = "#f85149" if warn else "#3fb950"
         self._mem_bar.setStyleSheet(
             "QProgressBar{background:#161b22;border:1px solid #30363d;border-radius:3px;}"

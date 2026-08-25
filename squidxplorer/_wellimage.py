@@ -277,7 +277,7 @@ def load_well_stack(reader: Any, meta: dict, region: str,
                 try:
                     path.unlink()
                     _log.info("well image %s was backfilled from a padded (stopped) run and "
-                              "%d of its black FOV(s) now have data; deleted — this well "
+                              "%d of its black FOV(s) now have data; deleted - this well "
                               "fuses fresh and the next backfill rewrites the file.",
                               path, len(arrived))
                 except OSError as exc:
@@ -391,7 +391,7 @@ def write_well_images(reader: Any, meta: dict, *, time_point: int = 0,
 
     slots = getattr(reader, "padded_slots", None)
     if slots and (z in slots.z_levels or int(time_point) in slots.time_points):
-        _log.info("well-image backfill skipped: z=%d at t=%d is itself padded — there is no "
+        _log.info("well-image backfill skipped: z=%d at t=%d is itself padded - there is no "
                   "data at that plane to write.", z, time_point)
         return 0
     padded_by_region = dict(slots.fovs) if slots else {}
