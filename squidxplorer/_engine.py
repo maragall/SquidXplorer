@@ -41,6 +41,10 @@ class Param:
     name: str
     default: Any
     blurb: str = ""
+    #: An advanced knob: not deducible from acquisition filenames and safe at its default,
+    #: so the GUI may fold it into an "advanced" slot. False (the default) keeps every
+    #: existing declaration untouched.
+    advanced: bool = False
 
 
 class MissingOperatorDependency(MissingDependency):
