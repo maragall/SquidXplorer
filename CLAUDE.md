@@ -802,6 +802,19 @@ pins). **The surviving registry is exactly `mip`, `decon`, `stitch`, `register`.
   volume solve; `"decon3d"` is refused BY NAME with a pointer to `decon`
   (`_engine._resolve_operator`). The decon card (QC panel) is unchanged — it always ran the
   3-D solve.
+- **A channel with NO emission line is COPIED THROUGH unchanged, named once** (Julio,
+  2026-08-25: "copy BF through unchanged with a named log line"). Measured on
+  G7_2026-08-20 (BF_LED_matrix_full + 488 + 561, nz 15): `project_well` binds every channel
+  up front and the LED channel's `emission_um_for` refusal took the two fluorescence
+  channels down with it. `_decon.NoEmissionLine` is the typed refusal (kept through
+  `optics_for_channel`'s wrap); `_decon_for_channel` absorbs exactly that one into
+  `_copy_through` (z-consuming, depth-keeping identity: same shape, dtype, every plane) and
+  logs ONE INFO line per (acquisition, channel) per process ("<ch>: no emission wavelength,
+  copied unchanged, not deconvolved"; a limitation line stays INFO). Driven by the channel's
+  declared optics, never a name match. Unreadable optics, a missing path or an impossible NA
+  stay the run's refusal, and `projection._refuse_all_copied_through` refuses a run in which
+  EVERY channel declares `copies_through` (declaration-driven, no operator name in
+  projection). Preview and save agree because both ride `project_well`.
 - **`z_operator=None` means KEEP EVERY PLANE** — the shelved `keepz`'s one load-bearing job.
   `stitch_region` resolves None to a module-local identity record (`_stitch._KEEP_EVERY_PLANE`,
   deliberately NOT in the registry), `operator_output` answers `(False, "intensity")` for a
@@ -1161,6 +1174,28 @@ operators hidden by default and summoned, never a separate window.
   then went quiet" diagnosis depends on it), the GPU-ceiling line (once per change).
   `tests/test_hero_declutter.py` pins an ordinary open-and-preview session at <= 8 INFO
   lines (measured 3 on the fixture); raise the cap only with a written reason.
+- **The empty launch is a drop target saying ONE line** (`PlateWindow._drop`: "drop an
+  acquisition folder here, or File > Open"). `_set_empty_state` is the one writer of what
+  shows with no data: the drop line on, the data-bound title controls (`_view_caption` +
+  `_view_combo`, `_open_sel_btn`, `_plate_paste_btn`) off until an ingest lands (both ingest
+  refusal arms and `_open_computed` route through it). The operator band stays hidden and
+  the log band collapsed; a drop anywhere on the window reaches `ingest` (the label does not
+  accept drops, so Qt walks up to the window's handlers). `EMPTY_LAUNCH_INFO_CAP = 2`
+  (measured 0).
+- **ONE window for real** (Julio, live on bf982a2: "I still see the blank screen where the
+  old plate window used to go... we add the space where the old plate window was"). With the
+  path given to the constructor the default view opened INSIDE the plate's showEvent, so the
+  hosting's `hide()` ran while Qt was still mapping the window: the widget read hidden while
+  its QWindow stayed on screen (reproduced offscreen via `windowHandle().isVisible()`).
+  `showEvent` now defers `_open_default_view` to the next loop turn (`QTimer.singleShot(0)`),
+  and `_place_beside` gives a deck whose plate is `_hidden_for_one_window` the WHOLE
+  available geometry (frame-fitted through `_fit_frame`, shared with
+  `maybe_hide_for_one_window`), else `beside_rect` as before for a free-standing layout.
+  Tests assert the window HANDLE, not `isVisible()`.
+- **Verbosity strip, measured** (labels + tooltips in a view's left column, folds summoned,
+  via a scratch probe at f063f55 vs bf982a2): resting column 33 elements both before and
+  after but 431 -> 207 words; with every operator's inline panel inserted once, 108 -> 64
+  elements and 1265 -> 454 words.
 
 ## Agent skills
 
