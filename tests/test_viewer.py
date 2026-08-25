@@ -3694,7 +3694,7 @@ def test_gallery_view_is_a_view_menu_command_and_not_an_operator(qapp):
     """Gallery View consumes no axis and produces no pixels, so it is a View-menu command with no card, not a runnable operator."""
     win = V.PlateWindow(None)
     try:
-        assert "galleryview" not in win._op_cards
+        assert not hasattr(win, "_op_cards"), "the bulk cards are back (retired 2026-08-25)"
         assert "galleryview" not in win._op_actions
         assert "galleryview" not in {op.key for op in V._OPERATIONS}
         assert "galleryview" not in V.runnable_operators()

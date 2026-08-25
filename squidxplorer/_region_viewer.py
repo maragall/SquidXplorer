@@ -759,10 +759,54 @@ class RegionViewer(QMainWindow):
         # NO "Match layers to raw" and no LUT chrome here: match-to-raw is shelved whole
         # (Julio, 2026-08-19) and the two-button LUT clipboard lives in the 2D/3D·ROI block.
         pv.addWidget(op_box)
+        # THE PARAM SLOT: ⚙ controls INSERTS the operator's panel here, directly under the
+        # operators row (Julio, 2026-08-25: "see this as an insertion to a list"). One slot,
+        # one panel at a time; the widget stays the plate's (_op_tabs), merely re-hosted.
+        self._param_slot = QVBoxLayout()
+        self._param_slot.setContentsMargins(0, 0, 0, 0)
+        pv.addLayout(self._param_slot)
 
         self._op_panel = panel
         self._refresh_controls_note()
         return panel
+
+    #: The operator panel currently inserted in this view's param slot, and its key.
+    _inserted_panel = None
+    _inserted_key = None
+
+    #: The inserted slot's height ceiling: a FIXED slot in the column (the chart's rule -
+    #: inserting a slot shrinks the flexible neighbours, never the whole window). The panel
+    #: scrolls inside itself.
+    _PARAM_SLOT_MAX_PX = 360
+
+    def _insert_param_slot(self, key: str, panel) -> None:
+        """Insert *panel* under the operators row, releasing any previously inserted one."""
+        self._remove_param_slot()
+        panel.setMaximumHeight(self._PARAM_SLOT_MAX_PX)
+        self._param_slot.addWidget(panel)
+        panel.setVisible(True)
+        self._inserted_panel = panel
+        self._inserted_key = str(key)
+
+    def _remove_param_slot(self) -> None:
+        """Take the inserted panel OUT without disposing it - it is the plate's live widget
+        (the run's single source of truth), so it must survive this view. The plate ADOPTS
+        it back: a parentless orphan awaiting deleteLater measured a segfault in the next
+        window's teardown."""
+        panel, key = self._inserted_panel, self._inserted_key
+        self._inserted_panel = self._inserted_key = None
+        if panel is None or not _alive(panel):
+            return
+        self._param_slot.removeWidget(panel)
+        panel.hide()
+        panel.setParent(None)
+        adopt = getattr(self._plate(), "adopt_operator_panel", None)
+        if callable(adopt) and key:
+            try:
+                adopt(key)
+            except Exception as exc:             # noqa: BLE001 - never let a re-home block
+                log.warning("view %s could not return %s's panel to the plate: %s: %s",
+                            self.window_id, key, type(exc).__name__, exc)
 
     def _plate(self):
         """The plate window, or None. The plate owns every operator panel; this window borrows."""
@@ -956,33 +1000,43 @@ class RegionViewer(QMainWindow):
             return []
 
     def _show_operator_controls(self) -> None:
-        """Raise the plate AND open the controls for the operators THIS WINDOW has."""
-        raised = self._manager is not None and self._manager.raise_plate()
-        if not raised:
-            self._say("controls: there is no plate window to open operator controls in.")
-            return
+        """INSERT the selected operator's parameter panel into THIS view's param slot.
 
+        Julio (2026-08-25): "see this as an insertion to a list" - the slot lands directly
+        under the operators row; a second click on the same operator removes it. The panel
+        is the plate's live widget (`_op_tabs`, the run's single source of truth), released
+        from wherever it was hosted and re-hosted here.
+        """
         combo = getattr(self, "_op_combo", None)
         key = combo.currentData() if combo is not None else None
         if not key:
             self._say("controls: no operator is selected in this window's dropdown, so there is "
-                      "nothing to tune. The plate is in front.")
+                      "nothing to tune.")
             return
+        from squidxplorer._operations import operator_name
 
-        plate = self._manager.parent()
-        activate = getattr(plate, "_activate_operator", None)
-        if activate is None:
-            self._say(f"controls: this plate cannot open operator tabs, so {key} cannot be tuned "
-                      "from here.")
+        op_key = operator_name(str(key))
+        if self._inserted_key == op_key and self._inserted_panel is not None:
+            self._remove_param_slot()                    # a toggle: the second click removes
+            return
+        plate = self._plate()
+        release = getattr(plate, "release_operator_panel", None)
+        if not callable(release):
+            self._say("controls: no plate is holding the operator panels.")
             return
         try:
-            activate(str(key))
+            panel = release(op_key)
         except Exception as exc:                         # noqa: BLE001 - named, never a dead click
             self._say(f"controls: could not open {key}: {exc}")
             return
+        if panel is None:
+            self._say(f"controls: no controls exist for {key} (open an acquisition first, or "
+                      "the operator declares nothing tunable).")
+            return
+        self._insert_param_slot(op_key, panel)
         self._refresh_controls_note()
-        self._say(f"controls: {combo.currentText()} - open on the plate window. This window will "
-                  f"run it {self._render_mode.upper()} with {self._params_summary(str(key))}.")
+        self._say(f"controls: {combo.currentText()} - inserted below. This window will run it "
+                  f"{self._render_mode.upper()} with {self._params_summary(str(key))}.")
 
     def _refresh_record_chip(self) -> None:
         """Enable the record chip only when there is a movie to make, and SAY WHY when there is not."""
@@ -2356,6 +2410,12 @@ class RegionViewer(QMainWindow):
         if self._disposed:
             return
         self._disposed = True
+        # RELEASE, never dispose: the inserted parameter panel is the PLATE's live widget
+        # (the run's single source of truth); dying with this view would lose it for good.
+        try:
+            self._remove_param_slot()
+        except Exception:                            # noqa: BLE001 - teardown must continue
+            pass
         panel = self._op_panel
         self._op_panel = None
         if panel is not None and _alive(panel):
@@ -2501,7 +2561,6 @@ class ViewerManager(QObject):
         #: Installs the collapsible Operators dock on a new deck / free window, or None (a
         #: manager built by a test, or a library caller). Set by `PlateWindow`; consulted only
         #: by `deck()` and `_spawn`, so the dock is wired ONCE per host, never per region.
-        self.operator_dock_installer = None
         self.defaults = ViewDefaults()
 
         self._run_progress = None
@@ -2690,11 +2749,6 @@ class ViewerManager(QObject):
             deck.raise_()
             deck.activateWindow()
         else:
-            installer = self.operator_dock_installer
-            if installer is not None and getattr(win, "_operator_dock", None) is None:
-                # A free-standing view gets the same collapsible bulk-cards dock as the deck;
-                # its own operator panel already lives in its left column.
-                win._operator_dock = installer(win)
             win.show()
             win.raise_()
             win.activateWindow()
@@ -2769,11 +2823,8 @@ class ViewerManager(QObject):
 
         deck = ViewDeck(index=len(self._decks) + 1)
         deck.pageActivated.connect(self.note_focus)
-        # THE BULK-CARDS OPERATOR DOCK, once per deck. It swaps nothing on tab changes: each
-        # view's own operator panel lives in that view's LEFT column (2026-08-19).
-        installer = self.operator_dock_installer
-        if installer is not None:
-            deck._operator_dock = installer(deck)
+        # NO right-edge operator dock (retired 2026-08-25): a view's Run on plate is the bulk
+        # path, and each view's operator panel lives in that view's own LEFT column.
         # A BOUND METHOD, NEVER A SELF-CAPTURING LAMBDA. PyQt keeps a lambda alive in a slot proxy
         # parented to the SENDER, so `destroyed` -- which fires while the deck is being torn down --
         # would call into this manager whether or not the manager still exists. Connected as a
