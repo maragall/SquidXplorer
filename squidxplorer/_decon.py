@@ -159,7 +159,7 @@ def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool,
     if snaps is not None:
         iterations = max(int(iterations), snaps[-1])
     device = _decon_gpu.select_device(volume.shape, gpu=gpu, psf_shape=psf.shape)
-    _decon_gpu.log_choice(volume.shape, gpu=gpu, psf_shape=psf.shape)
+    _decon_gpu.log_choice(volume.shape, gpu=gpu, psf_shape=psf.shape, psf=psf)
     if device is not None:
         out = _decon_gpu.rl(volume, psf, iterations, device, snapshot_iters=snaps)
     else:

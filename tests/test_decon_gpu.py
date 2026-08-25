@@ -404,13 +404,140 @@ def test_an_unknown_env_value_fails_loud_rather_than_guessing(monkeypatch):
         _decon_gpu.select_device((1, 256, 256))
 
 
-def test_a_volume_too_large_for_a_tiler_less_backend_is_declined(monkeypatch):
-    """An oversized volume is declined, never allocated; needs torch to reach the size logic."""
+# --- the device budget and z tiling ------------------------------------------------------------
+# The budget is the DEVICE's, and a volume over it is solved in z tiles with petakit's own
+# overlap rule (tests/test_engine.py in petakit pins the CPU half of the same rule).
+
+#: One 256 x 256 plane's working set, petakit's estimate.
+PLANE_BYTES = 256 * 256 * _decon_gpu.BYTES_PER_VOXEL
+
+
+def _budget_for(planes: int) -> float:
+    """A budget that fits exactly *planes* planes of 256 x 256 and not twice as many."""
+    return planes * PLANE_BYTES * 1.05
+
+
+def _force_budget(monkeypatch, budget: float) -> None:
+    monkeypatch.setattr(_decon_gpu, "_device_free_bytes",
+                        lambda device: budget / _decon_gpu.MEMORY_FRACTION)
+
+
+def test_the_budget_is_the_devices_own_not_the_systems(monkeypatch):
+    monkeypatch.setattr(_decon_gpu, "_free_bytes", lambda: 20e9)
+    monkeypatch.setattr(_decon_gpu, "_mps_recommended_bytes", lambda: 8e9)
+    monkeypatch.setattr(_decon_gpu, "_cuda_free_bytes", lambda: 5e9)
+    assert _decon_gpu._device_free_bytes("mps") == 8e9
+    assert _decon_gpu._device_free_bytes("cuda") == 5e9
+    assert _decon_gpu._device_free_bytes(None) == 20e9
+    assert _decon_gpu.budget_bytes("cuda") == 5e9 * _decon_gpu.MEMORY_FRACTION
+
+
+def test_mps_is_unified_memory_so_the_smaller_of_the_two_readings_wins(monkeypatch):
+    monkeypatch.setattr(_decon_gpu, "_mps_recommended_bytes", lambda: 12e9)
+    monkeypatch.setattr(_decon_gpu, "_free_bytes", lambda: 3e9)
+    assert _decon_gpu._device_free_bytes("mps") == 3e9
+
+
+def test_without_the_mps_query_the_system_ram_rule_stands_in(monkeypatch):
+    monkeypatch.setattr(_decon_gpu, "_mps_recommended_bytes", lambda: None)
+    monkeypatch.setattr(_decon_gpu, "_free_bytes", lambda: 6e9)
+    assert _decon_gpu._device_free_bytes("mps") == 6e9
+
+
+def test_the_tile_plan_is_petakits_halve_then_border_rule():
+    """(48, 256, 256) against a budget of 24 planes: petakit halves 48 -> 24, borders the
+    tile by min(support // 2 + 2, 24 // 3) = 8 and keeps 8 planes per tile, 6 tiles."""
+    shape = (48, 256, 256)
+    assert _decon_gpu.tile_plan(shape, budget=_budget_for(24), support_z=95) == (8, 8)
+    assert _decon_gpu.tile_count(48, (8, 8)) == 6
+    assert _decon_gpu.tile_plan(shape, budget=_budget_for(12), support_z=95) == (4, 4)
+    assert _decon_gpu.tile_count(48, (4, 4)) == 12
+    # a narrow PSF asks for a narrower border, never under three planes
+    assert _decon_gpu.tile_plan(shape, budget=_budget_for(24), support_z=1) == (18, 3)
+    assert _decon_gpu.tile_plan(shape, budget=_budget_for(48), support_z=95) is None
+    assert _decon_gpu.tile_count(48, None) == 1
+
+
+def test_a_volume_whose_smallest_tile_is_still_over_budget_goes_to_petakit(monkeypatch):
+    """A 4-plane tile is petakit's floor; under it the volume is not this device's to run."""
     pytest.importorskip("torch")
-    monkeypatch.setattr(_decon_gpu, "_free_bytes", lambda: 1e9)
-    assert not _decon_gpu.fits_in_memory((64, 4096, 4096))
-    assert _decon_gpu.select_device((64, 4096, 4096)) is None
-    assert "z-tiler" in _decon_gpu.describe((64, 4096, 4096))
+    _force_budget(monkeypatch, _budget_for(2))
+    with pytest.raises(MemoryError, match="4-plane tile"):
+        _decon_gpu.tile_plan((64, 256, 256), budget=_budget_for(2), support_z=9)
+    assert _decon_gpu.select_device((64, 256, 256)) is None
+    assert "z-tiler" in _decon_gpu.describe((64, 256, 256))
+
+
+def test_a_volume_over_budget_is_no_longer_declined_but_tiled(monkeypatch):
+    _device_or_skip()
+    _force_budget(monkeypatch, _budget_for(24))
+    assert _decon_gpu.select_device((48, 256, 256)) is not None
+    assert not _decon_gpu.fits_in_memory((48, 256, 256), _decon_gpu._torch_device())
+
+
+def test_describe_names_the_device_and_the_tile_count(monkeypatch):
+    device = _device_or_skip()
+    psf = make_psf(DEFAULT_OPTICS)
+    _force_budget(monkeypatch, _budget_for(24))
+    line = _decon_gpu.describe((48, 256, 256), psf_shape=psf.shape, psf=psf)
+    assert f"torch/{device}, 6 z tiles" in line
+    assert "approximate" in line, "a z-tiled RL is not the whole solve and the line must say so"
+    whole = _decon_gpu.describe((24, 256, 256), psf_shape=psf.shape, psf=psf)
+    assert "z tiles" not in whole
+
+
+def test_a_tiled_solve_on_the_device_is_petakits_tiled_solve():
+    """Same plan, same tiles, same numbers: the backend property holds for the tiled path.
+
+    petakit tiles with budget ``avail * 0.7``, so its ``avail_memory_gb`` is our budget / 0.7."""
+    device = _device_or_skip()
+    psf = make_psf(DEFAULT_OPTICS)
+    volume = _phantom((48, 256, 256), seed=2)
+    budget = _budget_for(24)
+    import unittest.mock as mock
+
+    with mock.patch.object(_decon_gpu, "_device_free_bytes",
+                           lambda d: budget / _decon_gpu.MEMORY_FRACTION):
+        assert _decon_gpu.tile_plan(volume.shape, budget=_decon_gpu.budget_bytes(device),
+                                    support_z=_decon_gpu.psf_support_z(psf),
+                                    psf_shape=psf.shape) == (8, 8)
+        ours = _decon_gpu.rl(volume, psf, ITERATIONS, device)
+    theirs = petakit.deconvolve(volume, psf, method=METHOD, iterations=ITERATIONS, gpu=False,
+                                avail_memory_gb=budget / 0.7 / 1e9)
+    peak = float(np.abs(theirs).max())
+    assert float(np.abs(ours - theirs).max()) / peak <= TOLERANCE
+    _assert_quantised_agreement(cast_like(ours, np.dtype(np.uint16)),
+                                cast_like(theirs, np.dtype(np.uint16)))
+
+
+def test_tiling_is_not_the_whole_solve_and_nobody_may_claim_it_is(monkeypatch):
+    """Measured: with petakit's rule (border capped at a third of the tile, here 8 planes
+    against a 95-plane PSF support) the tiled result differs from the whole solve by up to
+    25% of peak on the puncta planes. That is petakit's CPU behaviour too; the log line
+    names the tiling so a user can tell. This test keeps the number honest."""
+    device = _device_or_skip()
+    psf = make_psf(DEFAULT_OPTICS)
+    volume = _phantom((48, 256, 256), seed=2)
+    _force_budget(monkeypatch, _budget_for(48))
+    whole = _decon_gpu.rl(volume, psf, ITERATIONS, device)
+    _force_budget(monkeypatch, _budget_for(24))
+    tiled = _decon_gpu.rl(volume, psf, ITERATIONS, device)
+    gap = float(np.abs(tiled - whole).max()) / float(np.abs(whole).max())
+    assert gap > TOLERANCE, (
+        f"tiled and whole agree to {gap:.2e} of peak; if tiling became exact the "
+        "'approximate' wording in describe() is a lie and should go")
+
+
+def test_snapshots_ride_the_tiled_solve(monkeypatch):
+    device = _device_or_skip()
+    psf = make_psf(DEFAULT_OPTICS)
+    volume = _phantom((48, 256, 256), seed=4)
+    _force_budget(monkeypatch, _budget_for(24))
+    final = _decon_gpu.rl(volume, psf, ITERATIONS, device)
+    snaps = _decon_gpu.rl(volume, psf, 1, device, snapshot_iters=(1, ITERATIONS))
+    assert set(snaps) == {1, ITERATIONS}
+    assert snaps[1].shape == snaps[ITERATIONS].shape == volume.shape
+    np.testing.assert_allclose(snaps[ITERATIONS], final, rtol=0, atol=1e-3)
 
 
 def test_selection_degrades_silently_when_torch_is_absent(monkeypatch):
