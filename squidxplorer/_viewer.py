@@ -572,10 +572,12 @@ class PlateWindow(QMainWindow):
             "processed appear here - a result computed in one window is that window's, and does "
             "not give the plate pixels for its other wells.")
         self._view_combo.currentIndexChanged.connect(self._on_view_combo)
-        _tb.addWidget(QLabel("view:"))
+        self._view_caption = QLabel("view:")
+        _tb.addWidget(self._view_caption)
         _tb.addWidget(self._view_combo)
-        self._drop = QLabel("Drop a Squid acquisition folder here\n\n"
-                            "then pick an operator in  Process wells")
+        # THE EMPTY STATE: the hero area is a drop target saying ONE line (Julio,
+        # 2026-08-25); `_set_empty_state` is the one writer of what shows with no data.
+        self._drop = QLabel("drop an acquisition folder here, or File > Open")
         self._drop.setAlignment(Qt.AlignCenter)
         self._drop.setStyleSheet("color:#8b98ad;font-size:16px;border:2px dashed #232b3a;border-radius:12px;margin:24px;")
         plate_host = QWidget()
@@ -659,6 +661,7 @@ class PlateWindow(QMainWindow):
         _sc_next.activated.connect(lambda: self._cycle_acq(+1))
 
         self._left_l.addWidget(self._drop, 1)    # the plate overview replaces this on ingest
+        self._set_empty_state(True)
 
         # THE REGION SLIDER — the navigation control, replacing the FOV slider. It lives in the
         # PLATE pane, directly under the plate, because the thing it moves is the red ROI frame
@@ -1009,18 +1012,30 @@ class PlateWindow(QMainWindow):
         # is at best ignored and at worst fights the tab widget's own layout.
         win = getattr(win, "host", None) or win
         try:
-            want = beside_rect(screen.availableGeometry(), self.frameGeometry())
-            frame, client = win.frameGeometry(), win.geometry()
-            left_m = client.left() - frame.left()
-            top_m = client.top() - frame.top()
-            win.setGeometry(
-                want.left() + left_m,
-                want.top() + top_m,
-                want.width() - (frame.width() - client.width()),
-                want.height() - (frame.height() - client.height()),
-            )
+            avail = screen.availableGeometry()
+            # ONE WINDOW (Julio, live 2026-08-25: "The new one window should take up the
+            # whole screen. Not in fullscreen, but we add the space where the old plate
+            # window was."): once this window hides for a hosted plate, the deck takes the
+            # WHOLE work area. `_spawn` hosts (and hides) BEFORE this runs, so a beside-rect
+            # here used to re-place the deck at 4/5 of the screen with a blank fifth left.
+            want = avail if self._hidden_for_one_window else beside_rect(avail, self.frameGeometry())
+            self._fit_frame(win, want)
         except Exception:                     # noqa: BLE001 - a layout is never worth a crash
             pass
+
+    @staticmethod
+    def _fit_frame(win, want) -> None:
+        """Put *win*'s FRAME on *want*. `setGeometry` positions the CLIENT area, so the frame
+        margins are subtracted - measured on the PR machine without this: the view's title
+        bar a title-bar's height off the top of the screen."""
+        frame, client = win.frameGeometry(), win.geometry()
+        win.setGeometry(
+            want.left() + (client.left() - frame.left()),
+            want.top() + (client.top() - frame.top()),
+            want.width() - (frame.width() - client.width()),
+            want.height() - (frame.height() - client.height()),
+        )
+
 
     def _ui_scale(self) -> float:
         """How much bigger the window is than the shape the type was written for."""
@@ -1868,14 +1883,7 @@ class PlateWindow(QMainWindow):
         if deck is None or screen is None:
             return
         try:
-            avail = screen.availableGeometry()
-            frame, client = deck.frameGeometry(), deck.geometry()
-            deck.setGeometry(
-                avail.left() + (client.left() - frame.left()),
-                avail.top() + (client.top() - frame.top()),
-                avail.width() - (frame.width() - client.width()),
-                avail.height() - (frame.height() - client.height()),
-            )
+            self._fit_frame(deck, screen.availableGeometry())
         except Exception:                        # noqa: BLE001 - geometry is never worth a crash
             pass
 
@@ -2162,7 +2170,17 @@ class PlateWindow(QMainWindow):
         if menu is not None:                       # the uncarded operators gate on the same flag
             menu.setEnabled(flag)
 
-    # -- drag & drop --
+    # -- the empty state and drag & drop --
+    def _set_empty_state(self, empty: bool) -> None:
+        """THE empty launch (Julio, 2026-08-25): the hero area is a drop target saying one
+        centred line, and the data-bound title controls (the view combo, Open view, paste
+        LUTs) wait for an acquisition - a control with nothing to act on is a dead control.
+        One writer: ingest's refusal arms and its success, and the computed-plate opener."""
+        self._drop.setVisible(empty)
+        for w in (self._view_caption, self._view_combo, self._open_sel_btn,
+                  self._plate_paste_btn):
+            w.setVisible(not empty)
+
     def _open_acquisition_dialog(self):
         """File > Open: pick a Squid acquisition folder (the reliable alternative to drag-drop)."""
         d = QFileDialog.getExistingDirectory(self, "Open a Squid acquisition folder")
@@ -2590,7 +2608,7 @@ class PlateWindow(QMainWindow):
         self._op_stack.reset(); self._op_stack.add("computed", "computed MIP")
         self._apply_layers()
         self._refresh_layers_tab()
-        self._drop.hide()
+        self._set_empty_state(False)
         self._left_l.addWidget(self._overview, 1)
         self._declare_channel_axis(channels, np.uint16)
         self._enable_operators(False)             # no raw data -> operators stay disabled
@@ -3673,7 +3691,12 @@ class PlateWindow(QMainWindow):
         # CLEARED rather than re-read, which is what makes this once-only across re-shows.
         if self._pending_default_view:
             self._pending_default_view = False
-            self._open_default_view()
+            # ON THE NEXT LOOP TURN, never inside this show event. Opening the view here
+            # hosts the plate and hides THIS window while Qt is still mapping it: the widget
+            # reads hidden and the platform window stays on screen (Julio, live 2026-08-25:
+            # "I still see the blank screen where the old plate window used to go";
+            # reproduced offscreen through windowHandle().isVisible()).
+            QTimer.singleShot(0, self._open_default_view)
 
     #: Session flag behind the close-all confirmation. True (the default) = ask. Class-level on
     #: purpose: "don't show me this again" is about the application, not one window. It does not

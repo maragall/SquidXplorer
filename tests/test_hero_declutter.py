@@ -572,3 +572,178 @@ def test_an_ordinary_open_and_preview_session_produces_a_short_log(qapp, napari_
     assert len(info) <= ORDINARY_SESSION_INFO_CAP, (
         f"an ordinary open-and-preview session logged {len(info)} INFO line(s), over the "
         f"cap of {ORDINARY_SESSION_INFO_CAP}:\n{lines}")
+
+
+# --- the empty launch: a drop target, one line, quiet ------------------------------------------
+
+#: An empty launch may say this many INFO lines at most (measured 0 on 2026-08-25).
+EMPTY_LAUNCH_INFO_CAP = 2
+
+EMPTY_HERO_LINE = "drop an acquisition folder here, or File > Open"
+
+
+def _empty_launch(qapp):
+    """What `main()` builds with no dataset: the working layout over nothing."""
+    win = V.PlateWindow(None, default_layout=True, tabbed_views=True)
+    win.show()
+    for _ in range(10):
+        qapp.processEvents()
+    return win
+
+
+def test_an_empty_launch_shows_the_hero_as_a_drop_target_with_one_line(qapp):
+    win = _empty_launch(qapp)
+    try:
+        assert win.acceptDrops(), "the plate window does not accept drops"
+        assert win._drop.isVisibleTo(win), "the drop target is not on screen"
+        assert win._drop.text() == EMPTY_HERO_LINE
+        assert "\n" not in win._drop.text(), "the empty state must be ONE centred line"
+        # Only the drop line and the collapsed bands: the data-bound title controls (a view
+        # combo with nothing to pick, Open view, paste LUTs) wait for an acquisition.
+        for name in ("_view_caption", "_view_combo", "_open_sel_btn", "_plate_paste_btn"):
+            assert not getattr(win, name).isVisibleTo(win), f"{name} is shown with no data"
+        assert not win._left_tabs.isVisibleTo(win), "the operator band is open with no data"
+        assert win._log_panel.collapsed, "the log band is open on an empty launch"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_the_data_bound_title_controls_appear_with_the_acquisition(qapp, napari_pane_stub,
+                                                                  squid_dataset):
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    try:
+        assert not win._open_sel_btn.isVisibleTo(win)
+        win.ingest(str(root))
+        qapp.processEvents()
+        assert not win._drop.isVisibleTo(win), "the drop target survived the ingest"
+        for name in ("_view_caption", "_view_combo", "_open_sel_btn", "_plate_paste_btn"):
+            assert getattr(win, name).isVisibleTo(win), f"{name} is hidden after the ingest"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_a_drop_on_the_empty_hero_reaches_ingest(qapp, tmp_path, monkeypatch):
+    from qtpy.QtCore import QMimeData, QPointF, QUrl, Qt
+    from qtpy.QtGui import QDragEnterEvent, QDropEvent
+
+    win = V.PlateWindow(None)
+    got: list[str] = []
+    monkeypatch.setattr(win, "ingest", lambda p: got.append(str(p)))
+    try:
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(tmp_path))])
+        # Qt hands a drop to the first ancestor that accepts drops: the label under the
+        # cursor does not, so the window's own handlers are what a drop on the hero reaches.
+        assert not win._drop.acceptDrops()
+        pos = QPointF(win._drop.geometry().center())
+        enter = QDragEnterEvent(pos.toPoint(), Qt.CopyAction, mime, Qt.LeftButton,
+                                Qt.NoModifier)
+        QApplication.sendEvent(win, enter)
+        assert enter.isAccepted(), "the drag was refused at the hero"
+        drop = QDropEvent(pos, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+        QApplication.sendEvent(win, drop)
+        assert got == [str(tmp_path)], f"the drop did not reach ingest: {got}"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_an_empty_launch_logs_at_most_a_couple_of_info_lines(qapp):
+    records: list[logging.LogRecord] = []
+
+    class _Spy(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    spy = _Spy(level=logging.DEBUG)
+    logger = logging.getLogger("squid.xplorer")
+    logger.addHandler(spy)
+    try:
+        win = _empty_launch(qapp)
+        shutdown_plate_window(qapp, win)
+    finally:
+        logger.removeHandler(spy)
+    info = [r for r in records if r.levelno == logging.INFO]
+    lines = "\n".join(f"  {r.name}: {r.getMessage()}" for r in info)
+    assert len(info) <= EMPTY_LAUNCH_INFO_CAP, (
+        f"an empty launch logged {len(info)} INFO line(s), over the cap of "
+        f"{EMPTY_LAUNCH_INFO_CAP}:\n{lines}")
+
+
+# --- ONE window: the deck takes the work area, the plate window hides -------------------------
+# Julio, live on bf982a2 (2026-08-25): "I still see the blank screen where the old plate window
+# used to go. The new one window should take up the whole screen. Not in fullscreen, but we add
+# the space where the old plate window was." Measured: the plate window still on screen at
+# x=0 width 420 and the deck beside it at x=420 width 1050 on a 1470-wide work area.
+#
+# THE CAUSE, reproduced offscreen: with the path given to the constructor the default view
+# opened from the plate's own showEvent, so the hosting's hide() ran INSIDE the show. Qt maps
+# the platform window after the show event returns, so the widget read hidden (isVisible()
+# False) while its QWindow stayed on screen (windowHandle().isVisible() True). The tests
+# below therefore assert the WINDOW HANDLE, which is what the user sees.
+
+
+def _plate_is_off_screen(win) -> bool:
+    handle = win.windowHandle()
+    return not win.isVisible() and (handle is None or not handle.isVisible())
+
+
+def _assert_frame_is_the_work_area(window, avail):
+    """The frame (what the user sees) equals the available geometry, through the window's
+    own minimum where offscreen size hints inflate it (see test_default_layout.py)."""
+    frame, client = window.frameGeometry(), window.geometry()
+    assert frame.topLeft() == avail.topLeft(), (
+        f"the deck's frame starts at {frame.topLeft()}, not the work area's {avail.topLeft()}")
+    margin_w = frame.width() - client.width()
+    margin_h = frame.height() - client.height()
+    want_w = max(avail.width() - margin_w, window.minimumWidth())
+    want_h = max(avail.height() - margin_h, window.minimumHeight())
+    assert client.width() == want_w, f"deck width {client.width()} != work area {want_w}"
+    assert client.height() == want_h, f"deck height {client.height()} != work area {want_h}"
+
+
+def test_the_working_layout_is_one_window_and_the_deck_takes_the_work_area(
+        qapp, napari_pane_stub, squid_dataset):
+    from squidxplorer._fontscale import window_screen
+
+    root, _ = squid_dataset
+    # Exactly what main() does: build over the path, then show.
+    win = V.PlateWindow(str(root), default_layout=True, tabbed_views=True)
+    win.show()
+    _drain_until(qapp, lambda: win._viewer_manager.deck(create=False) is not None, timeout=10)
+    for _ in range(20):
+        qapp.processEvents()
+    try:
+        deck = win._viewer_manager.deck(create=False)
+        assert deck is not None, "the working layout opened no deck"
+        assert deck.isVisible()
+        assert _plate_is_off_screen(win), (
+            "the plate window is still on screen beside the deck (widget visible "
+            f"{win.isVisible()}, window handle visible "
+            f"{win.windowHandle() is not None and win.windowHandle().isVisible()})")
+        screen = window_screen(deck)
+        if screen is None:
+            pytest.skip("no screen to size against")
+        _assert_frame_is_the_work_area(deck, screen.availableGeometry())
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_the_plate_window_shows_again_once_the_last_view_closes(qapp, napari_pane_stub,
+                                                                squid_dataset):
+    root, _ = squid_dataset
+    win = V.PlateWindow(str(root), default_layout=True, tabbed_views=True)
+    win.show()
+    _drain_until(qapp, lambda: win._viewer_manager.deck(create=False) is not None, timeout=10)
+    for _ in range(20):
+        qapp.processEvents()
+    try:
+        assert _plate_is_off_screen(win)
+        for view in list(win._viewer_manager.windows):
+            view.request_close()
+        _drain_until(qapp, lambda: not win._viewer_manager.windows, timeout=10)
+        for _ in range(10):
+            qapp.processEvents()
+        assert win.isVisible(), "with no view left the plate window must be the surface"
+    finally:
+        shutdown_plate_window(qapp, win)
