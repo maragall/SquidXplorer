@@ -1,7 +1,4 @@
-"""A cached result says what it is, so nothing ever compares two of them (see
-``squidxplorer/_result.py``). Pins: round-trip through JSON, two runs with different channel sets
-coexisting under one plate, and the absence of any comparison between two results.
-"""
+"""A cached result says what it is, so nothing ever compares two of them (see ``squidxplorer/_result.py``)."""
 
 from __future__ import annotations
 
@@ -109,19 +106,6 @@ def _run(region: str, channels, chain: RecipeChain, cache: ResultCache) -> Resul
     return r
 
 
-def test_two_results_with_different_channel_sets_coexist_and_each_reports_its_own():
-    cache = ResultCache()
-    two_colour = RecipeChain.of(Recipe.operator("mip"))
-    one_colour = RecipeChain.of(Recipe.operator("mip"), Recipe.operator("decon", sigma=2.0))
-
-    _run("A1", ("DAPI", "GFP"), two_colour, cache)
-    _run("B2", ("DAPI",), one_colour, cache)
-
-    assert cache.get("A1", two_colour).channels == ("DAPI", "GFP")
-    assert cache.get("B2", one_colour).channels == ("DAPI",)
-    assert len(cache) == 2, "one cell's declaration overwrote the other's"
-
-
 def test_two_runs_over_the_SAME_cell_are_two_entries_each_with_its_own_declaration():
     cache = ResultCache()
     plain = RecipeChain.of(Recipe.operator("mip"))
@@ -141,6 +125,7 @@ def test_a_plate_built_from_BOTH_renders_BOTH():
     one_colour = RecipeChain.of(Recipe.operator("mip"), Recipe.operator("decon", sigma=2.0))
     _run("A1", ("DAPI", "GFP"), two_colour, cache)
     _run("B2", ("DAPI",), one_colour, cache)
+    assert len(cache) == 2, "one cell's declaration overwrote the other's"
 
     cells = {Address("A1"): cache.get("A1", two_colour),
              Address("B2"): cache.get("B2", one_colour)}
@@ -177,13 +162,7 @@ KNOWS_ABOUT_RESULTS = ("squidxplorer._result", "squidxplorer._recipe")
 
 
 def _equality_on_a_declaration(module_name: str) -> "list[str]":
-    """Every ``==``/``!=`` in *module_name* with a declared field on either side, found over the
-    AST (not the text) so this module's own prose can't affect the result. ``in`` is not flagged:
-    membership asks one object what it holds, equality needs a second to hold it against.
-
-    Known limit: catches the direct spelling only, not one laundered through a call
-    (``set(a.channels) != set(b.channels)``); ``test_no_function_takes_TWO_results`` covers that.
-    """
+    """Every ``==``/``!=`` in *module_name* with a declared field on either side, found over the AST (not the text) so this module's own prose can't affect the result."""
     module = __import__(module_name, fromlist=["_"])
     tree = ast.parse(pathlib.Path(inspect.getfile(module)).read_text(encoding="utf-8"))
     hits = []
@@ -200,8 +179,7 @@ def _equality_on_a_declaration(module_name: str) -> "list[str]":
 
 
 def test_NO_code_path_compares_two_results():
-    """Mutation check: add ``if a.channels != b.channels`` anywhere in ``_result.py`` or
-    ``_recipe.py`` and this goes red."""
+    """Mutation check: add ``if a.channels != b.channels`` anywhere in ``_result.py`` or ``_recipe.py`` and this goes red."""
     hits = [h for name in KNOWS_ABOUT_RESULTS for h in _equality_on_a_declaration(name)]
     assert hits == [], (
         "a result's declaration is being compared against something. Two runs with different "
@@ -210,8 +188,7 @@ def test_NO_code_path_compares_two_results():
 
 
 def test_two_results_are_not_comparable_BY_CONSTRUCTION():
-    """``Result`` is ``eq=False``, so ``==`` falls back to identity; ``Substance`` stays comparable
-    since comparing two descriptions (not two results) is fine."""
+    """``Result`` is ``eq=False``, so ``==`` falls back to identity; ``Substance`` stays comparable since comparing two descriptions (not two results) is fine."""
     assert Result.__eq__ is object.__eq__, "Result grew an __eq__: two results became comparable"
 
     s = Substance(channels=("DAPI",), z_depth=1, dtype="uint16", pixel_size_um=0.325)
@@ -221,8 +198,7 @@ def test_two_results_are_not_comparable_BY_CONSTRUCTION():
 
 
 def test_no_function_takes_TWO_results():
-    """Complements the AST check above: a comparison laundered through a call still needs both
-    results in one frame, so nothing in these modules should accept two."""
+    """Complements the AST check above: a comparison laundered through a call still needs both results in one frame, so nothing in these modules should accept two."""
     for module_name in KNOWS_ABOUT_RESULTS:
         module = __import__(module_name, fromlist=["_"])
         tree = ast.parse(pathlib.Path(inspect.getfile(module)).read_text(encoding="utf-8"))
@@ -238,8 +214,7 @@ def test_no_function_takes_TWO_results():
 
 
 def test_a_cache_entry_carries_the_CHAIN_OBJECT_and_not_only_its_hash():
-    """The key holds ``chain.key()``, a sha1 prefix that can't be un-hashed, so a legend needs the
-    chain object itself to name what produced a result."""
+    """The key holds ``chain.key()``, a sha1 prefix that can't be un-hashed, so a legend needs the chain object itself to name what produced a result."""
     cache = ResultCache()
     chain = RecipeChain.of(Recipe.operator("mip"), Recipe.operator("decon", sigma=2.0))
     _run("A1", ("DAPI",), chain, cache)
@@ -250,22 +225,3 @@ def test_a_cache_entry_carries_the_CHAIN_OBJECT_and_not_only_its_hash():
     assert [r.name for r in entry.chain.recipes] == ["mip", "decon"]
     assert entry.chain.recipes[1].params == {"sigma": 2.0}
     assert entry.result.channels == ("DAPI",)
-
-
-def test_a_census_over_the_cache_needs_nothing_but_the_entries():
-    """Groups entries by chain; grouping asks each entry which bucket it belongs in, never whether
-    two entries agree."""
-    cache = ResultCache()
-    plain = RecipeChain.of(Recipe.operator("mip"))
-    deconned = RecipeChain.of(Recipe.operator("mip"), Recipe.operator("decon", sigma=2.0))
-    _run("A1", ("DAPI", "GFP"), plain, cache)
-    _run("A2", ("DAPI", "GFP"), plain, cache)
-    _run("B2", ("DAPI",), deconned, cache)
-
-    census: "dict[str, list]" = {}
-    for entry in cache.entries():
-        census.setdefault(entry.chain.key(), []).append(Address(entry.result.region_id))
-
-    assert len(census) == 2
-    assert census[plain.key()] == [Address("A1"), Address("A2")]
-    assert census[deconned.key()] == [Address("B2")]

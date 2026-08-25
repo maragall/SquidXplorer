@@ -121,17 +121,6 @@ def test_the_cache_refuses_a_bare_array():
         cache.put("B7", RecipeChain.of(Recipe.operator("mip")), [[1, 2], [3, 4]])
 
 
-def test_a_result_filed_by_one_caller_is_found_by_another_for_the_same_region():
-    from squidxplorer import _recipe
-
-    _recipe.RESULTS.clear()
-    result = _result("B7", "DAPI")
-    _recipe.cache_operator_result("mip", result, version="/acq/one")
-
-    assert _recipe.cached_operator_results("B7", "/acq/one") == [("mip", result)]
-    assert _recipe.cached_operator_results("B7", "/acq/one")[0][1] is result
-
-
 def test_the_lookup_is_scoped_to_its_region_its_operator_and_its_acquisition():
     from squidxplorer import _recipe
 

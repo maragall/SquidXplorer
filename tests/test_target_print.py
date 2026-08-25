@@ -1,9 +1,7 @@
-"""The operator UI prints which windows a run is aimed at, and reconciles the
-deduplicated region counts."""
+"""The operator UI prints which windows a run is aimed at, and reconciles the deduplicated region counts."""
 
 from __future__ import annotations
 
-import logging
 import os
 import sys
 
@@ -67,6 +65,9 @@ def test_no_overlap_prints_one_number_because_there_is_only_one():
     assert _line(block, "across") == "12 regions across 3 windows"
     assert "region slots" not in block
     assert "processed once" not in block
+    block = describe_view_target([_View(2, "dupe", ["A1", "A1", "B2"])], action="Run decon")
+    assert block.splitlines()[0] == "Run decon on 1 window, 2 regions", "one window listing a region twice"
+    assert _line(block, "A1") == "[2]  dupe  2 regions  A1, B2"
 
 
 def test_several_overlapping_regions_are_all_named_with_their_multiplicity():
@@ -82,32 +83,15 @@ def test_several_overlapping_regions_are_all_named_with_their_multiplicity():
         "A1 ×3, B2 ×2")
 
 
-def test_a_window_that_lists_a_region_twice_still_counts_it_once():
-    block = describe_view_target([_View(2, "dupe", ["A1", "A1", "B2"])], action="Run decon")
-    assert block.splitlines()[0] == "Run decon on 1 window, 2 regions"
-    assert _line(block, "A1") == "[2]  dupe  2 regions  A1, B2"
-    assert _line(block, "across") == "2 regions across 1 window"
-
-
 # ------------------------------------------------------------------------------- the layout
 
 
-def test_the_bracket_is_the_same_token_the_log_prints():
-    """The identity column comes from ``window_id``, never from the name field."""
-    block = describe_view_target([_View(3, "whatever", ["A1"])])
-    assert _line(block, "whatever").startswith("[3]  ")
-
-
-def test_the_label_is_the_renamed_label_because_that_is_what_makes_a_rename_worth_having():
-    block = describe_view_target([_View(2, "Deconvolution trial", ["A1"])])
-    assert "Deconvolution trial" in block
-
-
-def test_a_long_label_is_elided_rather_than_wrapped():
+def test_a_long_label_is_elided_and_the_bracket_is_the_windows_id_not_its_name():
     block = describe_view_target([_View(2, "x" * 80, ["A1"]), _View(3, "short", ["A2"])])
     assert len(block.splitlines()) == 6, "a row wrapped onto a second line"
     assert "…" in block
     assert "x" * 80 not in block
+    assert _line(block, "short").startswith("[3]  "), "the identity column comes from window_id"
 
 
 def test_the_columns_line_up_across_rows():
@@ -129,12 +113,8 @@ def test_the_roi_subset_is_printed_in_the_existing_extent_spelling():
     block = describe_view_target([_View(5, "ROI · B6", ["B6"], roi_bbox=bbox)])
     assert Extent(region_id="B6", bbox_um=bbox).label().split(" ", 1)[1] in block
     assert "roi [120.0,340.0 636.0,856.0] um" in block
-
-
-def test_the_region_names_truncate_in_the_one_overflow_spelling_this_codebase_has():
-    """Same ``, ... (+N more)`` tail ``describe_run_target`` prints."""
     block = describe_view_target([_View(2, "many", [f"A{i}" for i in range(1, 11)])])
-    assert "A1, A2, A3, A4, A5, A6, ... (+4 more)" in block
+    assert "A1, A2, A3, A4, A5, A6, ... (+4 more)" in block, "the one overflow spelling"
 
 
 # --------------------------------------------------------------------------------- refusals
@@ -151,8 +131,6 @@ def test_nothing_to_run_returns_None_rather_than_a_cheerful_zero():
 pytest.importorskip("qtpy")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip("PySide already loaded - Qt binding conflict", allow_module_level=True)
-
-from qtpy.QtWidgets import QComboBox, QPushButton  # noqa: E402
 
 from squidxplorer import _viewer as V  # noqa: E402
 
@@ -195,10 +173,3 @@ def test_the_print_and_the_run_cannot_disagree(qapp, squid_dataset):
         win._stop_worker(); win.close()
 
 
-def test_the_open_views_run_target_died_with_the_run_tab():
-    """One flow (Julio, 2026-08-25): runs launch from a view's operators row (Preview /
-    Run on plate); the run tab's destination picker and its 'Open views' target are gone.
-    The pure helpers (`describe_view_target`, `distinct_view_regions`) stay - the view-hue
-    painter still flattens through them."""
-    assert not hasattr(V.PlateWindow, "_build_run_tab")
-    assert not hasattr(V.PlateWindow, "_print_open_views_target")

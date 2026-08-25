@@ -1,5 +1,4 @@
-"""A running QThread must never be destroyable: workers have no Qt parent, and a
-worker that will not stop in time is detached and kept referenced, never dropped."""
+"""A running QThread must never be destroyable: workers have no Qt parent, and a worker that will not stop in time is detached and kept referenced, never dropped."""
 
 from __future__ import annotations
 
@@ -94,11 +93,3 @@ def test_a_worker_that_stopped_cleanly_is_not_parked(qapp):
     assert worker.wait(5000)
     PO._detach(worker)
     assert worker not in PO._DETACHED
-
-
-def test_the_overview_has_one_name_for_stopping_both_of_its_threads():
-    """Two threads stopped in two places by two owners is how one of them got forgotten."""
-    assert hasattr(PO.PlateOverview, "shutdown"), (
-        "PlateOverview.shutdown() is the single call every destroyer makes; without it a caller "
-        "has to remember clear_tile_source() AND set_loupe_source(None), and two of the three "
-        "call sites remembered neither")

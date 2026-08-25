@@ -1,19 +1,4 @@
-"""One tiny synthetic acquisition per Squid output writer.
-
-Every writer in control/core/job_processing.py gets a fixture here, so adding a writer to Squid
-without adding one here is what fails, rather than a customer's acquisition:
-
-    SaveImageJob default          {t}/{region}_{fov}_{z}_{channel}.tiff
-    SaveImageJob MULTI_PAGE_TIFF  {t}/{region}_{fov:0PAD}_stack.tiff
-    SaveOMETiffJob                ome_tiff/{region}_{fov:0PAD}.ome.tiff   (T, Z, C, Y, X)
-    SaveZarrJob HCS               plate.ome.zarr/{row}/{col}/{fov}/0      (T, C, Z, Y, X)
-    SaveZarrJob non-HCS per-FOV   zarr/{region}/fov_{n}.ome.zarr/0        (T, C, Z, Y, X)
-    SaveZarrJob non-HCS 6D        zarr/{region}/acquisition.zarr   (FOV, T, C, Z, Y, X)
-
-Every fixture shares the same tiny pixel payload, so a test can assert the SAME array through
-every reader. FILE_ID_PADDING defaults to 4, not Squid's own default of 0, so a fixture that
-assumes a padding width fails rather than one that happens to match it.
-"""
+"""One tiny synthetic acquisition per Squid output writer."""
 
 from __future__ import annotations
 
@@ -44,8 +29,7 @@ FILE_ID_PADDING = 4          # != Squid's default 0, so a fixture assuming paddi
 
 
 def plane(region: str, fov: int, z: int, channel: str) -> np.ndarray:
-    """Deterministic pixels unique per (region, fov, z, channel), identical across every writer
-    fixture."""
+    """Deterministic pixels unique per (region, fov, z, channel), identical across every writer fixture."""
     base = _pixel_value(REGIONS.index(region), fov, z, CHANNELS.index(channel))
     return (np.arange(FRAME[0] * FRAME[1], dtype=np.uint16).reshape(FRAME) + base).astype(np.uint16)
 
@@ -75,9 +59,7 @@ def _sidecars(root: Path, coordinates: bool = True) -> None:
 
 
 def build_multi_page_tiff(root, padding: int = FILE_ID_PADDING, jitter_mm: float = 1e-4) -> Path:
-    """{t}/{region}_{fov:0{padding}}_stack.tiff, one appended page per (z, channel), matching
-    SaveImageJob's MULTI_PAGE_TIFF branch. jitter_mm simulates real per-capture stage drift; no
-    coordinates.csv is written because this writer records positions inline."""
+    """{t}/{region}_{fov:0{padding}}_stack.tiff, one appended page per (z, channel), matching SaveImageJob's MULTI_PAGE_TIFF branch."""
     root = Path(root)
     _sidecars(root, coordinates=False)
     folder = root / "0"
@@ -111,10 +93,7 @@ def build_multi_page_tiff(root, padding: int = FILE_ID_PADDING, jitter_mm: float
 
 
 def build_ome_tiff(root, padding: int = FILE_ID_PADDING) -> Path:
-    """ome_tiff/{region}_{fov:0{padding}}.ome.tiff, one 5-D TZCYX stack per field. Axis order is
-    T,Z,C,Y,X, NOT the zarr writer's T,C,Z,Y,X — the two Squid writers genuinely disagree.
-    Written two-step (allocate, then fill plane by plane via tifffile.memmap), matching
-    SaveOMETiffJob's own per-plane write."""
+    """ome_tiff/{region}_{fov:0{padding}}.ome.tiff, one 5-D TZCYX stack per field."""
     root = Path(root)
     _sidecars(root, coordinates=True)
     out = root / "ome_tiff"
@@ -222,8 +201,7 @@ def _tczyx(region: str, fov: int) -> np.ndarray:
 
 
 def build_zarr_hcs(root) -> Path:
-    """plate.ome.zarr/{row}/{col}/{fov}/0, mirroring Squid's write_plate_metadata /
-    write_well_metadata; no metadata at the intermediate row level, matching Squid."""
+    """plate.ome.zarr/{row}/{col}/{fov}/0, mirroring Squid's write_plate_metadata / write_well_metadata; no metadata at the intermediate row level, matching Squid."""
     root = Path(root)
     _sidecars(root, coordinates=True)
     plate = root / "plate.ome.zarr"
@@ -248,8 +226,7 @@ def build_zarr_hcs(root) -> Path:
 
 
 def build_zarr_per_fov(root) -> Path:
-    """zarr/{region}/fov_{n}.ome.zarr/0, 5-D per FOV. Same OME metadata layout as HCS mode, just
-    without the plate/well group nesting."""
+    """zarr/{region}/fov_{n}.ome.zarr/0, 5-D per FOV."""
     root = Path(root)
     _sidecars(root, coordinates=True)
     for region in REGIONS:
@@ -261,9 +238,7 @@ def build_zarr_per_fov(root) -> Path:
 
 
 def build_zarr_6d(root) -> Path:
-    """zarr/{region}/acquisition.zarr, one 6-D array per region. Non-standard layout: OME
-    metadata is merged into the ARRAY's own zarr.json (node_type "array", not "group"), so it
-    can't be recognised by group-ness alone."""
+    """zarr/{region}/acquisition.zarr, one 6-D array per region."""
     root = Path(root)
     _sidecars(root, coordinates=True)
     for region in REGIONS:

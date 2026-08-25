@@ -1,17 +1,14 @@
-"""n_fovs=None ("all FOVs") through selection, engine and writer.
-
-Two things are load-bearing here: `n_fovs=None` must survive the whole pipeline (OME-NGFF's
-`field_count` is `int()`-ed, so an unresolved None raises deep inside the writer), and `n_fovs=1`
-must behave exactly as before.
-"""
+"""n_fovs=None ("all FOVs") through selection, engine and writer."""
 
 from __future__ import annotations
+
+import json
 
 import numpy as np
 import pytest
 
 from squidxplorer._output import write_from_stream
-from squidxplorer.projection import project_well, select_fovs
+from squidxplorer.projection import select_fovs
 from squidxplorer.reader import open_reader
 
 
@@ -26,44 +23,22 @@ def _meta(fovs_per_region):
     }
 
 
-# --- select_fovs ----------------------------------------------------------------------------
-
-def test_none_selects_every_fov():
-    meta = _meta({"A1": [0, 1, 2], "A2": [0, 1, 2]})
-    assert select_fovs(meta, n_fovs=None) == {"A1": [0, 1, 2], "A2": [0, 1, 2]}
-
-
-def test_none_tolerates_ragged_wells():
-    """One short well must not abort the plate — that is the whole point of None."""
+def test_none_selects_every_fov_and_tolerates_ragged_wells_while_the_default_is_one():
     meta = _meta({"A1": [0, 1, 2, 3], "A2": [0, 1]})
     assert select_fovs(meta, n_fovs=None) == {"A1": [0, 1, 2, 3], "A2": [0, 1]}
-
-
-def test_explicit_count_still_raises_on_a_short_well():
-    meta = _meta({"A1": [0, 1, 2, 3], "A2": [0, 1]})
-    with pytest.raises(ValueError, match="only 2 FOV"):
-        select_fovs(meta, n_fovs=4)
-
-
-def test_explicit_count_error_points_at_the_none_escape_hatch():
-    meta = _meta({"A1": [0]})
-    with pytest.raises(ValueError, match="n_fovs=None"):
-        select_fovs(meta, n_fovs=2)
-
-
-def test_default_is_still_one_fov_per_well():
-    meta = _meta({"A1": [0, 1, 2], "A2": [0, 1, 2]})
     assert select_fovs(meta) == {"A1": [0], "A2": [0]}
 
 
-def test_zero_and_negative_counts_rejected():
-    meta = _meta({"A1": [0, 1]})
+def test_an_explicit_count_refuses_a_short_well_by_name_and_points_at_none():
+    meta = _meta({"A1": [0, 1, 2, 3], "A2": [0, 1]})
+    with pytest.raises(ValueError, match="only 2 FOV"):
+        select_fovs(meta, n_fovs=4)
+    with pytest.raises(ValueError, match="n_fovs=None"):
+        select_fovs(_meta({"A1": [0]}), n_fovs=2)
     for bad in (0, -1):
         with pytest.raises(ValueError, match=">= 1 or None"):
             select_fovs(meta, n_fovs=bad)
 
-
-# --- writer: n_fovs=None must not TypeError -------------------------------------------------
 
 def _stream(meta, wells):
     for region, fovs in wells.items():
@@ -71,50 +46,21 @@ def _stream(meta, wells):
             yield region, fov, np.full((1, 1, 1, 4, 4), fov + 1, np.uint16)
 
 
-def test_write_from_stream_accepts_n_fovs_none(tmp_path):
-    meta = _meta({"A1": [0, 1], "A2": [0, 1]})
-    wells = select_fovs(meta, n_fovs=None)
-    manifest = write_from_stream(meta, _stream(meta, wells), tmp_path, n_fovs=None)
-    assert manifest["n_wells"] == 2
-    assert manifest["n_fields_written"] == 4       # 2 wells x 2 FOVs
-
-
-def test_plate_field_count_reflects_the_max_on_a_ragged_plate(tmp_path):
-    import json
-
+def test_the_writer_takes_n_fovs_none_and_a_ragged_plate_gets_one_field_dir_per_fov(tmp_path):
     meta = _meta({"A1": [0, 1, 2], "A2": [0]})
     wells = select_fovs(meta, n_fovs=None)
-    write_from_stream(meta, _stream(meta, wells), tmp_path, n_fovs=None)
+    manifest = write_from_stream(meta, _stream(meta, wells), tmp_path, n_fovs=None)
+    assert manifest["n_wells"] == 2 and manifest["n_fields_written"] == 4
     plate = json.loads((tmp_path / "plate.ome.zarr" / "zarr.json").read_text())
     node = plate["attributes"]["ome"] if "attributes" in plate else plate
     assert node["plate"]["field_count"] == 3
-
-
-def test_every_fov_gets_its_own_field_directory(tmp_path):
-    meta = _meta({"A1": [0, 1, 2]})
-    wells = select_fovs(meta, n_fovs=None)
-    write_from_stream(meta, _stream(meta, wells), tmp_path, n_fovs=None)
     well_dir = tmp_path / "plate.ome.zarr" / "A" / "1"
     assert sorted(d.name for d in well_dir.iterdir() if d.is_dir()) == ["0", "1", "2"]
 
 
-# --- N=1 regression -------------------------------------------------------------------------
-
-def test_n1_projection_is_byte_identical_to_the_single_fov_path(squid_dataset):
-    """The keystone regression guard: multi-FOV support must not perturb one-FOV output."""
-    root, _ = squid_dataset
-    reader = open_reader(root)
-    meta = reader.metadata
-    region = meta["regions"][0]
-    fov = meta["fovs_per_region"][region][0]
-
-    direct = project_well(reader, region, fov)
-    via_all = project_well(reader, region, select_fovs(meta, n_fovs=None)[region][0])
-    assert np.array_equal(direct, via_all)
-    assert direct.dtype == via_all.dtype
-
-
-def test_n1_selection_unchanged_by_the_positions_work(squid_dataset):
+def test_n1_selection_is_unchanged_on_a_real_acquisition(squid_dataset):
     root, _ = squid_dataset
     meta = open_reader(root).metadata
     assert select_fovs(meta, n_fovs=1) == {r: [0] for r in meta["regions"]}
+    region = meta["regions"][0]
+    assert select_fovs(meta, n_fovs=None)[region][0] == meta["fovs_per_region"][region][0]

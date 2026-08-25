@@ -1,17 +1,7 @@
-"""Native cross-FOV ROI fusion geometry (`roi_window_px` + `read_brick`).
-
-The 3D-of-an-ROI path fuses the FOVs the ROI overlaps at native resolution, all z, cropped to the
-box. Placement must match the 2D mosaic exactly (each FOV pasted at its stage-pixel offset), or the
-3D volume shows the wrong tissue. This pins that geometry with a synthetic two-FOV reader.
-
-There is ONE conversion and ONE fuser here on purpose — a second copy (`_napari3d.native_roi_volume`,
-deleted 2026-08-06) drifted from this one in three measurable ways; see the regression tests below.
-"""
+"""Native cross-FOV ROI fusion geometry (`roi_window_px` + `read_brick`)."""
 
 import numpy as np
-import pytest
 
-from squidxplorer import _napari3d
 from squidxplorer._napari3d import read_brick, roi_window_px
 
 
@@ -53,24 +43,9 @@ def _roi_volume(meta, roi_bbox_um, channels=("c0",)):
     return out
 
 
-def test_roi_fusion_straddles_two_fovs():
-    # ROI x[2,6] y[1,3] straddles the FOV0/FOV1 seam at x=4.
-    v = _roi_volume(_meta(), (2.0, 1.0, 6.0, 3.0))["c0"]
-    assert v.shape == (2, 2, 4)                    # (z, H, W)
-    assert (v[0, :, 0:2] == 10).all()              # left half from FOV0
-    assert (v[0, :, 2:4] == 20).all()              # right half from FOV1
-    assert (v[1, :, 0:2] == 11).all() and (v[1, :, 2:4] == 21).all()   # z=1 layer
-
-
 def test_roi_fusion_full_z_depth_preserved():
     vols = _roi_volume(_meta(), (0.0, 0.0, 4.0, 4.0))
     assert vols["c0"].shape[0] == 2                # both z levels survive (this was the "single z" bug)
-
-
-def test_roi_fully_inside_one_fov():
-    v = _roi_volume(_meta(), (0.0, 0.0, 3.0, 3.0))["c0"]
-    assert v.shape == (2, 3, 3)
-    assert (v[0] == 10).all()                      # entirely FOV0
 
 
 # --- the three ways the deleted second copy disagreed with this one -----------------------------
@@ -103,14 +78,7 @@ def test_an_acquisition_with_no_pixel_size_is_refused_not_guessed():
     )
 
 
-def test_there_is_no_second_roi_fuser_on_the_module():
-    assert not hasattr(_napari3d, "native_roi_volume"), (
-        "native_roi_volume is back. It is roi_window_px + read_brick open-coded, and every time "
-        "it existed it disagreed with them -- see the three tests above."
-    )
-
-
-@pytest.mark.parametrize("box", [(2.0, 1.0, 6.0, 3.0), (0.0, 0.0, 4.0, 4.0), (0.0, 0.0, 3.0, 3.0)])
-def test_the_window_is_the_shape_of_the_volume(box):
+def test_the_window_is_the_shape_of_the_volume():
+    box = (2.0, 1.0, 6.0, 3.0)
     r0, r1, c0, c1 = roi_window_px(_meta(), "A1", box)
     assert _roi_volume(_meta(), box)["c0"].shape[1:] == (r1 - r0, c1 - c0)

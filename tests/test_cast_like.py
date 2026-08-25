@@ -29,9 +29,7 @@ def test_cast_like_rounds_rather_than_truncating():
 
 
 def test_the_halfway_cases_are_HALF_TO_EVEN_by_name():
-    """``np.rint``'s tie-breaking, kept deliberately: numpy's default, statistically unbiased
-    across a plate (half-up would brighten every image ~0.5 count at the .5 boundary), and
-    monotone. 255.5 rounds to 256 — the even neighbour — and is then clipped for uint8."""
+    """``np.rint``'s tie-breaking, kept deliberately: numpy's default, statistically unbiased across a plate (half-up would brighten every image ~0.5 count"""
     values = np.array([0.5, 1.5, 2.5, 254.5, 255.5])
     assert list(cast_like(values, np.uint16)) == [0, 2, 2, 254, 256]
     assert list(cast_like(values, np.uint8)) == [0, 2, 2, 254, 255]

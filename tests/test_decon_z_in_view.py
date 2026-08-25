@@ -1,10 +1,4 @@
-"""A preview solves the z THE VIEW IS ON, and the result lands on that same z.
-
-Julio (2026-08-25): "Looks like decon runs on a z-level that's not in view. Then when it
-finishes the decon z-layer is different to the raw z-layer in view." The per-FOV display
-path hardcoded plane 0 (`image[0, :, 0]`), so a depth-keeping operator's preview showed a
-plane the user was not looking at, under the plane they were.
-"""
+"""A preview solves the z THE VIEW IS ON, and the result lands on that same z."""
 
 from __future__ import annotations
 
@@ -109,7 +103,6 @@ def test_the_view_run_carries_its_z_and_the_dims_stay_put(qapp, napari_pane_stub
                        run_operator=_capture_run)
     try:
         viewer = win._napari_viewer()
-        # a z-stack raw layer, so the model has a real z axis to sit on
         win._pane.mosaic.add_mosaic(
             "raw", CHANNELS[0],
             np.zeros((N_Z, FRAME, FRAME), np.uint16), bbox_um=(0.0, 0.0, 16.0, 16.0))
@@ -122,7 +115,6 @@ def test_the_view_run_carries_its_z_and_the_dims_stay_put(qapp, napari_pane_stub
         assert kw.get("z_level") == 2, (
             f"the run was launched with z_level={kw.get('z_level')!r}; the view is on z=2")
 
-        # the result lands: dims must not move off the user's plane
         acc = RegionResultAccumulator("decon", REGION, meta, list(CHANNELS),
                                       region_operator=False)
         acc.add(0, _image_5d()[0, :, 2])

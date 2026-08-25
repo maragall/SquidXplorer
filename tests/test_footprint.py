@@ -1,9 +1,4 @@
-"""The peak footprint has to be a real number on Windows.
-
-`resource` is POSIX-only; on Windows the peak instead comes from `psutil`'s `peak_wset`
-(`PeakWorkingSetSize`), sourced without ever touching `resource`. With no peak source at all,
-falls back to the current rss (a true lower bound) rather than to 0 (a false statement).
-"""
+"""The peak footprint has to be a real number on Windows."""
 from __future__ import annotations
 
 import os
@@ -39,80 +34,38 @@ class _Usage:
         self.ru_maxrss = ru_maxrss
 
 
-def test_the_windows_peak_is_the_peak_working_set_and_not_zero():
+def test_the_windows_peak_is_the_peak_working_set_never_the_posix_module_and_never_zero():
+    """PeakWorkingSetSize, not the 0 it used to print; `peak_wset == 0` is no measurement, so fall through to rss."""
     proc = _Process(_Info(rss=91 * _MB, peak_wset=419 * _MB))
-    peak, cur = rss_mb(platform="win32", process=proc, usage=None)
-    assert peak == 419.0, "Windows must report PeakWorkingSetSize, not the 0 it used to print"
-    assert cur == 91.0
+    assert rss_mb(platform="win32", process=proc, usage=None) == (419.0, 91.0)
+    assert rss_mb(platform="win32", process=proc, usage=_Usage(ru_maxrss=1024))[0] == 419.0
+    zero = _Process(_Info(rss=91 * _MB, peak_wset=0))
+    assert rss_mb(platform="win32", process=zero, usage=None) == (91.0, 91.0)
 
 
-def test_the_windows_peak_does_not_come_from_the_posix_resource_module():
-    """Hand it a `usage` that would answer 1 MB: the Windows branch must ignore it entirely."""
-    proc = _Process(_Info(rss=91 * _MB, peak_wset=419 * _MB))
-    peak, _ = rss_mb(platform="win32", process=proc, usage=_Usage(ru_maxrss=1024))
-    assert peak == 419.0
-
-
-def test_a_windows_peak_of_zero_is_treated_as_no_answer_not_as_zero_bytes():
-    """`peak_wset == 0` from a fresh/restricted process is absence of a measurement, so fall
-    through to the rss rather than printing zero."""
-    proc = _Process(_Info(rss=91 * _MB, peak_wset=0))
-    peak, cur = rss_mb(platform="win32", process=proc, usage=None)
-    assert peak == 91.0
-    assert cur == 91.0
-
-
-def test_the_linux_peak_is_ru_maxrss_in_kilobytes():
-    peak, cur = rss_mb(platform="linux", process=None, usage=_Usage(ru_maxrss=419 * 1024))
-    assert peak == 419.0
-    assert cur is None
-
-
-def test_the_darwin_peak_is_ru_maxrss_in_bytes():
-    peak, _ = rss_mb(platform="darwin", process=None, usage=_Usage(ru_maxrss=419 * _MB))
-    assert peak == 419.0
-
-
-def test_posix_prefers_the_os_high_water_mark_over_the_current_rss():
+def test_posix_reads_ru_maxrss_in_the_platforms_unit_and_prefers_it_over_the_current_rss():
+    assert rss_mb(platform="linux", process=None, usage=_Usage(ru_maxrss=419 * 1024)) == (419.0, None)
+    assert rss_mb(platform="darwin", process=None, usage=_Usage(ru_maxrss=419 * _MB))[0] == 419.0
     proc = _Process(_Info(rss=91 * _MB))
-    peak, cur = rss_mb(platform="darwin", process=proc, usage=_Usage(ru_maxrss=419 * _MB))
-    assert peak == 419.0
-    assert cur == 91.0
+    assert rss_mb(platform="darwin", process=proc, usage=_Usage(ru_maxrss=419 * _MB)) == (419.0, 91.0)
 
 
-def test_with_no_peak_source_the_current_rss_is_the_peak_floor():
-    proc = _Process(_Info(rss=91 * _MB))
-    peak, cur = rss_mb(platform="win32", process=proc, usage=None)
-    assert peak == 91.0
-    assert cur == 91.0
-
-
-def test_nothing_measurable_reports_zero_and_no_current():
-    peak, cur = rss_mb(platform="win32", process=None, usage=None)
-    assert peak == 0.0
-    assert cur is None
-
-
-def test_a_process_that_raises_is_not_allowed_to_break_the_footprint_line():
+def test_with_no_peak_source_the_rss_is_the_floor_and_nothing_measurable_never_raises():
     """This runs in an excepthook, i.e. while the app is already dying; it must never raise."""
+    proc = _Process(_Info(rss=91 * _MB))
+    assert rss_mb(platform="win32", process=proc, usage=None) == (91.0, 91.0)
+    assert rss_mb(platform="win32", process=None, usage=None) == (0.0, None)
 
     class _Broken:
         def memory_info(self):
             raise OSError("access denied")
 
-    peak, cur = rss_mb(platform="win32", process=_Broken(), usage=None)
-    assert peak == 0.0
-    assert cur is None
+    assert rss_mb(platform="win32", process=_Broken(), usage=None) == (0.0, None)
 
 
-def test_the_live_process_reports_a_nonzero_peak_here():
-    peak, cur = rss_mb()
-    assert peak > 0.0
-    assert cur is None or cur > 0.0
-
-
-def test_the_viewer_entry_point_still_returns_a_pair():
+def test_the_live_process_reports_a_nonzero_peak_through_the_viewer_entry_point():
     from squidxplorer._viewer import _rss_mb
 
-    peak, cur = _rss_mb()
-    assert peak > 0.0
+    peak, cur = rss_mb()
+    assert peak > 0.0 and (cur is None or cur > 0.0)
+    assert _rss_mb()[0] > 0.0

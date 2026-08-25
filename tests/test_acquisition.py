@@ -1,9 +1,4 @@
-"""Tests for scalar acquisition metadata — acquisition.yaml first, the legacy JSON as fallback.
-
-The fallback exists because the FIRST customer install (2026-08-16) opened an old dataset and hit
-the hard refusal; Julio: "We should be able to support old acquisitions too." One loader, both
-readings, and the legacy path WARNS about the one fact the old format cannot record (binning).
-"""
+"""Tests for scalar acquisition metadata — acquisition.yaml first, the legacy JSON as fallback."""
 
 import json
 
@@ -32,6 +27,8 @@ def test_reads_acquisition_yaml(tmp_path):
     assert m["n_z_declared"] == 3
     assert m["n_t_declared"] == 2
     assert m["wellplate_format"] == "24 well plate"
+    assert set(m) == {"pixel_size_um", "n_z_declared", "dz_um", "n_t_declared",
+                      "wellplate_format"}
 
 
 #: Real legacy shape, from Squid's pre-yaml writer (mirrors conftest._PARAMS).
@@ -50,9 +47,7 @@ def test_missing_both_files_raises_naming_both(tmp_path):
 
 
 def test_a_legacy_acquisition_loads_with_a_warning(tmp_path):
-    """The old format is a supported SOURCE now, never a silent one: the pixel size is derived
-    (sensor / magnification) and the warning says so, because the legacy file records no binning
-    and a binned acquisition's derived value is wrong by that factor."""
+    """The old format is a supported SOURCE now, never a silent one: the pixel size is derived (sensor / magnification) and the warning says so, because the"""
     (tmp_path / "acquisition parameters.json").write_text(json.dumps(_LEGACY))
     with pytest.warns(UserWarning, match="legacy.*binning"):
         m = load_acquisition_metadata(tmp_path)
@@ -66,8 +61,7 @@ def test_a_legacy_acquisition_loads_with_a_warning(tmp_path):
 
 
 def test_the_yaml_outranks_a_legacy_file_beside_it(tmp_path):
-    """A post-yaml acquisition ships BOTH files; the yaml's stored, binning-aware pixel size must
-    win over the legacy derivation."""
+    """A post-yaml acquisition ships BOTH files; the yaml's stored, binning-aware pixel size must win over the legacy derivation."""
     (tmp_path / "acquisition.yaml").write_text(_ACQ_YAML)
     (tmp_path / "acquisition parameters.json").write_text(json.dumps(_LEGACY))
     m = load_acquisition_metadata(tmp_path)
@@ -89,9 +83,7 @@ def test_a_corrupt_legacy_file_is_refused_by_name(tmp_path):
 
 
 def test_an_old_acquisition_opens_end_to_end_through_the_reader(squid_dataset):
-    """THE CUSTOMER CASE: a real (synthetic) acquisition with the yaml DELETED — exactly what an
-    old dataset looks like on disk — must open through the ordinary reader, with the pixel size
-    derived from the legacy optics and every axis intact."""
+    """THE CUSTOMER CASE: a real (synthetic) acquisition with the yaml DELETED — exactly what an old dataset looks like on disk — must open through the"""
     from squidxplorer import open_reader
 
     root, _ = squid_dataset
@@ -100,16 +92,3 @@ def test_an_old_acquisition_opens_end_to_end_through_the_reader(squid_dataset):
         meta = open_reader(str(root)).metadata
     assert meta["pixel_size_um"] == pytest.approx(3.76 / 20.0)   # conftest._PARAMS optics
     assert meta["n_z"] >= 1 and meta["regions"], "the reader did not assemble the acquisition"
-
-
-def test_metadata_keys_exact_no_dead_attributes(tmp_path):
-    # the dict must be EXACTLY the fields the reader consumes; a leftover key would go stale.
-    (tmp_path / "acquisition.yaml").write_text(_ACQ_YAML)
-    m = load_acquisition_metadata(tmp_path)
-    assert set(m) == {
-        "pixel_size_um",
-        "n_z_declared",
-        "dz_um",
-        "n_t_declared",
-        "wellplate_format",
-    }

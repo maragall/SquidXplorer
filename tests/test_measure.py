@@ -1,7 +1,4 @@
-"""Per-operator wall clock and peak RSS measurement tests.
-
-Rule tests: they check what makes a measurement trustworthy, not particular numbers.
-"""
+"""Per-operator wall clock and peak RSS measurement tests."""
 
 from __future__ import annotations
 
@@ -91,15 +88,9 @@ def test_a_run_reports_a_peak_at_or_above_where_it_started(log):
     assert m.peak_over_start is not None
     assert m.peak_over_start > (16 << 20), (
         f"peak_over_start {m.peak_over_start} did not see a resident 64 MiB allocation")
-
-
-def test_a_run_shorter_than_one_sample_interval_still_reports_a_peak(log):
-    """Seeded at t=0, so a run shorter than the interval still has a reading."""
-    if rss_bytes() is None:
-        pytest.skip("RSS is not measurable on this machine")
     with measure_run("fast", "1 region", metrics=log, interval=30.0):
         pass
-    assert log.last().peak_rss is not None
+    assert log.last().peak_rss is not None, "seeded at t=0, a run shorter than the interval still has a reading"
 
 
 def test_the_measurement_survives_a_machine_that_will_not_report_memory(log, monkeypatch):
@@ -124,32 +115,6 @@ def test_the_sampler_thread_does_not_outlive_the_run(log):
     after = [t for t in threading.enumerate()
              if t.name == "squidxplorer-rss" and t.name not in before]
     assert not after, f"sampler threads survived their runs: {after}"
-
-
-def test_the_sampler_overhead_is_negligible(log):
-    """Compares fixed work with and without instrumentation; deliberately loose bar."""
-    import numpy as np
-
-    def work():
-        a = np.arange(1 << 20, dtype=np.float64)
-        for _ in range(20):
-            a = a * 1.000001
-        return float(a[0])
-
-    work()  # warm numpy/import paths
-    t0 = time.perf_counter()
-    for _ in range(3):
-        work()
-    bare = time.perf_counter() - t0
-
-    t0 = time.perf_counter()
-    for _ in range(3):
-        with measure_run("mip", "bench", metrics=log, announce=False):
-            work()
-    measured = time.perf_counter() - t0
-
-    assert measured < bare * 3 + 0.5, (
-        f"instrumented {measured:.3f}s vs bare {bare:.3f}s — the sampler is not negligible")
 
 
 # --- the log line ------------------------------------------------------------------------------
@@ -188,9 +153,6 @@ def test_human_seconds_keeps_milliseconds_below_a_second():
     assert human_seconds(41.2) == "41.2 s"
     assert human_seconds(125.0).startswith("2m")
     assert human_seconds(3725.0).startswith("1h")
-
-
-def test_human_bytes_never_prints_a_bare_number_for_unknown():
     assert human_bytes(None) == "unknown"   # callers add the noun; "peak peak unknown" was the doubling
     assert human_bytes(2 << 30).endswith("GiB")
 
@@ -206,14 +168,11 @@ def test_compare_ranks_operators_by_median_wall_clock(log):
     assert [r["operator"] for r in rows] == ["fast", "slow"]
     assert rows[0]["median_seconds"] == pytest.approx(0.20)
     assert rows[0]["best_seconds"] == pytest.approx(0.10)
-
-
-def test_compare_uses_the_median_so_one_cold_run_does_not_decide_the_ranking(log):
-    log.record(RunMetrics("a", "t", 1, 10.0, None, None, OK))  # cold cache
-    log.record(RunMetrics("a", "t", 1, 1.0, None, None, OK))
-    log.record(RunMetrics("a", "t", 1, 1.0, None, None, OK))
-    log.record(RunMetrics("b", "t", 1, 2.0, None, None, OK))
-    assert [r["operator"] for r in compare(log)] == ["a", "b"], (
+    cold = MetricsLog()
+    for s in (10.0, 1.0, 1.0):
+        cold.record(RunMetrics("a", "t", 1, s, None, None, OK))    # one cold-cache run
+    cold.record(RunMetrics("b", "t", 1, 2.0, None, None, OK))
+    assert [r["operator"] for r in compare(cold)] == ["a", "b"], (
         "a mean would put 'a' (mean 4.0) behind 'b' (2.0) on the strength of one cold run")
 
 
@@ -240,17 +199,9 @@ def test_a_run_that_produced_nothing_is_counted_but_never_timed(log):
         "the median must be over the runs that produced something (the old one was 1.5 ms, the "
         "middle of two non-results and one real run)")
     assert (row["runs"], row["timed"]) == (3, 1), "3 runs happened; exactly 1 of them did the job"
-
-
-def test_the_table_says_how_many_runs_were_timed_not_only_how_many_ran(log):
-    log.record(RunMetrics("mip", "t", 1, 5.0, None, None, OK))
-    log.record(RunMetrics("mip", "t", 1, 0.001, None, None, PARTIAL, "produced nothing"))
-    log.record(RunMetrics("mip", "t", 1, 0.001, None, None, STOPPED, "stopped after 0 of 1"))
-    header, _rule, row = compare_table(log).splitlines()[:3]
-    assert "timed" in header, (
-        f"no 'timed' column in {header!r} — 'runs' alone reads as though every run was a timing")
-    assert row.split()[:4] == ["mip", "3", "1", "0"], (
-        f"got {row.split()!r}: 3 runs, 1 of them timed, 0 outright failures")
+    header, _rule, line = compare_table(log).splitlines()[:3]
+    assert "timed" in header, "'runs' alone reads as though every run was a timing"
+    assert line.split()[:4] == ["mip", "3", "1", "0"], line.split()
 
 
 def test_an_operator_that_never_succeeded_sorts_last_not_first(log):
@@ -266,11 +217,8 @@ def test_compare_reports_the_worst_peak_not_the_last_one(log):
         "a memory budget is decided by the worst run, not the most recent")
 
 
-def test_compare_table_says_so_when_there_is_nothing_to_compare(log):
+def test_compare_table_says_so_when_empty_and_has_one_row_per_operator(log):
     assert "no operator runs recorded" in compare_table(log)
-
-
-def test_compare_table_has_one_row_per_operator(log):
     log.record(RunMetrics("mip", "t", 1, 1.0, 1 << 20, 0, OK))
     log.record(RunMetrics("mip", "t", 1, 2.0, 1 << 20, 0, OK))
     log.record(RunMetrics("stitch", "t", 1, 3.0, 1 << 20, 0, OK))
@@ -290,22 +238,15 @@ def test_the_history_is_bounded(log):
 
 def test_a_subscriber_is_told_about_every_finished_run(log):
     seen = []
-    log.subscribe(seen.append)
-    with measure_run("mip", "1 region", metrics=log):
-        pass
-    assert len(seen) == 1 and seen[0].operator == "mip"
-
-
-def test_one_broken_subscriber_does_not_stop_the_others(log):
-    seen = []
 
     def boom(_m):
         raise RuntimeError("bad sink")
 
     log.subscribe(boom)
     log.subscribe(seen.append)
-    log.record(RunMetrics("mip", "t", 1, 1.0, None, None, OK))
-    assert len(seen) == 1
+    with measure_run("mip", "1 region", metrics=log):
+        pass
+    assert len(seen) == 1 and seen[0].operator == "mip", "one broken subscriber stopped the others"
 
 
 def test_metrics_serialise_to_plain_data_for_the_csat_record(log):

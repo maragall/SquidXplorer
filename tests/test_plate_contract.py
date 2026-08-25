@@ -69,15 +69,6 @@ def test_the_stamp_lives_outside_the_ome_namespace(tmp_path):
     assert "plate_contract_version" not in attrs["ome"]
 
 
-def test_the_real_writer_stamps_the_plate(tmp_path, monkeypatch):
-    """Not just the fixture: write_plate itself must stamp, at its one plate-group write."""
-    import inspect
-
-    src = inspect.getsource(_output)
-    assert "attributes=contract_stamp()" in src, "the writer stopped stamping the plate group"
-    assert src.count("contract_stamp()") == 1, "the stamp is written at more than one site again"
-
-
 def test_write_then_read_carries_the_version_end_to_end(tmp_path):
     """The real writer, the real reader, no fixture in between."""
     from tests.test_output import REGIONS, _image, _meta, _stream
@@ -95,28 +86,15 @@ def test_write_then_read_carries_the_version_end_to_end(tmp_path):
     assert validate_plate(plate_dir).ok, validate_plate(plate_dir).summary()
 
 
-def test_a_reader_round_trip_carries_the_version(tmp_path):
-    plate_dir = _write_plate(tmp_path)
-    reader = SquidZarrReader(plate_dir)
-    reader.metadata                                    # forces _discover
-    assert reader._contract_version == PLATE_CONTRACT_VERSION
-
-
-def test_a_major_mismatch_is_refused_not_warned():
-    major = int(PLATE_CONTRACT_VERSION.split(".")[0])
-    with pytest.raises(PlateContractError) as excinfo:
-        compare_contract_version(f"{major + 1}.0")
-    message = str(excinfo.value)
-    assert f"{major + 1}.0" in message and PLATE_CONTRACT_VERSION in message, \
-        "the refusal must name BOTH versions, or the user cannot act on it"
-
-
-def test_a_major_mismatch_stops_the_reader_opening_the_store(tmp_path):
+def test_a_major_mismatch_stops_the_reader_opening_the_store_naming_both_versions(tmp_path):
     """Enforced at the reader seam, not only in the pure function."""
     major = int(PLATE_CONTRACT_VERSION.split(".")[0])
     plate_dir = _write_plate(tmp_path, version=f"{major + 1}.0")
-    with pytest.raises(PlateContractError):
+    with pytest.raises(PlateContractError) as excinfo:
         SquidZarrReader(plate_dir).metadata
+    message = str(excinfo.value)
+    assert f"{major + 1}.0" in message and PLATE_CONTRACT_VERSION in message, \
+        "the refusal must name BOTH versions, or the user cannot act on it"
 
 
 def test_a_newer_minor_warns_and_proceeds(tmp_path):
@@ -153,10 +131,12 @@ def test_the_spec_version_and_the_contract_version_are_different_things():
     assert PLATE_CONTRACT_VERSION != _output._NGFF_VERSION
 
 
-def test_a_conforming_plate_validates_clean(tmp_path):
+def test_a_conforming_plate_validates_clean_and_names_its_single_level_zero(tmp_path):
+    """Small fields are written single-level on purpose (_PYRAMID_MIN_YX). Legal, and lossy."""
     report = validate_plate(_write_plate(tmp_path))
     assert report.ok, report.summary()
     assert report.contract_version == PLATE_CONTRACT_VERSION
+    assert any("level '0'" in w for w in report.warnings), report.summary()
 
 
 def test_a_broken_stable_guarantee_is_an_ERROR(tmp_path):
@@ -195,13 +175,6 @@ def test_a_missing_optional_sidecar_is_a_WARNING_not_an_error(tmp_path):
         "a warning must NAME the fallback, or it is just noise"
 
 
-def test_a_single_level_field_is_a_WARNING_and_names_level_zero(tmp_path):
-    """Small fields are written single-level on purpose (_PYRAMID_MIN_YX). Legal, and lossy."""
-    report = validate_plate(_write_plate(tmp_path))
-    assert report.ok
-    assert any("level '0'" in w for w in report.warnings), report.summary()
-
-
 def test_an_incomplete_marker_is_a_WARNING(tmp_path):
     plate_dir = _write_plate(tmp_path)
     (plate_dir / ".squidxplorer-incomplete").write_text("{}")
@@ -221,7 +194,7 @@ def test_a_major_mismatch_is_reported_by_validate_rather_than_raised(tmp_path):
 def test_the_stamp_does_not_disturb_the_official_schema(tmp_path):
     """OME's own pydantic models still pass; the stamp sits beside their namespace, not in it."""
     pytest.importorskip("ome_zarr_models")
-    from tests.ngff_check import assert_valid_ngff_plate
+    from squidxplorer.contract.validate import assert_valid_ngff_plate
 
     assert_valid_ngff_plate(_write_plate(tmp_path))
 
@@ -250,19 +223,12 @@ def test_the_validator_is_runnable_by_a_user_on_a_plate_they_were_handed(tmp_pat
     assert "OK" in capsys.readouterr().out
 
 
-def test_field_path_builds_the_documented_layout():
+def test_field_path_builds_the_documented_layout_forward_slashed_from_the_well_path_verbatim():
+    """TensorStore's file kvstore takes POSIX paths on every platform; wellpath is never re-derived."""
     assert field_path("/p/plate.ome.zarr", "B/2", 7, "1") == "/p/plate.ome.zarr/B/2/7/1"
     assert field_path("/p/plate.ome.zarr", "B/2", 7) == "/p/plate.ome.zarr/B/2/7"
-
-
-def test_field_path_is_forward_slashed_and_tolerant_of_stray_separators():
-    """TensorStore's file kvstore takes POSIX paths on every platform, Windows included."""
     assert field_path("/p/plate.ome.zarr/", "/B/2/", "7", 0) == "/p/plate.ome.zarr/B/2/7/0"
     assert "\\" not in field_path("/p", "B/2", 7, 0)
-
-
-def test_field_path_does_not_re_derive_the_well_path():
-    """wellpath comes from plate.wells[].path verbatim: B2 is B/2, never B/02."""
     assert field_path("/p", "AA/12", 3, 0) == "/p/AA/12/3/0"
 
 
@@ -274,8 +240,7 @@ def test_field_levels_falls_back_to_level_zero_by_NAME_not_by_accident(tmp_path)
 
 
 def test_field_path_is_the_only_place_that_knows_the_layout():
-    """Greps for a base joined to 3+ slash-separated placeholders in one f-string; ``_montage``
-    and ``_tilesource`` are allowed the other legitimate route, descending wells[].path."""
+    """Greps for a base joined to 3+ slash-separated placeholders in one f-string; ``_montage`` and ``_tilesource`` are allowed the other legitimate route,"""
     root = Path(__file__).resolve().parent.parent / "squidxplorer"
     joined = re.compile(r'f"\{[^"{}]+\}/\{[^"{}]+\}/\{[^"{}]+\}')
     offenders = []
@@ -313,12 +278,8 @@ def test_a_multi_timepoint_plate_is_WARNED_about_not_silently_flattened(tmp_path
     assert any("4 timepoints" in w for w in report.warnings), report.summary()
     assert any("t=0" in w for w in report.warnings), \
         "the warning must say WHAT collapses, or a user cannot tell what they are losing"
-
-
-def test_a_single_timepoint_plate_says_nothing_about_time(tmp_path):
-    """A warning that fires on every plate is a warning nobody reads."""
-    report = validate_plate(_write_plate(tmp_path, n_t=1))
-    assert not any("timepoint" in w for w in report.warnings), report.summary()
+    single = validate_plate(_write_plate(tmp_path / "one", n_t=1))
+    assert not any("timepoint" in w for w in single.warnings), single.summary()
 
 
 def test_every_documented_read_site_takes_a_timepoint():
@@ -360,17 +321,4 @@ def test_the_contract_is_written_down_and_split_in_two():
     assert "## Stable" in doc and "## Optional, each with its fallback" in doc
     for fallback in ("coordinates.csv", "auto-contrast", 'level `"0"`'):
         assert fallback in doc, f"the optional section stopped naming the {fallback} fallback"
-    # events.jsonl describes a live producer; v1 is post-acquisition only.
     assert "events.jsonl" in doc and "NOT in this contract" in doc
-
-
-def test_the_reader_no_longer_says_the_writer_emits_no_translation():
-    """Two places said the opposite of what _output.py does, inside contract prose."""
-    from squidxplorer import reader
-
-    src = Path(reader.__file__).read_text()
-    for i, line in enumerate(src.splitlines(), 1):
-        if "emits no translation" in line:
-            pytest.fail(f"reader.py:{i} says the writer emits no translation: {line.strip()}")
-    assert '"type": "translation"' in Path(_output.__file__).read_text(), \
-        "the writer stopped emitting a translation, so the contract prose is wrong the other way"

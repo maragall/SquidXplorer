@@ -1,8 +1,4 @@
-"""The reader covers every Squid output writer, and never skips one in silence.
-
-One tiny synthetic acquisition per writer (tests/writer_fixtures.py), walked by a
-parametrised suite; pixels are checked against each format's own native library.
-"""
+"""The reader covers every Squid output writer, and never skips one in silence."""
 
 from __future__ import annotations
 
@@ -32,76 +28,39 @@ def any_writer(request, tmp_path):
     return label, root, reader_cls, records_positions
 
 
-# --- dispatch ---------------------------------------------------------------------------------
-
-def test_every_writer_dispatches_to_its_reader(any_writer):
+def test_every_writer_dispatches_and_resolves_the_same_acquisition_byte_exact(any_writer):
+    """All six fixtures encode one acquisition; any metadata, key-set, position or pixel difference is a reader bug."""
     label, root, reader_cls, _ = any_writer
     reader = open_reader(root)
     assert type(reader).__name__ == reader_cls, f"{label} dispatched to {type(reader).__name__}"
-
-
-def test_every_writer_resolves_the_same_acquisition(any_writer):
-    """All six fixtures encode one acquisition; any metadata difference is a reader bug."""
-    label, root, _, _ = any_writer
-    meta = open_reader(root).metadata
+    meta = reader.metadata
+    assert set(meta) == {
+        "regions", "fovs_per_region", "fov_positions_um", "channels", "n_z", "z_levels",
+        "dz_um", "pixel_size_um", "wellplate_format", "frame_shape", "dtype", "n_t",
+    }
     assert meta["regions"] == REGIONS, label
     assert meta["fovs_per_region"] == {r: list(FOVS) for r in REGIONS}, label
     assert meta["n_z"] == NZ, label
     assert meta["n_t"] == 1, label
-    # channel SET, not order: TIFF readers sort names; the Zarr reader keeps omero's C-axis order
     assert {c["name"] for c in meta["channels"]} == set(CHANNELS), label
     assert meta["frame_shape"] == writer_fixtures.FRAME, label
     assert np.dtype(meta["dtype"]) == np.uint16, label
 
+    positions = meta["fov_positions_um"]
+    assert set(positions) == {(r, f) for r in REGIONS for f in FOVS}, label
+    for (region, fov), (x_um, y_um) in positions.items():
+        want_x, want_y = _FOV_MM[fov]
+        assert abs(x_um - want_x * _MM_TO_UM) < 1.0, f"{label} {region}/{fov} x={x_um}"
+        assert abs(y_um - want_y * _MM_TO_UM) < 1.0, f"{label} {region}/{fov} y={y_um}"
+    xs = [v[0] for v in positions.values()]
+    assert 400 < max(xs) - min(xs) < 600, f"{label} x span {max(xs) - min(xs)} is not micrometres"
 
-def test_every_writer_reads_exact_pixels(any_writer):
-    """Every plane of every writer, byte-exact."""
-    label, root, _, _ = any_writer
-    reader = open_reader(root)
-    want = expected_arrays()
-    for (region, fov, z, channel), expected in want.items():
+    for (region, fov, z, channel), expected in expected_arrays().items():
         got = reader.read(region, fov, channel, z)
         assert got.dtype == expected.dtype, f"{label} {region}/{fov}/{z}/{channel}"
         np.testing.assert_array_equal(
             got, expected, err_msg=f"{label} region={region} fov={fov} z={z} ch={channel}"
         )
-
-
-def test_every_writer_has_the_same_metadata_key_set(any_writer):
-    """No consumer may need to know which writer produced a folder."""
-    _, root, _, _ = any_writer
-    assert set(open_reader(root).metadata) == {
-        "regions", "fovs_per_region", "fov_positions_um", "channels", "n_z", "z_levels",
-        "dz_um", "pixel_size_um", "wellplate_format", "frame_shape", "dtype", "n_t",
-    }
-
-
-def test_every_writer_populates_positions_in_micrometres(any_writer):
-    """``fov_positions_um`` is populated for every writer, in um, at the documented offsets."""
-    label, root, _, _ = any_writer
-    positions = open_reader(root).metadata["fov_positions_um"]
-    assert set(positions) == {(r, f) for r in REGIONS for f in FOVS}, label
-    for (region, fov), (x_um, y_um) in positions.items():
-        want_x, want_y = _FOV_MM[fov]
-        # 1 um tolerance absorbs the multi-page fixture's deliberate per-z stage jitter
-        assert abs(x_um - want_x * _MM_TO_UM) < 1.0, f"{label} {region}/{fov} x={x_um}"
-        assert abs(y_um - want_y * _MM_TO_UM) < 1.0, f"{label} {region}/{fov} y={y_um}"
-    # these FOVs are 0.5 mm apart, i.e. 500 um; in mm the span would be 0.5
-    xs = [v[0] for v in positions.values()]
-    assert 400 < max(xs) - min(xs) < 600, f"{label} x span {max(xs) - min(xs)} is not micrometres"
-
-
-# --- independent oracles: read the bytes with each format's own library ------------------------
-
-def test_individual_tiff_pixels_against_a_direct_tifffile_read(tmp_path):
-    root = writer_fixtures.build_individual_tiff(tmp_path / "acq")
-    reader = open_reader(root)
-    for region in REGIONS:
-        for fov in FOVS:
-            for z in range(NZ):
-                for channel in CHANNELS:
-                    direct = tifffile.imread(root / "0" / f"{region}_{fov}_{z}_{channel}.tiff")
-                    np.testing.assert_array_equal(reader.read(region, fov, channel, z), direct)
 
 
 def test_multipage_pixels_against_a_direct_page_read(tmp_path):
@@ -120,64 +79,6 @@ def test_multipage_pixels_against_a_direct_page_read(tmp_path):
                     )
 
 
-def test_ome_tiff_pixels_against_a_direct_series_read(tmp_path):
-    root = writer_fixtures.build_ome_tiff(tmp_path / "acq")
-    reader = open_reader(root)
-    pad = writer_fixtures.FILE_ID_PADDING
-    for region in REGIONS:
-        for fov in FOVS:
-            stack = tifffile.imread(root / "ome_tiff" / f"{region}_{fov:0{pad}}.ome.tiff")
-            # imread drops the size-1 T axis; restore the writer's declared TZCYX
-            stack = stack.reshape((writer_fixtures.N_T, NZ, len(CHANNELS)) + writer_fixtures.FRAME)
-            for z in range(NZ):
-                for c_i, channel in enumerate(CHANNELS):
-                    np.testing.assert_array_equal(
-                        reader.read(region, fov, channel, z), stack[0, z, c_i]
-                    )
-
-
-@pytest.mark.parametrize("builder,array_of", [
-    (writer_fixtures.build_zarr_hcs,
-     lambda root, region, fov: root / "plate.ome.zarr" / region[0] / region[1:] / str(fov) / "0"),
-    (writer_fixtures.build_zarr_per_fov,
-     lambda root, region, fov: root / "zarr" / region / f"fov_{fov}.ome.zarr" / "0"),
-], ids=["hcs", "per_fov"])
-def test_zarr_5d_pixels_against_a_direct_tensorstore_read(tmp_path, builder, array_of):
-    """Oracle: open the array with tensorstore directly and index (T, C, Z, Y, X) by hand."""
-    import tensorstore as ts
-
-    root = builder(tmp_path / "acq")
-    reader = open_reader(root)
-    for region in REGIONS:
-        for fov in FOVS:
-            arr = ts.open({"driver": "zarr3",
-                           "kvstore": {"driver": "file",
-                                       "path": str(array_of(root, region, fov))}},
-                          open=True).result()
-            for z in range(NZ):
-                for c_i, channel in enumerate(CHANNELS):
-                    direct = np.asarray(arr[0, c_i, z].read().result())
-                    np.testing.assert_array_equal(reader.read(region, fov, channel, z), direct)
-
-
-def test_zarr_6d_pixels_against_a_direct_tensorstore_read(tmp_path):
-    """The 6-D layout's whole risk is the leading FOV axis: FOV 1 must not return FOV 0."""
-    import tensorstore as ts
-
-    root = writer_fixtures.build_zarr_6d(tmp_path / "acq")
-    reader = open_reader(root)
-    for region in REGIONS:
-        arr = ts.open({"driver": "zarr3",
-                       "kvstore": {"driver": "file",
-                                   "path": str(root / "zarr" / region / "acquisition.zarr")}},
-                      open=True).result()
-        for f_i, fov in enumerate(FOVS):
-            for z in range(NZ):
-                for c_i, channel in enumerate(CHANNELS):
-                    direct = np.asarray(arr[f_i, 0, c_i, z].read().result())
-                    np.testing.assert_array_equal(reader.read(region, fov, channel, z), direct)
-
-
 def test_zarr_6d_fovs_are_distinct_planes_not_all_fov_zero(tmp_path):
     """Every FOV of a region must not come back as FOV 0's pixels."""
     root = writer_fixtures.build_zarr_6d(tmp_path / "acq")
@@ -189,13 +90,6 @@ def test_zarr_6d_fovs_are_distinct_planes_not_all_fov_zero(tmp_path):
 
 
 # --- silent skips -------------------------------------------------------------------------------
-
-def test_a_multipage_acquisition_is_never_reported_as_empty(tmp_path):
-    root = writer_fixtures.build_multi_page_tiff(tmp_path / "acq")
-    meta = open_reader(root).metadata
-    assert meta["regions"] and meta["fovs_per_region"] and meta["channels"]
-    assert meta["n_z"] == NZ
-
 
 def test_the_individual_tiff_reader_refuses_stacks_by_name_instead_of_skipping(tmp_path):
     """Forcing the wrong reader onto multi-page output must raise and name both formats."""
@@ -241,8 +135,8 @@ def test_no_reader_silently_continues_past_a_known_squid_filename():
     )
 
 
-def test_the_silent_skip_guard_actually_fires_on_a_reintroduced_skip():
-    """Mutation-check: plant the removed skip and confirm the detector catches it."""
+def test_the_silent_skip_guard_fires_on_the_reintroduced_IMA254_skip_and_not_on_loop_control():
+    """Mutation-check: plant the removed skip and confirm the detector catches it, and only it."""
     reintroduced = [
         "            m = _STEM_RE.match(f.stem)",
         "            if not m:",
@@ -250,10 +144,6 @@ def test_the_silent_skip_guard_actually_fires_on_a_reintroduced_skip():
         "not this reader's format",
     ]
     assert find_silent_skips(reintroduced), "the detector does not catch the original IMA-254 bug"
-
-
-def test_the_silent_skip_guard_does_not_fire_on_normal_loop_control():
-    """The detector must not cry wolf on working code."""
     benign = [
         "            m = _STEM_RE.match(f.stem)",
         "            if m:",
@@ -272,11 +162,6 @@ def test_the_silent_skip_guard_does_not_fire_on_normal_loop_control():
 
 # --- unsupported and corrupt layouts fail loud, naming the format -------------------------------
 
-def _message_names_formats(message: str) -> None:
-    """Every refusal must say what it looked for."""
-    assert "{region}" in message or "ome.zarr" in message or "ome_tiff" in message, message
-
-
 def test_an_unrecognised_folder_names_every_format_it_looked_for(tmp_path):
     root = tmp_path / "acq"
     root.mkdir()
@@ -289,15 +174,6 @@ def test_an_unrecognised_folder_names_every_format_it_looked_for(tmp_path):
                      "ome_tiff", "plate.ome.zarr"):
         assert expected in message, f"refusal does not mention {expected}: {message}"
     assert "not_a_squid_name.tiff" in message, "refusal does not say what it DID find"
-    _message_names_formats(message)
-
-
-def test_an_empty_acquisition_folder_refuses_rather_than_reporting_zero_images(tmp_path):
-    root = tmp_path / "acq"
-    root.mkdir()
-    with pytest.raises(ValueError) as exc:
-        open_reader(root).metadata
-    _message_names_formats(str(exc.value))
 
 
 def test_an_unreadable_non_hcs_zarr_folder_names_the_zarr_layouts(tmp_path):

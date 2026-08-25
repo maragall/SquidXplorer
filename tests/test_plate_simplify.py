@@ -1,11 +1,4 @@
-"""The 2026-08-19 plate/views simplification (Julio's annotated mocks), pinned.
-
-Plate window: the readout strip is a LOG LINE, the selection caption is the status bar, Select
-all is a menu action beside the plate's own Cmd/Ctrl-A, and the top bar keeps only the
-acquisition name, the layer combo and Open view. Views window: 3D opens in a NEW tab, a spawn
-un-minimises the deck, a reveal keeps a maximised deck maximised, and the operator panel is the
-home of the Detect row.
-"""
+"""The 2026-08-19 plate/views simplification (Julio's annotated mocks), pinned."""
 
 from __future__ import annotations
 
@@ -34,8 +27,7 @@ from .test_viewer import qapp  # noqa: E402,F401  (fixture)
 # --- the readout is a log line -------------------------------------------------------------------
 
 def test_a_readout_message_lands_in_the_log_records(qapp, caplog):
-    """Julio: "log messages that show around the GUI and not in the log". Every setText that
-    used to paint the strip is a log record now — INFO for status, WARNING for refusals."""
+    """Julio: "log messages that show around the GUI and not in the log"."""
     win = V.PlateWindow(None)
     try:
         with caplog.at_level(logging.INFO):
@@ -49,7 +41,6 @@ def test_a_readout_message_lands_in_the_log_records(qapp, caplog):
         assert any(r.levelno == logging.WARNING and "open an acquisition" in r.getMessage()
                    for r in caplog.records), "a refusal logged below WARNING (or not at all)"
 
-        # `.text()` still answers — tools/gates.py and _gui_commands read the last sentence.
         assert win._readout.text() == "open an acquisition first"
 
         caplog.clear()
@@ -60,29 +51,14 @@ def test_a_readout_message_lands_in_the_log_records(qapp, caplog):
         win.close()
 
 
-def test_the_readout_is_not_a_widget_any_more(qapp):
-    """Pinned as class identity: a QLabel readout is the strip coming back."""
-    win = V.PlateWindow(None)
-    try:
-        assert not isinstance(win._readout, QWidget), "the readout strip is back as a widget"
-        assert not hasattr(win._readout, "setStyleSheet"), (
-            "something can style the readout; a shim that quacks like a widget will be re-added "
-            "to a layout sooner or later")
-    finally:
-        win.close()
-
-
 # --- the top row keeps three things ---------------------------------------------------------------
 
-def test_the_top_bar_keeps_name_layer_and_open_view_only(qapp):
+def test_the_top_bar_holds_open_view_and_the_view_combo(qapp):
     win = V.PlateWindow(None)
     try:
-        for gone in ("_select_all_btn", "_plate_copy_lut_btn", "_plate_paste_lut_btn"):
-            assert not hasattr(win, gone), f"{gone} is back on the top bar"
         bar = win._plate_title.parentWidget()
         assert win._open_sel_btn.parentWidget() is bar, "Open view left the plate title bar"
         assert win._view_combo.parentWidget() is bar
-        # The selection caption lives in the STATUS BAR now, not in a row of its own.
         assert win._selection_label.parentWidget() is win.statusBar()
     finally:
         win.close()
@@ -96,8 +72,6 @@ def test_select_all_is_a_menu_action_and_the_shortcut_survives(qapp, squid_datas
         win._select_all_act.trigger()
         assert win._selected_regions == list(win._order), (
             "View > Select All Wells did not select every occupied well")
-        # The existing Cmd/Ctrl-A lives on the plate widget itself; verified at the source so a
-        # refactor cannot silently drop the second way in.
         import inspect
 
         from squidxplorer._plate_overview import PlateOverview
@@ -116,8 +90,6 @@ def test_3d_opens_in_a_new_tab_and_the_2d_view_stays(qapp, napari_pane_stub, squ
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
     v = views[0]
     try:
-        # The no-ROI branch bricks the WHOLE region in the child's own canvas (2026-08-19);
-        # the single-FOV popout is only the fallback for a window without one.
         opened = []
         import squidxplorer._napari3d as N3D
         monkeypatch.setattr(N3D, "open_native_3d",
@@ -143,8 +115,7 @@ def test_3d_opens_in_a_new_tab_and_the_2d_view_stays(qapp, napari_pane_stub, squ
 
 def test_a_view_opened_while_the_deck_is_minimised_restores_it(qapp, napari_pane_stub,
                                                                squid_dataset):
-    """One measured shape of "tabs do not come back": `show()` does not un-minimise, so a view
-    opened into a minimised deck landed in a window the user could not see."""
+    """One measured shape of "tabs do not come back": `show()` does not un-minimise, so a view opened into a minimised deck landed in a window the user could not see."""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
     try:
@@ -160,8 +131,7 @@ def test_a_view_opened_while_the_deck_is_minimised_restores_it(qapp, napari_pane
 
 
 def test_reveal_keeps_a_maximised_deck_maximised(qapp, napari_pane_stub, squid_dataset):
-    """`showNormal()` unconditionally also DE-maximises: every programmatic reveal yanked a
-    full-screen views window back to its normal size."""
+    """`showNormal()` unconditionally also DE-maximises: every programmatic reveal yanked a full-screen views window back to its normal size."""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
     try:
@@ -177,45 +147,17 @@ def test_reveal_keeps_a_maximised_deck_maximised(qapp, napari_pane_stub, squid_d
 
 # --- the operator panel is the home of the per-window controls -----------------------------------
 
-def test_the_operator_panel_carries_no_detect_row(qapp, napari_pane_stub, squid_dataset):
-    """Absence pin (2026-08-24): the Detect surface was shelved with spot/cellpose. A stray
-    ``detect_row`` on a pane is NOT adopted, and the per-window operator surface survives it."""
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
-    v = views[0]
-    try:
-        row = QWidget()
-        v._pane.detect_row = row                 # a foreign attribute nothing reads any more
-        v._op_panel = None                       # rebuild
-        panel = v.operator_panel()
-        p = row.parentWidget()
-        while p is not None and p is not panel:
-            p = p.parentWidget()
-        assert p is None, "the shelved Detect row was adopted into the operator panel"
-        # The panel still carries the whole per-window operator surface (one flow, 2026-08-25:
-        # Preview + Run on plate; the save checkbox is gone).
-        assert v._op_combo is not None and v._btn_preview is not None
-        assert v._btn_run_plate is not None and not hasattr(v, "_save_chk")
-        assert not hasattr(v, "_btn_controls")
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
 def _combo_index_for(combo, key: str):
     return next((i for i in range(combo.count()) if combo.itemData(i) == key), None)
 
 
 def test_the_operator_panel_docstring_names_its_home(qapp, napari_pane_stub, squid_dataset):
-    """The Detect-row adoption above holds wherever the panel lives; its home is the view's own
-    LEFT column now (Julio: "The operators for this window row should also be on the left
-    vertical dock")."""
+    """The Detect-row adoption above holds wherever the panel lives; its home is the view's own LEFT column now (Julio: "The operators for this window row"""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
     v = views[0]
     try:
         panel = v.operator_panel()
-        # The panel is a descendant of the VIEW (its left column container), never of the deck's
-        # right-edge bulk dock.
         p = panel.parentWidget()
         while p is not None and p is not v:
             p = p.parentWidget()
@@ -226,24 +168,14 @@ def test_the_operator_panel_docstring_names_its_home(qapp, napari_pane_stub, squ
 
 # --- viewer space: the top toolbar is gone, the controls live in the left column ------------------
 
-def test_the_full_width_top_toolbar_is_gone_and_the_chips_live_in_the_left_column(
-        qapp, napari_pane_stub, squid_dataset):
-    """Julio (2026-08-19): the 2D/3D·ROI cluster "should be on the left column, where the
-    controls are, so that we can free up the viewer space to the top. No need to have a full
-    horizontal dock." The builder is pinned ABSENT the repo's way; the chips keep their names
-    (tests and GATE 3 find them by attribute) and stay actuatable."""
-    import squidxplorer._region_viewer as RV
-
-    assert not hasattr(RV.RegionViewer, "_build_top_row"), "the full-width top row is back"
-
+def test_the_chips_live_in_the_left_column(qapp, napari_pane_stub, squid_dataset):
+    """Julio (2026-08-19): the 2D/3D·ROI cluster "should be on the left column, where the controls are, so that we can free up the viewer space to the top."""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
     v = views[0]
     try:
         box = v._view_controls
         assert box is not None
-        # Every chip is inside the control block, and the block is inside the VIEW (with the
-        # headless pane the left column falls back into the window body — same ancestry).
         for name in ("_btn_roi", "_btn_3d", "_btn_focus", "_btn_record", "_btn_fovs"):
             chip = getattr(v, name)
             p = chip.parentWidget()
@@ -254,8 +186,6 @@ def test_the_full_width_top_toolbar_is_gone_and_the_chips_live_in_the_left_colum
         while p is not None and p is not v:
             p = p.parentWidget()
         assert p is v, "the control block is not inside its own view"
-        # The progress bar stays in the window BODY: a run must stay visible regardless of the
-        # left column's state.
         assert v._op_progress is not None and v._op_progress.isHidden()
     finally:
         shutdown_plate_window(qapp, win)
@@ -289,8 +219,7 @@ def _color_recorded_gray_acq(tmp_path):
 
 
 def test_reconstructed_color_menu_action_round_trips(qapp, tmp_path):
-    """View > Reconstructed Color re-ingests under the flipped flag: off is honest gray (no
-    stain LUT, yaml color), on brings the estimated LUT and its label back."""
+    """View > Reconstructed Color re-ingests under the flipped flag: off is honest gray (no stain LUT, yaml color), on brings the estimated LUT and its label back."""
     from squidxplorer import _stain
 
     root = _color_recorded_gray_acq(tmp_path)

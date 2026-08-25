@@ -1,5 +1,4 @@
-"""Stitch operator tests: the synthetic mosaic is cut from one master image, so every
-claim is a number against ground truth."""
+"""Stitch operator tests: the synthetic mosaic is cut from one master image, so every claim is a number against ground truth."""
 
 from __future__ import annotations
 
@@ -102,7 +101,6 @@ def test_positions_are_swapped_to_yx(master):
     """The reader stores (x_um, y_um); tilefusion is (y, x). The swap must happen once, here."""
     reader = _FakeReader(master)
     pos = _positions_yx_um(reader.metadata, "A1", [0, 1, 2])
-    # fov 1 is one step to the RIGHT (+x, same y); fov 2 is one step DOWN (+y, same x).
     assert pos[0] == (0.0, 0.0)
     assert pos[1] == (0.0, float(STEP))
     assert pos[2] == (float(STEP), 0.0)
@@ -148,7 +146,6 @@ def test_solve_recovers_injected_stage_error(master):
     offsets = solve_offsets_px(tiles, positions, (1.0, 1.0), (TILE, TILE), max_workers=2)
 
     corrected = np.asarray(positions) + offsets
-    # The solve is gauge-free (anchors tile 0), so compare relative geometry only.
     truth = np.array([[(i // GRID) * STEP, (i % GRID) * STEP] for i in range(4)], float)
     residual = (corrected - corrected[0]) - (truth - truth[0])
     assert np.abs(residual).max() < 0.5, f"residual {residual}"
@@ -194,6 +191,7 @@ def fused_pair(master):
 
 def test_stitch_region_shape_and_dtype(fused_pair, master):
     stitched, _ = fused_pair
+    assert isinstance(stitched, np.ndarray)                          # PlacedArray IS an ndarray
     assert stitched.ndim == 5 and stitched.shape[:3] == (1, 1, 1)   # (T, C, 1, Y, X)
     assert stitched.dtype == np.uint16
     assert stitched.shape[3] >= STEP + TILE - 8                     # mosaic, not one tile
@@ -234,7 +232,6 @@ def test_all_channels_share_one_geometry(master):
     out = stitch_region(reader, "A1", list(range(4)), blend_px=24, block_px=512, max_workers=2)
     assert out.shape[1] == len(CHANNELS)
     c0, c1 = out[0, 0, 0].astype(np.float64), out[0, 1, 0].astype(np.float64)
-    # Channel 1 is channel 0 // 2 + 500 by construction, so matched geometry correlates near 1.
     inner = (slice(40, -40), slice(40, -40))
     assert np.corrcoef(c0[inner].ravel(), c1[inner].ravel())[0, 1] > 0.99
 
@@ -270,7 +267,6 @@ def test_missing_pixel_size_refused(master):
 
 
 def test_default_operators_present():
-    # coordinate was shelved 2026-08-24; register=False on `stitch` is the same run.
     assert available_region_operators() == ["register", "stitch"]
 
 
@@ -330,12 +326,6 @@ def test_one_result_per_region_anchored_at_first_fov(master):
     assert sorted(r for r, _f, _i in out) == ["A1", "A2"]
     assert {f for _r, f, _i in out} == {0}                    # anchor fov = fovs[0]
     assert all(img.ndim == 5 for _r, _f, img in out)
-
-
-def test_regions_subset_is_honoured(master):
-    reader = _FakeReader(master, regions=("A1", "A2"))
-    out = list(_fast_plate(reader, regions=["A2"]))
-    assert [r for r, _f, _i in out] == ["A2"]
 
 
 def test_regions_subset_ignores_unknown_and_dedups(master):
@@ -419,9 +409,7 @@ def test_window_is_bounded_by_workers(master):
 
 
 def test_z_operator_none_fuses_every_plane_instead_of_keeping_only_z0(master):
-    """z_operator=None (the shelved `keepz`'s replacement) keeps EVERY acquired plane: each is
-    fused unchanged from the one solved geometry; no plane may go missing, no inner reducer
-    runs."""
+    """z_operator=None (the shelved `keepz`'s replacement) keeps EVERY acquired plane: each is fused unchanged from the one solved geometry; no plane may go"""
     from squidxplorer._stitch import stitch_region
 
     n_z = 3
@@ -433,8 +421,6 @@ def test_z_operator_none_fuses_every_plane_instead_of_keeping_only_z0(master):
     assert out.shape[2] == n_z, (
         f"z_operator=None fused {out.shape[2]} of {n_z} z planes; keeping only plane 0 is the "
         "silent truncation the old NotImplementedError existed to prevent")
-    # ...and unchanged: with a z-collapsing inner operator the SAME run yields ONE plane, so
-    # the depth above is the None mode's own doing, not a fixture accident.
     collapsed = stitch_region(reader, "A1", [0, 1, 2, 3], z_operator="mip", register=False,
                               correct_illumination=False)
     assert collapsed.shape[2] == 1
@@ -446,10 +432,7 @@ def test_z_operator_none_fuses_every_plane_instead_of_keeping_only_z0(master):
 
 
 def _spy_two_round(monkeypatch):
-    """Record the args two_round_optimization is called with, and short-circuit it.
-
-    Patched on the tilefusion module because _solve imports it at call time.
-    """
+    """Record the args two_round_optimization is called with, and short-circuit it."""
     import tilefusion.optimization as opt
 
     seen = {}
@@ -477,14 +460,6 @@ def test_solve_defaults_are_tilefusion_run_s_own_thresholds(master, monkeypatch)
     tiles, positions = _tiles_and_positions(master)
     solve_offsets_px(tiles, positions, (1.0, 1.0), (TILE, TILE), max_workers=2)
     assert (seen["rel"], seen["abs"]) == (_REL_THRESH, _ABS_THRESH)
-
-
-def test_solve_forwards_the_operator_s_thresholds(master, monkeypatch):
-    seen = _spy_two_round(monkeypatch)
-    tiles, positions = _tiles_and_positions(master)
-    solve_offsets_px(tiles, positions, (1.0, 1.0), (TILE, TILE), max_workers=2,
-                     rel_thresh=0.25, abs_thresh=7.5)
-    assert (seen["rel"], seen["abs"]) == (0.25, 7.5)
 
 
 def test_stitch_region_forwards_the_thresholds_all_the_way_down(master, monkeypatch):
@@ -612,7 +587,6 @@ def test_the_registration_only_channel_is_not_leaked_into_the_output(master):
     out = stitch_region(reader, "A1", list(range(4)), channels=[1], blend_px=24, block_px=512,
                         max_workers=2, registration_channel=CHANNELS[0])
     assert out.shape[1] == 1
-    # channel 1 is the flat one; a leak would give this plane structure.
     plane = out[0, 0, 0].astype(np.float64)
     interior = plane[60:-60, 60:-60]
     assert interior.std() < 1.0, f"output plane is not the flat channel (std={interior.std():.1f})"
@@ -633,7 +607,6 @@ def test_registration_costs_exactly_one_extra_plane_read_per_fov(master):
         f"register=False {baseline}, register=True {registered}, FOVs {n_fovs}"
     )
 
-    # The cost does not depend on the channel selection.
     assert reads(registration_channel=CHANNELS[0]) - reads(
         register=False, registration_channel=CHANNELS[0]) == n_fovs
 
@@ -649,26 +622,18 @@ def test_an_unknown_registration_channel_is_still_refused_by_name(master):
 # ---------------------------------------------------------------------------------------
 
 
-def test_the_mosaic_carries_its_placement_without_being_asked(master):
-    """No `geometry=` out-dict passed; the geometry must exist anyway."""
+def test_the_placement_travels_unasked_and_names_the_channel_that_solved_it(master):
+    """No `geometry=` passed, the placement exists anyway and says which channel solved it (Defect 2)."""
     out = stitch_region(_SplitChannelReader(master, error_px=_ERR), "A1", list(range(4)),
-                        blend_px=24, block_px=512, max_workers=2,
+                        channels=[1], blend_px=24, block_px=512, max_workers=2,
                         registration_channel=CHANNELS[0])
     p = out.placement
     assert p.shape == out.shape[-2:], "placement disagrees with the array it came back on"
     assert p.fovs == (0, 1, 2, 3)
     assert p.pixel_size_um == PIXEL_UM
-
-
-def test_the_placement_names_the_channel_that_actually_solved_it(master):
-    """Provenance, and the other half of the Defect 2 fix: the data says which channel
-    solved its transform, instead of leaving it inferred from the caller's arguments."""
-    out = stitch_region(_SplitChannelReader(master, error_px=_ERR), "A1", list(range(4)),
-                        channels=[1], blend_px=24, block_px=512, max_workers=2,
-                        registration_channel=CHANNELS[0])
-    assert out.placement.reg_channel == CHANNELS[0]      # NOT the selected channel 1
-    assert out.placement.reg_t == 0
-    assert out.placement.registered
+    assert p.reg_channel == CHANNELS[0]      # NOT the selected channel 1
+    assert p.reg_t == 0
+    assert p.registered
 
 
 def test_coordinate_placement_does_not_claim_a_registration_channel(master):
@@ -690,15 +655,6 @@ def test_the_placement_offsets_are_the_solved_ones(master):
     assert np.abs(np.asarray(out.placement.offsets_px)[3]).max() > 2.0   # the injected error
 
 
-def test_the_mosaic_is_still_an_ordinary_array_for_every_existing_consumer(master):
-    """the region loop yields these into the viewer's worker and the OME-Zarr writer unchanged."""
-    out = stitch_region(_SplitChannelReader(master), "A1", [0, 1], blend_px=24, block_px=512,
-                        max_workers=2, register=False)
-    assert isinstance(out, np.ndarray)
-    assert out.ndim == 5 and out.dtype == np.uint16
-    np.testing.assert_array_equal(np.asarray(out) * 0, np.zeros_like(np.asarray(out)))
-
-
 # ---------------------------------------------------------------------------------------
 # Defect 1: controls ported from maragall/stitcher, each pinned to its ENGINE CALL
 # ---------------------------------------------------------------------------------------
@@ -710,8 +666,7 @@ def test_the_mosaic_is_still_an_ordinary_array_for_every_existing_consumer(maste
 # in both directions (on -> called, off -> NOT called).
 
 def test_lens_distortion_correction_reaches_tilefusion(master, monkeypatch):
-    """The control the owner asked about BY NAME. It must drive
-    tilefusion.distortion.build_seam_corrections, not merely be accepted."""
+    """The control the owner asked about BY NAME."""
     import tilefusion.distortion as dist
 
     seen = {}
@@ -741,10 +696,7 @@ def test_distortion_off_does_not_call_the_engine_at_all(master, monkeypatch):
 
 def test_the_distortion_adapter_exposes_everything_tilefusion_reads_off_a_TileFusion(
         master, monkeypatch):
-    """squidxplorer runs tilefusion's pieces on IN-MEMORY arrays, so there is no TileFusion
-    instance to hand build_seam_corrections. It is duck-typed on exactly six members; this
-    pins the adapter against that surface, so a tilefusion upgrade that reaches for a seventh
-    fails HERE rather than at a user's plate."""
+    """squidxplorer runs tilefusion's pieces on IN-MEMORY arrays, so there is no TileFusion instance to hand build_seam_corrections."""
     import tilefusion.distortion as dist
 
     seen = {}
@@ -759,13 +711,11 @@ def test_the_distortion_adapter_exposes_everything_tilefusion_reads_off_a_TileFu
         assert hasattr(tf, attr), attr
     assert (tf.Y, tf.X) == (TILE, TILE)
     assert len(tf._tile_positions) == GRID * GRID
-    # The overlap strip of a real pair, read back through the adapter.
     assert np.asarray(tf._read_tile_region(0, slice(0, 8), slice(0, 8))).shape == (8, 8)
 
 
 def test_distortion_is_fit_on_the_REGISTERED_positions_not_the_stage_ones(master, monkeypatch):
-    """build_seam_corrections' own docstring: it corrects the residual AFTER the global solve.
-    Fitting it on raw stage positions would re-measure the error registration just removed."""
+    """build_seam_corrections' own docstring: it corrects the residual AFTER the global solve."""
     import tilefusion.distortion as dist
 
     seen = {}
@@ -778,47 +728,8 @@ def test_distortion_is_fit_on_the_REGISTERED_positions_not_the_stage_ones(master
     assert not np.allclose(seen["pos"], stage)
 
 
-def test_the_warp_field_reaches_the_fuser(master, monkeypatch):
-    """fuse_plane takes get_field=. Building the corrections and then not passing them would
-    compute the whole elastic fit and throw it away -- the accepted-and-ignored shape again."""
-    import tilefusion.fusion as fusion
-
-    real = fusion.fuse_plane
-    seen = {}
-
-    def _spy(**kw):
-        seen["get_field"] = kw.get("get_field")
-        return real(**kw)
-
-    monkeypatch.setattr(fusion, "fuse_plane", _spy)
-    reader = _FakeReader(master, error_px={3: (6.0, -4.0)})
-    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0],
-                  correct_distortion=True, max_workers=2)
-    assert callable(seen["get_field"])
-
-
-def test_without_distortion_the_fuser_gets_no_field(master, monkeypatch):
-    """``correct_distortion=False`` is now EXPLICIT here. It used to be left off the call and
-    rely on the signature default, which was ``False`` and became "on wherever it can run" on
-    2026-08-03. The subject of the test is unchanged: off -> the fuser gets no warp field."""
-    import tilefusion.fusion as fusion
-
-    real = fusion.fuse_plane
-    seen = {}
-    monkeypatch.setattr(fusion, "fuse_plane",
-                        lambda **kw: seen.update(get_field=kw.get("get_field")) or real(**kw))
-    reader = _FakeReader(master)
-    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0], max_workers=2,
-                  correct_distortion=False)
-    assert seen["get_field"] is None
-
-
 def test_distortion_correction_is_ON_by_default(master, monkeypatch):
-    """Julio, 2026-08-03: "Correct lens distort should be defaulted to on". Asked of the ENGINE
-    call and not of the checkbox, because the checkbox is one of four places the default lived
-    and the only one that matters to a CLI or a script is this one.
-
-    MUTATION: put the signature default back to ``False`` -> get_field is None -> red."""
+    """Julio, 2026-08-03: "Correct lens distort should be defaulted to on"."""
     import tilefusion.fusion as fusion
 
     real = fusion.fuse_plane
@@ -831,14 +742,7 @@ def test_distortion_correction_is_ON_by_default(master, monkeypatch):
 
 
 def test_the_on_by_default_does_not_break_coordinate_placement(master, monkeypatch):
-    """The default is "on wherever it can run", not a plain True, and this is the reason.
-
-    Distortion correction is registration-only and stitch_region RAISES on the combination. The
-    `coordinate` control operator and the A/B benchmarks all pass
-    ``register=False`` and say nothing about distortion, so a plain ``True`` default would have
-    made every one of them raise on a combination none of them asked for.
-
-    MUTATION: change the default to a plain ``True`` -> ValueError -> red."""
+    """The default is "on wherever it can run", not a plain True, and this is the reason."""
     import tilefusion.fusion as fusion
 
     real = fusion.fuse_plane
@@ -852,8 +756,7 @@ def test_the_on_by_default_does_not_break_coordinate_placement(master, monkeypat
 
 
 def test_an_explicit_yes_with_no_registration_still_raises(master):
-    """The loud refusal is for a USER asking for something impossible, and it survives the
-    default change untouched."""
+    """The loud refusal is for a USER asking for something impossible, and it survives the default change untouched."""
     reader = _FakeReader(master)
     with pytest.raises(ValueError, match="needs registration"):
         stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0], max_workers=2,
@@ -863,21 +766,13 @@ def test_an_explicit_yes_with_no_registration_still_raises(master):
 # -- registration timepoint -------------------------------------------------------------
 
 def test_the_registration_timepoint_actually_drives_which_PIXELS_are_solved_on(master):
-    """_REG_T was a hardcoded 0: on a multi-timepoint acquisition the geometry silently solved
-    at t=0 with no way to see or set it. Same defect CLASS as the registration-channel
-    substitution bug -- a solve running somewhere the user cannot name.
-
-    This asserts on the SOLVED OFFSETS, not on what the Placement claims. Only t=2 carries
-    registrable structure in this fixture, so a stitch_region that accepted registration_t and
-    then read t=0 anyway recovers nothing -- which is exactly the accepted-and-ignored shape,
-    and it survives any test that only checks provenance."""
+    """_REG_T was a hardcoded 0: on a multi-timepoint acquisition the geometry silently solved at t=0 with no way to see or set it."""
     reader = _FakeReader(master, error_px={3: (6.0, -4.0)}, n_t=3, good_t=2)
     right, wrong = {}, {}
     stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0],
                   registration_t=2, max_workers=2, geometry=right)
     stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0],
                   registration_t=0, max_workers=2, geometry=wrong)
-    # FOV 3 was displaced by a known (6, -4) px. Solving on the real structure recovers it.
     assert np.allclose(right["offsets_px"][3], (-6.0, 4.0), atol=1.0), right["offsets_px"][3]
     assert not np.allclose(wrong["offsets_px"][3], (-6.0, 4.0), atol=1.0)
 
@@ -891,8 +786,7 @@ def test_a_registration_timepoint_outside_the_acquisition_is_refused(master):
 
 
 def test_the_placement_reports_the_timepoint_that_actually_solved(master):
-    """Provenance that lies is worse than none: a Placement claiming reg_t=0 while the solve
-    moved elsewhere is exactly what the _REG_T comment warned about."""
+    """Provenance that lies is worse than none: a Placement claiming reg_t=0 while the solve moved elsewhere is exactly what the _REG_T comment warned about."""
     reader = _FakeReader(master)
     reader.metadata["n_t"] = 4
     out = stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0],
@@ -903,15 +797,9 @@ def test_the_placement_reports_the_timepoint_that_actually_solved(master):
 # -- automatic blend width --------------------------------------------------------------
 
 def test_auto_blend_width_is_measured_from_the_real_overlap(master):
-    """maragall/stitcher's Auto checkbox. The panel's own tooltip explains why a fixed default
-    is dangerous -- a ramp wider than the overlap never reaches full weight and dims the seam
-    -- and this is the control that removes the guess. Formula is the reference tool's:
-    median seam overlap x 2, floored at 10."""
+    """maragall/stitcher's Auto checkbox."""
     from squidxplorer._stitch import _BLEND_PX, auto_blend_px
 
-    # Spacing chosen so the ANSWER IS NOT THE DEFAULT: a 100 px overlap -> 200 px ramp, while
-    # _BLEND_PX is 128. With the module fixture's 64 px overlap the measurement happens to
-    # equal the default, and a mutant that ignores the measurement entirely stays green.
     step = TILE - 100
     positions = [((i // GRID) * float(step), (i % GRID) * float(step))
                  for i in range(GRID * GRID)]
@@ -951,8 +839,7 @@ def test_an_explicit_blend_width_still_wins_over_auto(master, monkeypatch):
 
 
 def test_auto_blend_falls_back_when_nothing_overlaps(master):
-    """A sparse/freeform acquisition legitimately has isolated FOVs -- the same case
-    solve_offsets_px degrades to stage placement for. Auto must not divide by an empty set."""
+    """A sparse/freeform acquisition legitimately has isolated FOVs -- the same case solve_offsets_px degrades to stage placement for."""
     from squidxplorer._stitch import auto_blend_px
 
     far = [(0.0, 0.0), (10000.0, 0.0), (0.0, 10000.0), (10000.0, 10000.0)]
@@ -965,19 +852,7 @@ def test_auto_blend_falls_back_when_nothing_overlaps(master):
 
 
 class _ZStackReader(_FakeReader):
-    """A 3-plane stack whose MIP is unregistrable and whose MIDDLE plane is not.
-
-    z=1 carries the master texture with the injected stage error. z=0 and z=2 are a CONSTANT
-    field brighter than any master pixel, identical for every FOV. So:
-
-        max over z  -> the constant, everywhere: no structure, no alignment signal at all
-        plane z=1   -> the texture: the 6 px error is recoverable
-
-    That asymmetry turns "which image did registration actually solve on" into a NUMBER. It is
-    the same trick ``_SplitChannelReader`` plays for channels, and it exists because the MIP
-    substitution was invisible for exactly as long as nothing measured it: on the real 10x
-    tissue set it cost 2 of 43 pairs and 6.62 px, silently.
-    """
+    """A 3-plane stack whose MIP is unregistrable and whose MIDDLE plane is not."""
 
     _FLOOR = 60000  # above the master's ~42000 ceiling, so it wins every max()
 
@@ -995,19 +870,11 @@ class _ZStackReader(_FakeReader):
 
 
 def test_registration_solves_on_the_raw_middle_plane_not_the_projected_one(master):
-    """The defect this module carried: the pose graph was solved on the z operator's output.
-
-    ``stitch_region`` runs a z-reducer, so on a z-stack the thing registration used to see was a
-    MIP -- an image ``TileFusion`` never registers. Here the MIP is constant by construction, so
-    a regression to it recovers NOTHING while the correct read recovers the injected 6 px.
-    """
+    """The defect this module carried: the pose graph was solved on the z operator's output."""
     reader = _ZStackReader(master, error_px=_ERR)
     fovs = list(range(4))
     positions = _positions_yx_um(reader.metadata, "A1", fovs)
 
-    # Guard the guard: prove the two registration inputs give DIFFERENT answers on this fixture,
-    # or the assertion below is vacuous. This repo has already shipped a test that was dead its
-    # whole life.
     mip = np.stack([
         np.max(np.stack([reader.read("A1", f, CHANNELS[0], z_level=z) for z in range(3)]), axis=0)[None]
         for f in fovs
@@ -1031,17 +898,12 @@ def test_registration_solves_on_the_raw_middle_plane_not_the_projected_one(maste
 
 
 def test_the_registration_plane_is_the_callers_and_is_recorded(master):
-    """``registration_z`` selects the plane, and the Placement says which one it was.
-
-    Provenance for the same reason as ``reg_channel``/``reg_t``: a solve running on a plane the
-    user cannot name is how this class of defect stays invisible.
-    """
+    """``registration_z`` selects the plane, and the Placement says which one it was."""
     g: dict = {}
     stitch_region(_ZStackReader(master, error_px=_ERR), "A1", list(range(4)),
                   blend_px=24, block_px=512, max_workers=2, registration_z=0,
                   registration_channel=CHANNELS[0], geometry=g)
     assert g["placement"].reg_z == 0
-    # z=0 is the constant floor: nothing to register against, so it degrades to stage placement.
     assert np.abs(np.asarray(g["offsets_px"])).max() < 0.5
 
     with pytest.raises(ValueError, match="registration_z=7 is outside"):
@@ -1050,21 +912,11 @@ def test_the_registration_plane_is_the_callers_and_is_recorded(master):
 
 
 def test_a_tile_that_registered_against_nothing_is_placed_by_the_affine_not_left_at_stage():
-    """``two_round_optimization`` does NOT place a tile with no registered edge — it warns.
-
-    Its docstring is explicit that such a tile "is left for the caller's affine/stage-model
-    fallback", and this module used to have no such fallback, so the tile kept a ZERO offset and
-    fused at its raw, miscalibrated stage position. Zero is also what a perfectly-placed tile
-    gets, so nothing downstream could tell the two apart. Measured on the real 10x tissue set,
-    region manual1: FOV 3 registers against nothing and TileFusion places it 34.4 px away.
-    """
+    """``two_round_optimization`` does NOT place a tile with no registered edge — it warns."""
     from squidxplorer._stitch import _place_unconstrained_tiles
 
-    # 3x3 grid at a 100 um pitch, 1 um/px. Tile 8 (the corner) is the isolated one.
     step, n = 100.0, 3
     positions = [(float(r * step), float(c * step)) for r in range(n) for c in range(n)]
-    # Every neighbouring pair EXCEPT the ones touching tile 8: 12 - 2 = 10 edges, over the
-    # _MIN_PAIRS_FOR_AFFINE floor of 8.
     metrics, edges = {}, []
     for i in range(n * n):
         for j in (i + 1, i + n):
@@ -1104,13 +956,7 @@ def _nonunit_profile(gain: float = 2.0):
 
 
 def test_the_flatfield_wrapper_corrects_every_plane_it_hands_back(master):
-    """The wrapper IS the mechanism, and its position is the feature.
-
-    maragall/stitcher corrects inside _read_tile_region -- the reader feeding the registration
-    strips -- so phase correlation runs on corrected pixels. Wrapping the READER puts squidxplorer in
-    the same place, and unlike correcting the z operator's OUTPUT it holds for a non-monotone
-    z-reducer too, because the reducer never sees uncorrected data.
-    """
+    """The wrapper IS the mechanism, and its position is the feature."""
     from squidxplorer._flatfield import correct_flatfield
     from squidxplorer._stitch import _FlatfieldReader
 
@@ -1123,16 +969,13 @@ def test_the_flatfield_wrapper_corrects_every_plane_it_hands_back(master):
     np.testing.assert_array_equal(got, correct_flatfield(raw, profile))
     assert not np.array_equal(got, raw), "the fixture profile must actually change the pixels"
 
-    # A channel with no profile passes through untouched rather than raising -- the same
-    # identity fallback TileWarper gives an unfittable seam.
     np.testing.assert_array_equal(
         wrapped.read("A1", 0, CHANNELS[1], 0, 0), inner.read("A1", 0, CHANNELS[1], 0, 0))
     assert wrapped.metadata is inner.metadata, "metadata must be delegated, not snapshotted"
 
 
 def test_illumination_correction_is_on_by_default_and_recorded(master):
-    """Default ON is a step PAST the standalone (its checkbox is on, but nothing presses the
-    Calculate button), so both the default and its provenance are pinned."""
+    """Default ON is a step PAST the standalone (its checkbox is on, but nothing presses the Calculate button), so both the default and its provenance are pinned."""
     g: dict = {}
     stitch_region(_FakeReader(master), "A1", list(range(4)), blend_px=24, block_px=512,
                   max_workers=2, geometry=g)
@@ -1145,8 +988,7 @@ def test_illumination_correction_is_on_by_default_and_recorded(master):
 
 
 def test_a_supplied_profile_is_used_instead_of_estimating(master):
-    """A caller-supplied profile must be honoured verbatim — that is how the region loop keeps every
-    well on ONE plate-wide gain field instead of a different one per well."""
+    """A caller-supplied profile must be honoured verbatim — that is how the region loop keeps every well on ONE plate-wide gain field instead of a"""
     kw = dict(channels=[0], blend_px=24, block_px=512, max_workers=2, register=False,
               correct_distortion=False)
     supplied = stitch_region(_FakeReader(master), "A1", list(range(4)),
@@ -1158,20 +1000,12 @@ def test_a_supplied_profile_is_used_instead_of_estimating(master):
 
 
 def test_the_gui_selected_profile_reaches_stitching(master):
-    """A profile chosen in the GUI's flat-field tab must correct the STITCH too.
-
-    It did not. ``_flatfield.set_profile`` was read by exactly one consumer -- the registered
-    ``flatfield`` plane-op -- so ``resolve_flatfield`` walked straight past it to the ``.npy``
-    lookup and estimated its own field. Two owners of "which gain field is this plate corrected
-    by", and the user's choice was the one with no effect.
-    """
+    """A profile chosen in the GUI's flat-field tab must correct the STITCH too."""
     from squidxplorer._flatfield import clear_profile, set_profiles
     from squidxplorer._stitch import resolve_flatfield
 
     reader = _FakeReader(master)
     chosen = _nonunit_profile()
-    # ONE PER CHANNEL. The global was a single profile and this function broadcast it, which is
-    # what made the GUI and the stored .npy disagree; the selection now has to cover the run.
     set_profiles({c: chosen for c in CHANNELS})
     try:
         resolved = resolve_flatfield(reader, "A1", list(range(4)))
@@ -1179,7 +1013,6 @@ def test_the_gui_selected_profile_reaches_stitching(master):
             "the GUI-selected profile did not reach the stitch's profile resolution")
         assert set(resolved) == set(CHANNELS), "every channel of the run must be covered"
 
-        # ...and an explicit per-call profile still outranks it: one total precedence, no tie.
         kw = dict(channels=[0], blend_px=24, block_px=512, max_workers=2, register=False,
                   correct_distortion=False)
         explicit = stitch_region(_FakeReader(master), "A1", list(range(4)),
@@ -1192,13 +1025,7 @@ def test_the_gui_selected_profile_reaches_stitching(master):
 
 
 def test_loading_the_stored_profile_in_the_gui_does_not_change_the_stitch(master, tmp_path):
-    """ONE FILE, ONE ANSWER. ``resolve_flatfield`` loaded the acquisition's ``(C, Y, X)`` ``.npy``
-    per channel, while ``_selected_profiles`` broadcast the GUI's single global over every
-    channel — so loading THAT SAME FILE through "Load illumination profile" changed the mosaic:
-    identical for channel 0 and different for every other one (measured on the 10x set: max|d|
-    0.3335 / 0.0237 / 0.1411 for 488 / 561 / 638). Same data, two answers, decided by whether the
-    user had clicked a button.
-    """
+    """ONE FILE, ONE ANSWER."""
     pytest.importorskip("tilefusion.flatfield")
     from tilefusion.flatfield import save_flatfield
 
@@ -1234,8 +1061,7 @@ def test_loading_the_stored_profile_in_the_gui_does_not_change_the_stitch(master
 
 
 def test_a_partial_gui_selection_is_named_in_the_log_and_never_broadcast(master, caplog):
-    """The GUI's auto-estimate installs the ONE channel it estimated. That is not a licence to
-    correct the others with it — and it must not be dropped in silence either."""
+    """The GUI's auto-estimate installs the ONE channel it estimated."""
     import logging
 
     from squidxplorer._flatfield import FlatfieldProfile, clear_profile, set_profile
@@ -1257,12 +1083,7 @@ def test_a_partial_gui_selection_is_named_in_the_log_and_never_broadcast(master,
 
 
 def test_the_flatfield_stage_says_what_it_is_doing_before_it_does_it(master, monkeypatch, caplog):
-    """Announce the stage at its START, not in the past tense once it is over.
-
-    Every flat-field line used to be emitted after the work finished, so the log panel -- which is
-    also where the run's progress bar lives, and the only surface that can move during a stage that
-    runs BEFORE the first region -- was silent for the whole estimate and then reported it as done.
-    """
+    """Announce the stage at its START, not in the past tense once it is over."""
     import logging
 
     import squidxplorer._flatfield as ff_mod
@@ -1290,11 +1111,7 @@ def test_the_flatfield_stage_says_what_it_is_doing_before_it_does_it(master, mon
 
 
 def test_the_affine_fallback_refuses_to_guess_from_too_few_pairs():
-    """Below ``_MIN_PAIRS_FOR_AFFINE`` the fit is not trustworthy, so the tiles stay put.
-
-    Degrading to the stage position is the honest outcome here — it is what the caller had
-    before — and it must not be dressed up as a solve.
-    """
+    """Below ``_MIN_PAIRS_FOR_AFFINE`` the fit is not trustworthy, so the tiles stay put."""
     from squidxplorer._stitch import _place_unconstrained_tiles
 
     positions = [(0.0, 0.0), (0.0, 100.0), (100.0, 0.0), (500.0, 500.0)]
@@ -1330,8 +1147,7 @@ def test_a_region_operator_refuses_an_n_fovs_crop_and_names_the_mapping():
 
 
 def test_write_plate_refuses_a_typoed_stitch_knob_BEFORE_any_directory_exists(tmp_path):
-    """The region arm used to skip pre-flight validation, so the refusal came after the plate
-    skeleton and the incomplete marker were already on disk."""
+    """The region arm used to skip pre-flight validation, so the refusal came after the plate skeleton and the incomplete marker were already on disk."""
     from squidxplorer import write_plate
 
     class _Reader:
@@ -1343,36 +1159,17 @@ def test_write_plate_refuses_a_typoed_stitch_knob_BEFORE_any_directory_exists(tm
     assert not out.exists(), "the refusal came after the writer had already made directories"
 
 
-def test_the_coordinate_operator_is_shelved_whole():
-    """Absence pin (2026-08-24): the registration-off control operator is gone;
-    stitch(register=False) is the same run and stays tested above."""
-    import squidxplorer
-    import squidxplorer._stitch as stitch_mod
-
-    assert "coordinate" not in squidxplorer.runnable_operators()
-    for gone in ("_coordinate_factory", "_COORDINATE_PARAMS", "_COORDINATE_ACCEPTS"):
-        assert not hasattr(stitch_mod, gone), f"{gone} is back; coordinate was shelved"
-
-
 def test_the_writer_asks_the_RECORD_for_output_depth_and_kind():
-    """`write_plate` used to reconstruct stitch's declaration from the literal string
-    "z_operator" and a hardcoded "mip" — a third-party region operator got a mip-shaped
-    pyramid. The record answers now, off `inner_param` and the declared default."""
+    """`write_plate` used to reconstruct stitch's declaration from the literal string "z_operator" and a hardcoded "mip" — a third-party region operator got"""
     from squidxplorer._engine import operator_output
 
     assert operator_output("mip") == (True, "intensity")
     assert operator_output("stitch") == (True, "intensity")          # declared default: mip
-    # z_operator=None: keep every plane, fused unchanged — full z, intensity
     assert operator_output("stitch", {"z_operator": None}) == (False, "intensity")
 
 
 def test_an_edgeless_anchor_does_not_let_the_affine_stomp_the_solved_component(master, monkeypatch):
-    """Tile 0 registering NO pairs must not mark the whole solved component unconstrained.
-
-    Measured 2026-08-19 on two real acquisitions: the anchor sat alone, and the affine fallback
-    overwrote 431 genuinely solved tiles with the smooth model. The anchor moves into the
-    largest component; only true orphans are affine-placed (or left at stage below 8 pairs).
-    """
+    """Tile 0 registering NO pairs must not mark the whole solved component unconstrained."""
     import tilefusion.registration as _reg
 
     err = {3: (6.0, -4.0)}
@@ -1390,7 +1187,6 @@ def test_an_edgeless_anchor_does_not_let_the_affine_stomp_the_solved_component(m
     monkeypatch.setattr(_reg, "register_pairs_batched", drop_anchor_pairs)
     offsets = solve_offsets_px(tiles, positions, (1.0, 1.0), (TILE, TILE), max_workers=2)
 
-    # The solved component {1, 2, 3} keeps its RELATIVE solve: the injected error is cancelled.
     corrected = np.asarray(positions) + offsets
     truth = np.array([[(i // GRID) * STEP, (i % GRID) * STEP] for i in range(4)], float)
     resid = (corrected[1:] - corrected[1]) - (truth[1:] - truth[1])
@@ -1402,7 +1198,6 @@ def test_place_unconstrained_only_touches_tiles_outside_the_anchors_component():
 
     n = 12
     positions = [(float(10 * (i // 4)), float(10 * (i % 4))) for i in range(n)]
-    # tiles 2..9 form the solved chain; 0, 1, 10, 11 are orphans
     metrics = {(i, i + 1): (1.0, 0.0, 0.81) for i in range(2, 9)}
     metrics[(2, 6)] = (4.0, 0.0, 0.81)          # 8th pair: enough for the affine fit
     from tilefusion.optimization import _edges_from_pairwise_metrics

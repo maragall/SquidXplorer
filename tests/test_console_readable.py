@@ -22,16 +22,8 @@ def _record(msg="[3] A1 fov 2  decon(sigma=2.0)  done in 1.4 s", name="squid.xpl
     return r
 
 
-def test_the_full_squid_line_really_is_too_long_for_the_root():
-    """If this ever fails, the compact form may no longer be needed."""
-    full = format_record(_record())
-    assert len(full) > _CHARS_THAT_FIT, (
-        "Squid's line now fits the root window; re-examine whether format_console is still earning "
-        "its keep"
-    )
-
-
-def test_the_console_line_fits():
+def test_the_console_line_fits_where_squids_full_line_does_not():
+    assert len(format_record(_record())) > _CHARS_THAT_FIT, "re-examine whether format_console earns its keep"
     assert len(format_console(_record())) <= _CHARS_THAT_FIT
 
 
@@ -42,10 +34,6 @@ def test_the_console_keeps_what_a_reader_needs():
     assert "viewer" in line, "no attribution: an unattributed log line is a rumour"
     assert "[3] A1 fov 2" in line, "the view id and address prefix were dropped"
     assert "decon(sigma=2.0)" in line, "the message was truncated"
-
-
-def test_the_console_drops_only_what_is_safe_to_drop_on_screen():
-    line = format_console(_record())
     assert "squid.xplorer." not in line, "every line here has that prefix; it is noise"
     assert "_viewer.py:1234" not in line, "a code pointer is not a user fact"
     assert "2026-" not in line, "the date is not news while you are watching"
@@ -66,13 +54,10 @@ def test_the_full_line_is_still_byte_identical_to_squids_layout():
     assert format_record(r) == expected
 
 
-def test_no_height_is_swapped_in_and_out_behind_the_users_back():
-    """The band opens below its ceiling; no tab-driven height swap comes back."""
+def test_the_band_opens_below_its_ceiling():
     pytest.importorskip("qtpy")
     import squidxplorer._viewer as V
 
-    assert not hasattr(V, "_TOP_ROW_READING_PX"), "the second height is back"
-    assert not hasattr(V.PlateWindow, "_sync_top_row_height"), "the tab-driven height swap is back"
     assert V._BAND_DEFAULT_PX < V._BAND_MAX_PX, (
         "the band opens at its ceiling, so the cap is sizing it again rather than bounding it")
     assert V._BAND_DEFAULT_PX >= 300, (
@@ -80,10 +65,7 @@ def test_no_height_is_swapped_in_and_out_behind_the_users_back():
 
 
 def test_no_gui_string_carries_an_em_or_en_dash():
-    """Julio (2026-08-24): "there should be no em dashes in GUI". A dash in a Python string
-    literal is prose bound for a human surface (a widget, a tooltip, the log panel, a refusal),
-    so every non-docstring literal is swept; commas, colons, periods and hyphens replace them.
-    Docstrings and comments are documentation and stay out of scope."""
+    """Julio (2026-08-24): "there should be no em dashes in GUI"."""
     import ast
     from pathlib import Path
 

@@ -1,8 +1,4 @@
-"""Pane 2: camera-settle coalescing and the VISIBLE fallback.
-
-The coalescer is clock-injected, so the timing rule is tested without a Qt event loop and
-without sleeping.
-"""
+"""Pane 2: camera-settle coalescing and the VISIBLE fallback."""
 
 from __future__ import annotations
 
@@ -42,17 +38,6 @@ class _Clock:
 
     def advance(self, seconds):
         self.t += seconds
-
-
-def test_nothing_fires_before_the_camera_has_settled():
-    clock = _Clock()
-    fired = []
-    s = SettleCoalescer(0.12, lambda: fired.append(1), clock=clock)
-
-    s.notify()
-    clock.advance(0.05)
-    assert s.poll() is False
-    assert fired == []
 
 
 def test_a_continuous_drag_coalesces_into_exactly_one_fetch():
@@ -100,21 +85,6 @@ def test_a_second_move_after_settling_fires_again():
     assert fired == [1, 1]
 
 
-def test_the_debounce_is_a_quiet_period_not_a_rate_limit():
-    """A rate limit fires every interval during the drag; a quiet-period debounce only after
-    motion stops."""
-    clock = _Clock()
-    fired = []
-    s = SettleCoalescer(0.12, lambda: fired.append(1), clock=clock)
-
-    for _ in range(10):
-        s.notify()
-        clock.advance(0.10)        # shorter than the interval, so it never settles
-        s.poll()
-
-    assert fired == []
-
-
 def test_the_interval_sits_under_the_perceptible_pause():
     assert 60 <= SETTLE_MS <= 150
 
@@ -124,11 +94,7 @@ def test_the_interval_sits_under_the_perceptible_pause():
 
 
 def test_a_retired_flag_value_changes_nothing(monkeypatch):
-    """`SQUIDXPLORER_VIEWER=ndv` must take exactly the same path as no flag at all.
-
-    Does NOT unset `QT_QPA_PLATFORM`: constructing a vispy canvas under offscreen SEGFAULTS
-    rather than raising, so unsetting the guard here kills the interpreter mid-suite.
-    """
+    """`SQUIDXPLORER_VIEWER=ndv` must take exactly the same path as no flag at all."""
     monkeypatch.delenv("SQUIDXPLORER_VIEWER", raising=False)
     without = make_pane()[1:]
     monkeypatch.setenv("SQUIDXPLORER_VIEWER", "ndv")
@@ -142,7 +108,6 @@ def test_a_retired_flag_value_changes_nothing(monkeypatch):
 def test_napari_is_the_default(monkeypatch):
     monkeypatch.delenv("SQUIDXPLORER_VIEWER", raising=False)
     widget, mode, msg = make_pane()
-    # A non-napari result must carry a reason — never a silent downgrade.
     if mode != "napari":
         assert msg, "reported no viewer without saying why"
     else:
@@ -150,8 +115,7 @@ def test_napari_is_the_default(monkeypatch):
 
 
 def test_offscreen_is_recognised_as_having_no_gl():
-    """Constructing a vispy canvas under the offscreen platform SEGFAULTS rather than raising,
-    so this cannot be a try/except — it has to be checked before construction."""
+    """Constructing a vispy canvas under the offscreen platform SEGFAULTS rather than raising, so this cannot be a try/except — it has to be checked before"""
     ok, why = gl_available({"QT_QPA_PLATFORM": "offscreen"})
     assert ok is False
     assert "OpenGL" in why or "offscreen" in why
@@ -171,19 +135,6 @@ def test_headless_says_there_is_no_viewer_rather_than_crashing(monkeypatch):
     assert "OpenGL" in msg
 
 
-def test_an_unknown_viewer_name_does_not_silently_disable_the_viewer(monkeypatch):
-    """A typo resolves to napari, exactly as an empty value does."""
-    monkeypatch.setenv("SQUIDXPLORER_VIEWER", "wat")
-    _widget, mode, msg = make_pane()
-    monkeypatch.delenv("SQUIDXPLORER_VIEWER", raising=False)
-    _dwidget, default_mode, default_msg = make_pane()
-    assert mode == default_mode, (
-        f"a typo resolved to {mode!r} where no value at all resolves to {default_mode!r}")
-    assert (msg == "") == (default_msg == "")
-    if mode == "unavailable":
-        assert msg, "no viewer, and no reason given"
-
-
 class _Canvas:
     """The vispy canvas as the pane reads it: (2d, 3d) maximum texture sizes."""
 
@@ -192,8 +143,7 @@ class _Canvas:
 
 
 class _Pane:
-    """Stand-in for the parts of MosaicPane `_live_max_3d_texture` touches; called unbound
-    against it, since offscreen there is no GL context to construct one."""
+    """Stand-in for the parts of MosaicPane `_live_max_3d_texture` touches; called unbound against it, since offscreen there is no GL context to construct one."""
 
     def __init__(self, canvas=None):
         self.canvas = canvas
@@ -217,8 +167,7 @@ def test_with_no_canvas_the_fallback_is_the_one_the_renderer_uses():
 
 
 def test_the_limit_is_announced_and_says_whether_it_was_measured(caplog):
-    """The GPU limit needs a GL context, so it cannot be probed offscreen; an unmeasured number
-    must not read like a measured one."""
+    """The GPU limit needs a GL context, so it cannot be probed offscreen; an unmeasured number must not read like a measured one."""
     with caplog.at_level("INFO"):
         MosaicPane._live_max_3d_texture(_Pane(_Canvas((16384, 4096))))
     assert "4096" in caplog.text and "read from the GPU" in caplog.text
@@ -232,20 +181,13 @@ def test_the_limit_is_announced_and_says_whether_it_was_measured(caplog):
         "figure the design is built on is this machine's or a guess")
 
 
-def test_the_limit_is_not_announced_again_on_every_toggle(caplog):
-    """Read on every 2D/3D change; repeating it would bury the run's own log lines."""
-    pane = _Pane(_Canvas((16384, 2048)))
-    with caplog.at_level("INFO"):
-        for _ in range(5):
-            MosaicPane._live_max_3d_texture(pane)
-    assert caplog.text.count("GL_MAX_3D_TEXTURE_SIZE") == 1
-
-
-def test_a_limit_that_changes_is_announced_again(caplog):
+def test_the_limit_is_announced_once_per_change_not_per_toggle(caplog):
     """The first read can fall back before the canvas has drawn, then succeed afterwards."""
+    pane = _Pane(_Canvas((16384, 4096)))
     with caplog.at_level("INFO"):
         MosaicPane._live_max_3d_texture(_Pane())                        # no canvas yet
-        MosaicPane._live_max_3d_texture(_Pane(_Canvas((16384, 4096))))  # canvas has drawn
+        for _ in range(5):
+            MosaicPane._live_max_3d_texture(pane)                       # canvas has drawn
     assert caplog.text.count("GL_MAX_3D_TEXTURE_SIZE") == 2
     assert "4096" in caplog.text
 

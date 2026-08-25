@@ -1,14 +1,4 @@
-"""The TensorStore reads share one bounded context and one bounded pool of handles.
-
-`_ComputedPlateWorker._read` used to open a brand new store per well per pyramid level, called
-twice per well, so a 1536-well plate did 3072 fresh opens, each allocating its own private cache.
-These tests pin the two properties that fix it, deliberately orthogonal: a byte cap with unbounded
-handles still exhausts descriptors on a scrub, and a handle cap with no byte cap still lets one
-big read blow the footprint.
-
-The byte limit comes from `_budget.cache_budget()`, not a hardcoded constant — asserted below so
-nobody "simplifies" it back to one.
-"""
+"""The TensorStore reads share one bounded context and one bounded pool of handles."""
 from __future__ import annotations
 
 import threading
@@ -37,18 +27,15 @@ def _write_store(path, shape=(1, 1, 1, 4, 4)):
     return store
 
 
-def test_the_context_is_one_object_for_the_whole_process():
+def test_the_context_is_one_object_sized_by_the_measured_budget():
     """Two call sites must share a cache_pool, or the byte limit is per-site and means nothing."""
     assert _tsctx.ts_context() is _tsctx.ts_context()
-
-
-def test_the_byte_limit_comes_from_the_measured_budget_not_a_constant():
-    limit = cache_budget()
-    assert limit > 0
+    assert cache_budget() > 0
     assert _tsctx.cache_budget is cache_budget, "the context stopped using the measured budget"
 
 
-def test_handles_are_reused_rather_than_reopened(tmp_path):
+def test_handles_are_reused_and_the_pool_is_bounded_by_construction(tmp_path):
+    """Bounded by CONSTRUCTION, not by a caller remembering to evict."""
     p = tmp_path / "a.zarr"
     _write_store(p)
     cache = _tsctx.HandleCache()
@@ -56,10 +43,6 @@ def test_handles_are_reused_rather_than_reopened(tmp_path):
     for _ in range(50):
         assert cache.get(p) is first, "the same path opened more than once"
     assert len(cache) == 1
-
-
-def test_the_handle_pool_is_bounded(tmp_path):
-    """Bounded by CONSTRUCTION, not by a caller remembering to evict."""
     cache = _tsctx.HandleCache(max_open=4)
     for i in range(12):
         p = tmp_path / f"s{i}.zarr"

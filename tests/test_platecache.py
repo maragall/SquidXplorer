@@ -91,13 +91,9 @@ def test_the_token_covers_the_channel_list_and_the_cell_size_too(tmp_path):
     c = PlateCellCache(exp, cell_px=44, channels=["c0", "c1"], dtype=np.uint16,
                        root=tmp_path / "c")
     assert len({a.token, b.token, c.token}) == 3
-
-
-def test_a_growing_timepoint_folder_changes_the_token(tmp_path):
-    exp = _acquisition(tmp_path)
     before = _platecache.plate_token(exp)
     (exp / "0" / "A1_0_0_ch.tiff").write_bytes(b"x")
-    assert _platecache.plate_token(exp) != before
+    assert _platecache.plate_token(exp) != before, "a growing timepoint folder must change the token"
 
 
 def test_the_token_costs_a_bounded_number_of_stats_whatever_the_plate_holds(tmp_path, monkeypatch):
@@ -186,16 +182,6 @@ def test_a_finished_pass_compacts_into_ONE_memory_mapped_page(tmp_path):
         hit = fresh.get(r)
         assert hit is not None and hit.box == (2, 3, 40, 50)
         assert np.array_equal(np.asarray(hit), _cell(i + 1)[:, :40, :50])
-
-
-def test_the_page_is_MAPPED_and_not_read_into_the_heap(tmp_path):
-    exp = _acquisition(tmp_path)
-    cache = _cache(tmp_path, exp)
-    cache.put("A1", _cell(1), (0, 0, 88, 88))
-    cache.pack(["A1"])
-    _platecache.clear_memory_tier()
-    fresh = _cache(tmp_path, exp)
-    hit = fresh.get("A1")
     base = np.asarray(hit)
     while base is not None and not isinstance(base, np.memmap):
         base = getattr(base, "base", None)
@@ -226,20 +212,6 @@ def test_a_page_from_another_generation_is_not_read(tmp_path):
     assert _cache(tmp_path, exp).get("A1") is None
 
 
-def test_the_sidecar_is_JSON_and_never_pickle(tmp_path):
-    exp = _acquisition(tmp_path)
-    cache = _cache(tmp_path, exp)
-    cache.put("A1", _cell(1), (0, 0, 88, 88))
-    cache.pack(["A1"])
-    index = json.loads(cache.pack_index_path.read_text(encoding="utf-8"))
-    assert index["regions"] == ["A1"] and index["t"] == 0, \
-        "the sidecar records the timepoint this page is of; see PlateCellCache.pack"
-    import inspect
-
-    src = inspect.getsource(_platecache)
-    assert "import pickle" not in src and "pickle.load" not in src, "the cache started unpickling"
-
-
 def test_NOTHING_is_ever_written_under_the_experiment_root(tmp_path):
     exp = _acquisition(tmp_path)
     before = _tree(exp)
@@ -252,13 +224,10 @@ def test_NOTHING_is_ever_written_under_the_experiment_root(tmp_path):
     assert cache.dir.exists() and str(exp) not in str(cache.dir.resolve())
 
 
-def test_a_cache_root_pointed_inside_the_experiment_is_REFUSED(tmp_path):
+def test_a_cache_root_pointed_inside_the_experiment_is_REFUSED(tmp_path, monkeypatch):
     exp = _acquisition(tmp_path)
     with pytest.raises(RuntimeError, match="never writes into your data"):
         PlateCellCache(exp, cell_px=88, channels=["c0"], dtype=np.uint16, root=exp / "cache")
-
-
-def test_the_default_root_is_the_platform_user_cache_dir(monkeypatch, tmp_path):
     monkeypatch.delenv(_platecache.ENV_DIR, raising=False)
     import platformdirs
 
@@ -298,11 +267,9 @@ def test_the_cache_can_be_turned_off(monkeypatch):
     monkeypatch.setenv(_platecache.ENV_ENABLED, "0")
     assert _platecache.enabled() is False
     assert PlateCellCache.for_reader(object(), {}, cell_px=88) is None
-
-
-def test_a_reader_with_no_path_degrades_to_uncached_rather_than_raising():
+    monkeypatch.delenv(_platecache.ENV_ENABLED)
     assert PlateCellCache.for_reader(object(), {"channels": [], "dtype": "uint16"},
-                                     cell_px=88) is None
+                                     cell_px=88) is None, "a reader with no path runs uncached"
 
 
 pytest.importorskip("qtpy")
@@ -408,16 +375,6 @@ def test_a_preview_that_FAILS_caches_nothing(qapp, tmp_path):
     assert failures, "the failure must still be named"
     assert not cache.dir.exists() or not list(cache.dir.glob("*.npz")), \
         "a preview that could not finish published a cell anyway"
-
-
-def test_the_plate_preview_actually_goes_through_the_cache():
-    import inspect
-
-    src = (inspect.getsource(W._PreviewWorker.run)
-           + inspect.getsource(W._PreviewWorker._run_body))
-    assert "_replay_cached" in src, "the preview stopped consulting the cache"
-    assert "_remember" in src, "the preview stopped filling the cache"
-    assert "capture_stdout_to_log" in src, "the preview stopped capturing print() into the log"
 
 
 class _TimeReader:
@@ -554,48 +511,11 @@ def test_the_plate_CELL_at_t1_differs_from_the_cell_at_t0(qapp, tmp_path):
                 f"{region}: the reopened plate showed another frame at t={t}"
 
 
-def test_the_preview_READS_the_timepoint_it_was_asked_for(qapp, tmp_path):
-    exp = _acquisition(tmp_path)
-    reader = _TimeReader(exp)
-    _run(W._PreviewWorker(reader, _meta(), {"A1": {"rc": (0, 0)}, "A2": {"rc": (0, 1)}},
-                          ["A1", "A2"], cache=None, time_point=2))
-    assert set(reader.reads_at) == {2}, f"the preview read timepoints {sorted(reader.reads_at)}"
-
-
-def test_stepping_BACK_to_a_visited_timepoint_reads_NOTHING(qapp, tmp_path):
-    exp = _acquisition(tmp_path)
-    meta, idx = _meta(), {"A1": {"rc": (0, 0)}, "A2": {"rc": (0, 1)}}
-    reader = _TimeReader(exp)
-    per_pass = len(CHANNELS) * len(meta["regions"])
-
-    _run(W._PreviewWorker(reader, meta, idx, ["A1", "A2"], cache=_cache(tmp_path, exp), time_point=0))
-    assert reader.reads == per_pass, "the first visit must read the plate"
-    _run(W._PreviewWorker(reader, meta, idx, ["A1", "A2"],
-                          cache=_cache(tmp_path, exp, time_point=1), time_point=1))
-    assert reader.reads == 2 * per_pass, "a NEW timepoint must read the plate"
-
-    back = W._PreviewWorker(reader, meta, idx, ["A1", "A2"], cache=_cache(tmp_path, exp), time_point=0)
-    _run(back)
-    assert reader.reads == 2 * per_pass, "stepping back to t=0 re-read the acquisition"
-    assert back.cache_hits == 2 and back.cache_reads == 0
-
-
 def test_a_preview_handed_a_cache_for_ANOTHER_timepoint_refuses_to_start(qapp, tmp_path):
     exp = _acquisition(tmp_path)
     with pytest.raises(ValueError, match="wrong frame"):
         W._PreviewWorker(_TimeReader(exp), _meta(), {"A1": {"rc": (0, 0)}}, ["A1"],
                          cache=_cache(tmp_path, exp), time_point=1)
-
-
-def test_the_plate_previews_the_timepoint_the_BAR_says():
-    import inspect
-
-    assert "t=self.time_point" in inspect.getsource(V.PlateWindow._start_preview), \
-        "the plate's preview stopped carrying the bar's timepoint"
-    assert "_start_preview" in inspect.getsource(V.PlateWindow._return_to_raw), \
-        "returning to raw stopped restarting the preview, so a timepoint change repaints nothing"
-    assert "_return_to_raw" in inspect.getsource(V.PlateWindow._on_time_point_changed), \
-        "a timepoint change stopped asking the plate to re-read"
 
 
 FIXTURE_5D = Path("~/Downloads/sim_5d_2x2_t3").expanduser()

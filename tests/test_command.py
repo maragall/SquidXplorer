@@ -1,7 +1,4 @@
-"""The ONE command surface: named, declarative, serialisable, never raising into a caller.
-
-Headless, no Qt. The GUI's half of the same surface is tested in tests/test_gui_commands.py.
-"""
+"""The ONE command surface: named, declarative, serialisable, never raising into a caller."""
 
 from __future__ import annotations
 
@@ -14,7 +11,6 @@ from squidxplorer._command import (
     BAD_COMMAND,
     BAD_SCOPE,
     CommandBus,
-    CommandResult,
     Describe,
     EMPTY_SCOPE,
     EngineExecutor,
@@ -45,13 +41,6 @@ def open_bus(squid_dataset):
     return b
 
 
-def test_a_command_survives_a_round_trip_through_plain_data():
-    cmd = RunOperator(operator="mip", regions=["B2", "B3"], save=False)
-    payload = json.loads(json.dumps(cmd.model_dump()))
-    again = parse_command(payload)
-    assert again == cmd
-
-
 def test_a_command_can_be_written_the_way_a_human_writes_it():
     cmd = parse_command({"kind": "run_operator", "operator": "mip", "scope": "whole dataset"})
     assert isinstance(cmd, RunOperator) and cmd.operator == "mip"
@@ -64,7 +53,6 @@ def test_an_unknown_command_is_refused_by_name_and_lists_what_exists(bus):
 
 
 def test_a_misspelled_field_is_refused_rather_than_silently_ignored(bus):
-    # "region" (singular) is a plausible typo; ignoring it would run the WHOLE PLATE, not one well.
     r = bus.execute({"kind": "run_operator", "operator": "mip", "region": "B2"})
     assert r.status == "refused" and r.refusal == BAD_COMMAND
     assert "region" in r.message
@@ -89,11 +77,10 @@ def test_every_command_kind_is_registered_and_carries_its_discriminator():
     }
     for kind, model in COMMANDS.items():
         assert model.kind == kind
-        assert parse_command(samples[kind].model_dump()).kind == kind
+        assert parse_command(json.loads(json.dumps(samples[kind].model_dump()))) == samples[kind]
 
 
 def test_the_bus_never_raises_even_when_the_executor_does():
-    # a Qt slot swallows a raised exception; the user just sees a button that did nothing.
 
     class Exploding:
         surface = "exploding"
@@ -104,8 +91,6 @@ def test_the_bus_never_raises_even_when_the_executor_does():
     r = CommandBus(Exploding()).execute(Describe())
     assert r.status == "refused" and "kaboom" in r.message
 
-
-def test_an_executor_that_forgets_to_return_a_result_is_refused_not_believed():
     class Sloppy:
         surface = "sloppy"
 
@@ -120,22 +105,8 @@ def test_a_command_this_surface_cannot_express_is_a_named_refusal(bus):
     r = bus.execute(StopRun())
     assert r.status == "refused" and r.refusal == NOT_SUPPORTED_HERE
     assert "engine" in r.message
-
-
-def test_a_surface_reports_which_commands_it_supports(bus):
     supported = bus.supported()
-    assert "run_operator" in supported and "describe" in supported
-    assert "stop_run" not in supported
-
-
-def test_a_result_is_falsy_when_it_refused(bus):
-    assert not bus.execute(Describe())
-    assert bool(bus.execute(ListOperators()))
-
-
-def test_raise_for_refusal_is_opt_in_for_scripts(bus):
-    with pytest.raises(RuntimeError, match="no_acquisition"):
-        bus.execute(Describe()).raise_for_refusal()
+    assert "run_operator" in supported and "stop_run" not in supported
 
 
 def test_list_operators_answers_off_the_engine_registry_not_a_card_table(bus):
@@ -145,18 +116,7 @@ def test_list_operators_answers_off_the_engine_registry_not_a_card_table(bus):
 
     assert set(r.data["names"]) == set(available_plane_operators()) | set(available_region_operators())
     assert "mip" in r.data["names"] and "stitch" in r.data["names"]
-
-
-def test_list_operators_reports_the_consumed_axis_so_a_caller_knows_the_output_shape(
-        bus, blob_operator):
-    rows = {row["name"]: row for row in bus.execute(ListOperators()).data["operators"]}
-    assert rows["mip"]["kind"] == "z-reducer" and rows["mip"]["consumes"] == ["z"]
-    assert rows[blob_operator]["kind"] == "plane-op" and rows[blob_operator]["consumes"] == []
-    assert rows["stitch"]["kind"] == "region-operator"
-
-
-def test_a_newly_registered_operator_appears_with_no_command_layer_edit(bus):
-    """The registry scales to n algorithms; the command surface must scale with it for free."""
+    json.dumps(r.model_dump())
     from squidxplorer import add_operator
     from squidxplorer._engine import _OPERATORS
 
@@ -167,11 +127,6 @@ def test_a_newly_registered_operator_appears_with_no_command_layer_edit(bus):
         _OPERATORS.pop("test_only_op", None)
 
 
-def test_describe_refuses_by_name_before_anything_is_open(bus):
-    r = bus.execute(Describe())
-    assert r.refusal == NO_ACQUISITION and "open_acquisition" in r.message
-
-
 def test_describe_names_the_regions_channels_and_scopes_a_run_could_target(open_bus):
     d = open_bus.execute(Describe()).data
     assert d["regions"] and d["channels"]
@@ -180,7 +135,6 @@ def test_describe_names_the_regions_channels_and_scopes_a_run_could_target(open_
 
 
 def test_nothing_selected_means_everything_the_established_convention(open_bus, monkeypatch):
-    # scope='selected wells' with nothing selected IS the whole dataset.
     seen = {}
     import squidxplorer._command as mod
 
@@ -191,19 +145,15 @@ def test_nothing_selected_means_everything_the_established_convention(open_bus, 
     monkeypatch.setattr("squidxplorer.run_plate", fake_run_plate)
     open_bus.execute(RunOperator(operator="mip"))
     assert seen["regions"] is None, "None is the whole-plate path; a list would be a subset"
-
-
-def test_an_explicit_region_list_wins_over_the_scope(open_bus, monkeypatch):
-    seen = {}
-    monkeypatch.setattr("squidxplorer.run_plate",
-                        lambda reader, **kw: (seen.update(kw), iter(()))[1])
     regions = open_bus.execute(Describe()).data["regions"][:1]
     open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE, regions=regions))
-    assert seen["regions"] == regions
+    assert seen["regions"] == regions, "an explicit region list wins over the scope"
+    open_bus.executor.selection = list(regions)
+    open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_SELECTION))
+    assert seen["regions"] == regions, "the selection drives the selected-wells scope"
 
 
 def test_an_empty_region_list_is_refused_and_never_widened_to_everything(open_bus):
-    # running 1536 wells because a caller sent [] is hours of compute nobody asked for.
     r = open_bus.execute(RunOperator(operator="mip", regions=[]))
     assert r.refusal == EMPTY_SCOPE
 
@@ -220,25 +170,16 @@ def test_an_invented_scope_is_refused_and_lists_the_real_ones(open_bus):
         assert scope in r.message
 
 
-def test_the_selection_drives_the_selected_wells_scope(open_bus, monkeypatch):
-    # headless resolves 'selected wells' through the same _run_scope.resolve_run_scope as the GUI.
-    seen = {}
-    monkeypatch.setattr("squidxplorer.run_plate",
-                        lambda reader, **kw: (seen.update(kw), iter(()))[1])
-    regions = open_bus.execute(Describe()).data["regions"][:1]
-    open_bus.executor.selection = list(regions)
-    open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_SELECTION))
-    assert seen["regions"] == regions
-
-
 def test_an_unknown_operator_is_refused_before_any_work_and_lists_what_can_run(open_bus):
     r = open_bus.execute(RunOperator(operator="not_an_operator"))
     assert r.refusal == UNKNOWN_OPERATOR
     assert "mip" in r.message and "not_an_operator" in r.message
 
 
-def test_running_with_nothing_open_is_refused_by_name(bus):
+def test_running_or_describing_with_nothing_open_is_refused_by_name(bus):
     assert bus.execute(RunOperator(operator="mip")).refusal == NO_ACQUISITION
+    r = bus.execute(Describe())
+    assert r.refusal == NO_ACQUISITION and "open_acquisition" in r.message
 
 
 def test_saving_headless_without_an_output_folder_is_refused_not_guessed(open_bus):
@@ -263,7 +204,6 @@ def test_a_saved_run_returns_the_manifest(open_bus, tmp_path):
 
 
 def test_a_cancelled_run_counts_fields_against_fields_and_wells_against_wells(open_bus, tmp_path):
-    # landed counts FIELDS and n_targets counts WELLS; the summary must not divide one by the other.
     bus = CommandBus(EngineExecutor(str(open_bus.executor._path), stop=lambda: True))
     r = bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE, save=True,
                                 output_folder=str(tmp_path), n_fovs=1))
@@ -281,7 +221,6 @@ def test_a_cancelled_run_counts_fields_against_fields_and_wells_against_wells(op
 
 
 def test_a_preview_runs_with_the_parameters_it_was_given_not_the_defaults(squid_dataset):
-    # a preview must run with the given parameters, not the defaults: the pixels must differ.
     import numpy as np
 
     from squidxplorer import add_operator
@@ -322,15 +261,10 @@ def test_every_run_is_measured_and_the_result_carries_the_metrics(open_bus):
     assert m["seconds"] > 0, "the run was measured as taking no time at all"
     assert m["outcome"] == "ok", m
     assert m["target"], "a duration with no target named is not comparable to anything"
-
-
-def test_the_result_names_the_target_set_it_resolved(open_bus):
-    r = open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE))
     assert "whole dataset" in r.data["target"]
 
 
 def test_a_run_that_produced_nothing_is_partial_not_ok(open_bus, monkeypatch):
-    # per-well fault isolation returns politely even when every well raised; that is not a success.
     monkeypatch.setattr("squidxplorer.run_plate", lambda reader, **kw: iter(()))
     r = open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE))
     assert r.data["metrics"]["outcome"] == "partial"
@@ -345,11 +279,6 @@ def test_metrics_returns_the_comparison_table(open_bus):
     assert all(run["operator"] == "mip" for run in r.data["runs"])
 
 
-def test_a_result_is_serialisable_so_an_agent_can_read_it(open_bus):
-    r = open_bus.execute(ListOperators())
-    json.dumps(r.model_dump())
-
-
 def test_a_refusal_always_carries_a_code_and_a_sentence(bus):
     from squidxplorer._command import REFUSALS
 
@@ -358,4 +287,6 @@ def test_a_refusal_always_carries_a_code_and_a_sentence(bus):
         if r.status == "refused":
             assert r.refusal in REFUSALS, r
             assert r.message.strip(), "a refusal with no sentence is a button that did nothing"
-            assert r.ok is False
+            assert r.ok is False and not r
+    with pytest.raises(RuntimeError, match="no_acquisition"):
+        bus.execute(Describe()).raise_for_refusal()

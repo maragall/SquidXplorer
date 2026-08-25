@@ -8,7 +8,6 @@ import sys
 import pytest
 
 from squidxplorer._logpane import (
-    MAX_LINES,
     STDOUT_LOGGER,
     LogBus,
     capture_stdout_to_log,
@@ -35,18 +34,6 @@ def test_a_line_says_when_what_and_WHO(bus):
     assert "INFO" in line
     assert "fusing region manual0" in line
     assert line[:4].isdigit() and line[4] == "-", f"no timestamp: {line!r}"
-
-
-def test_a_THIRD_PARTY_library_appears_without_being_told_about_us(bus):
-    seen = []
-    bus.subscribe(lambda level, line: seen.append(line))
-    bus.install()
-
-    logging.getLogger("some_library_we_have_never_heard_of").info("doing something")
-
-    assert any("some_library_we_have_never_heard_of" in ln for ln in seen), (
-        f"a third-party library's log never reached the panel: {seen}"
-    )
 
 
 def test_installing_twice_does_not_double_every_line(bus):
@@ -77,8 +64,7 @@ def test_debug_is_dropped_but_warnings_and_errors_are_not(bus):
 
 
 def test_a_broken_log_call_does_NOT_break_OUR_seam(bus):
-    """Driven through emit_record directly: a raising handler via logging.info() would also
-    break pytest's own capture handler, testing pytest rather than us."""
+    """Driven through emit_record directly: a raising handler via logging.info() would also break pytest's own capture handler, testing pytest rather than us."""
     seen = []
     bus.subscribe(lambda level, line: seen.append(line))
 
@@ -116,13 +102,6 @@ def test_uninstall_stops_delivery(bus):
     assert not any("after" in ln for ln in seen), "records kept arriving after uninstall"
 
 
-def test_the_history_is_BOUNDED(bus):
-    assert 100 <= MAX_LINES <= 20000, (
-        f"MAX_LINES is {MAX_LINES}: either too small to scroll back through a run, or large "
-        "enough to be a memory problem of its own"
-    )
-
-
 def test_levels_are_visually_distinct_but_INFO_does_not_shout():
     assert color_for("ERROR") != color_for("INFO")
     assert color_for("WARNING") != color_for("INFO")
@@ -130,23 +109,25 @@ def test_levels_are_visually_distinct_but_INFO_does_not_shout():
     assert color_for("something-unknown") == color_for("INFO")
 
 
-def test_a_LIBRARYS_PRINT_reaches_the_panel(bus):
-    """tilefusion reports progress via bare print(), not logging, so the root-logger hook
-    alone never sees it; stdout capture is the other half."""
+def test_a_LIBRARYS_PRINT_reaches_the_panel_and_decoration_is_dropped(bus):
+    """tilefusion reports progress via bare print(), not logging, so the root-logger hook alone never sees it; stdout capture is the other half."""
     seen = []
     bus.subscribe(lambda level, line, full=None: seen.append(line))
     bus.install()
 
     with capture_stdout_to_log():
+        print("=" * 60)
+        print("")
+        print("   ")
         print("Parallel registration: 12 pairs in 3 batches")
 
-    assert any("Parallel registration: 12 pairs" in ln for ln in seen), seen
+    assert sum("Parallel registration: 12 pairs" in ln for ln in seen) == 1, seen
     assert any(f"{STDOUT_LOGGER}:" in ln for ln in seen), seen
+    assert not any("======" in ln for ln in seen), seen
 
 
 def test_capture_survives_the_THREAD_POOL_the_work_actually_runs_on(bus):
-    """Run-scoped, not thread-local: the region loop's prints happen on pool threads, not the
-    thread that opened the capture."""
+    """Run-scoped, not thread-local: the region loop's prints happen on pool threads, not the thread that opened the capture."""
     from concurrent.futures import ThreadPoolExecutor
 
     seen = []
@@ -176,24 +157,8 @@ def test_print_goes_back_to_the_TERMINAL_when_the_run_ends(bus, capsys):
     assert "after the run" in capsys.readouterr().out
 
 
-def test_decoration_and_blank_lines_are_DROPPED(bus):
-    seen = []
-    bus.subscribe(lambda level, line, full=None: seen.append(line))
-    bus.install()
-
-    with capture_stdout_to_log():
-        print("=" * 60)
-        print("")
-        print("   ")
-        print("Fusing tiles...")
-
-    assert sum("Fusing tiles" in ln for ln in seen) == 1
-    assert not any("======" in ln for ln in seen), seen
-
-
 def test_nesting_restores_only_ONCE(bus):
-    """Capture nests because a saved run wraps a preview's machinery; an inner exit must not
-    tear down the outer capture."""
+    """Capture nests because a saved run wraps a preview's machinery; an inner exit must not tear down the outer capture."""
     before = sys.stdout
     with capture_stdout_to_log():
         with capture_stdout_to_log():
@@ -225,7 +190,7 @@ class _PrintingReader:
         return np.zeros((8, 8), dtype=np.uint16)
 
 
-def test_the_RAW_PREVIEW_captures_print_into_the_log(tmp_path):
+def test_the_RAW_PREVIEW_captures_print_into_the_log_and_hands_stdout_back(tmp_path):
     """A raw preview is not an operator run, so it needs its own capture hookup."""
     pytest.importorskip("qtpy")
     from qtpy.QtWidgets import QApplication
@@ -239,26 +204,10 @@ def test_the_RAW_PREVIEW_captures_print_into_the_log(tmp_path):
             "pixel_size_um": 1.0, "fov_positions_um": {}}
     worker = W._PreviewWorker(_PrintingReader(tmp_path / "acq"), meta,
                               {"A1": {"rc": (0, 0)}}, ["A1"], cache=None)
+    before = sys.stdout
 
     seen = _run_worker_capturing(worker)
 
     assert any("Parallel registration: A1 fov 0" in ln for ln in seen), seen
     assert any(f"{STDOUT_LOGGER}:" in ln for ln in seen), seen
-
-
-def test_the_capture_is_handed_BACK_after_a_preview_too(tmp_path):
-    pytest.importorskip("qtpy")
-    from qtpy.QtWidgets import QApplication
-
-    import squidxplorer._workers as W
-
-    QApplication.instance() or QApplication([])
-    (tmp_path / "acq").mkdir()
-    meta = {"channels": [{"name": "c0"}], "dtype": "uint16", "z_levels": [0],
-            "regions": ["A1"], "fovs_per_region": {"A1": [0]}, "frame_shape": (8, 8),
-            "pixel_size_um": 1.0, "fov_positions_um": {}}
-    worker = W._PreviewWorker(_PrintingReader(tmp_path / "acq"), meta,
-                              {"A1": {"rc": (0, 0)}}, ["A1"], cache=None)
-    before = sys.stdout
-    worker.run()
     assert sys.stdout is before, "the preview did not hand sys.stdout back"

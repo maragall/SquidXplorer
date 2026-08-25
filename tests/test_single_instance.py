@@ -117,7 +117,6 @@ def test_a_platform_without_flock_still_opens_the_gui(slots, monkeypatch):
     assert handle is not None, "the GUI must still open where flock does not exist"
     assert handle.fd == -1, "no lock was taken, and the handle has to say so"
 
-    # No flock means no cross-process cap, deliberately.
     second = acquire_gui_slot()
     release_gui_slot(second)
 

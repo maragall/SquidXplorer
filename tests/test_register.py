@@ -1,13 +1,8 @@
-"""The register operator: the stitcher's solve without fusion, and the registered copy.
-
-The copy's contract: image files hardlinked (copy fallback), sidecars REAL copies, the
-coordinates.csv rewritten with the solved positions, and the source acquisition never written.
-"""
+"""The register operator: the stitcher's solve without fusion, and the registered copy."""
 
 from __future__ import annotations
 
 import csv
-import os
 from pathlib import Path
 
 import numpy as np
@@ -88,7 +83,6 @@ def test_an_unknown_region_is_refused_not_silently_kept(tmp_path):
 
 
 def test_the_row_order_schema_still_maps_fovs(tmp_path):
-    # No fov column: row order per DISTINCT position is the id, repeated z rows move together.
     root = tmp_path / "copy"
     root.mkdir()
     (root / "coordinates.csv").write_text(
@@ -120,7 +114,6 @@ def test_register_solves_and_the_copy_carries_the_solution(tmp_path):
     p = result.placement
     assert result.shape == (1, 2, 1, p.shape[0], p.shape[1])
     assert p.reg_channel == "405" and p.reg_t == 0
-    # the probe's content errors are real: the solve must move somebody
     assert any(abs(dy) > 0.5 or abs(dx) > 0.5 for dy, dx in p.offsets_px)
 
     dst = registered_copy_root(src)
@@ -132,15 +125,12 @@ def test_register_solves_and_the_copy_carries_the_solution(tmp_path):
         dy, dx = p.offsets_px[f]
         assert x_mm * 1000 == pytest.approx(x0 + dx, abs=1e-3)
         assert y_mm * 1000 == pytest.approx(y0 + dy, abs=1e-3)
-    # the paste sits at the registered origin
     assert p.bbox_um[0] == pytest.approx(min(
         meta["fov_positions_um"][("A1", f)][0] + p.offsets_px[f][1] for f in range(4)))
 
 
 def test_a_solve_states_its_corrections_so_a_good_stage_does_not_read_as_a_no_op(caplog):
-    """A few-um solve moves tiles by fractions of a frame — invisible in the decimated
-    preview, so the run must SAY what it corrected (measured on the 900-FOV 20x tissue:
-    median 5 px shifts under a 6x-decimated paste read as 'registration does nothing')."""
+    """A few-um solve moves tiles by fractions of a frame — invisible in the decimated preview, so the run must SAY what it corrected (measured on the"""
     import logging
 
     with caplog.at_level(logging.INFO, logger="squidxplorer._register"):
@@ -152,8 +142,7 @@ def test_a_solve_states_its_corrections_so_a_good_stage_does_not_read_as_a_no_op
 
 
 def test_blank_padded_fovs_keep_their_recorded_positions(tmp_path):
-    """A padded slot reads as zeros, and zeros are not a measurement: the solve skips them and
-    the copy's rows for them stay byte-untouched — no affine phantoms in the planned csv."""
+    """A padded slot reads as zeros, and zeros are not a measurement: the solve skips them and the copy's rows for them stay byte-untouched — no affine"""
     reader = _probe_reader()
     src = _acq(tmp_path)
     reader.source_id = str(src)
@@ -180,32 +169,23 @@ def test_copy_without_an_on_disk_source_is_refused_by_name():
 
 
 def test_the_panel_carries_the_copy_switch_outside_the_params(qapp):
-    # copy cannot be a Param (it cannot change the preview's pixels), so it rides `accepts`;
-    # the OME-Zarr save is hidden because the registered copy IS this operator's disk artifact.
     from squidxplorer._param_panel import RegisterPanel
     from tests.test_op_panels import _Host
 
     host = _Host()
     panel = RegisterPanel(host)
     assert sorted(panel.widgets) == ["registration_channel", "registration_t"]
-    # CHECKED by default (2026-08-19): the copy is the operator's purpose and costs hardlinks;
-    # default-off is how "Registering the wells doesn't do anything" happened.
     assert panel.copy_check.isChecked()
     assert panel.kwargs().get("copy") is True
     panel.copy_check.setChecked(False)
     assert "copy" not in panel.kwargs(), "unchecking must drop the kwarg, not send copy=False"
-    # One flow (2026-08-25): NO panel-level run/save buttons - the operators row launches
-    # every run and reads this panel through kwargs().
-    assert not hasattr(panel, "save_btn") and not hasattr(panel, "run_all_btn")
     panel.copy_check.setChecked(True)
     assert panel.kwargs() == {"registration_channel": 0, "registration_t": 0, "copy": True}
     assert host.calls == [], "building/reading the panel must launch nothing"
 
 
 def test_a_register_result_layer_is_served_at_the_solved_positions(monkeypatch):
-    """The register look is a paste of raw frames, so its layer is the on-demand pyramid with
-    the REGISTERED positions substituted — native under zoom, like raw. Gated on
-    operator_saves_copy: a fused stitch result is never substituted."""
+    """The register look is a paste of raw frames, so its layer is the on-demand pyramid with the REGISTERED positions substituted — native under zoom, like raw."""
     from types import SimpleNamespace
 
     import squidxplorer._region_viewer as RV
@@ -236,9 +216,7 @@ def test_a_register_result_layer_is_served_at_the_solved_positions(monkeypatch):
 
 
 def test_a_save_of_register_is_the_registered_copy_never_a_plate(tmp_path):
-    """The generic save toggle: a copy-saving operator (declared, operator_saves_copy) routes
-    through the engine with copy=True — write_plate's HCS layout is never demanded, so a
-    'manual' region saves fine."""
+    """The generic save toggle: a copy-saving operator (declared, operator_saves_copy) routes through the engine with copy=True — write_plate's HCS layout"""
     from squidxplorer._dispatch import run_operator_once
     from squidxplorer._engine import operator_saves_copy
 
@@ -255,8 +233,6 @@ def test_a_save_of_register_is_the_registered_copy_never_a_plate(tmp_path):
 
 
 def test_register_runs_through_the_engine_without_a_flatfield_estimate(tmp_path, caplog):
-    # The callable declares its keywords explicitly, so the region loop's flatfield probe says
-    # no and a register run never buys a plate-wide BaSiC estimate.
     reader = _probe_reader()
     import squidxplorer
 

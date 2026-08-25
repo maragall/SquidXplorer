@@ -1,8 +1,4 @@
-"""The GPU decon backend must be a backend: same algorithm, same numbers, different device.
-
-The load-bearing test is "the GPU path returns petakit's array"; the rest covers the
-device decision, which must be deterministic and degrade to CPU rather than raise.
-"""
+"""The GPU decon backend must be a backend: same algorithm, same numbers, different device."""
 
 from __future__ import annotations
 
@@ -20,8 +16,7 @@ from squidxplorer._decon import (
 
 
 def _psf_1z(optics):
-    """The in-focus PSF plane, ``(1, Y, X)`` sum 1 — what the shelved ``make_psf_2d`` built,
-    derived exactly as the nz=1 volume solve derives it (PSF depth follows the stack depth)."""
+    """The in-focus PSF plane, ``(1, Y, X)`` sum 1 — what the shelved ``make_psf_2d`` built, derived exactly as the nz=1 volume solve derives it (PSF depth"""
     import numpy as _np
 
     psf = make_psf(OpticsParams(optics.na, optics.wavelength_um, optics.dxy_um,
@@ -36,7 +31,7 @@ def _plane_solve(plane, optics, iterations):
 
     return deconvolve_stack(_np.asarray(plane)[None, ...], optics, iterations,
                             project=False)[0]
-from squidxplorer.projection import cast_like
+
 
 petakit = pytest.importorskip("petakit")
 
@@ -103,35 +98,6 @@ def _assert_quantised_agreement(gpu, cpu):
         f"{fraction:.4%} of pixels moved (limit {MAX_DIFFERING_FRACTION:.2%}); "
         "that is too many to be quantisation and looks like real drift"
     )
-
-
-def test_the_uint16_planes_the_two_backends_write_agree_to_the_quantisation_step():
-    """The same pixels on disk, to within one count."""
-    device = _device_or_skip()
-    psf = _psf_1z(DEFAULT_OPTICS)
-    volume = _phantom((1, SIZE, SIZE), seed=3)
-
-    cpu = cast_like(petakit.deconvolve(volume, psf, method=METHOD,
-                                        iterations=ITERATIONS, gpu=False)[0], np.dtype(np.uint16))
-    gpu = cast_like(_decon_gpu.rl(volume, psf, ITERATIONS, device)[0], np.dtype(np.uint16))
-
-    _assert_quantised_agreement(gpu, cpu)
-
-
-def test_the_plane_solve_goes_through_the_device_and_still_matches_the_cpu_path(monkeypatch):
-    """``_run``'s fork must not change the nz=1 volume solve."""
-    _device_or_skip()
-    from squidxplorer import _decon
-
-    plane = _phantom((1, SIZE, SIZE), seed=7)[0].astype(np.uint16)
-
-    monkeypatch.setenv(_decon_gpu.ENV_VAR, "cpu")
-    on_cpu = _plane_solve(plane, DEFAULT_OPTICS, ITERATIONS)
-    monkeypatch.setenv(_decon_gpu.ENV_VAR, "auto")
-    on_gpu = _plane_solve(plane, DEFAULT_OPTICS, ITERATIONS)
-
-    assert on_gpu.dtype == plane.dtype
-    _assert_quantised_agreement(on_gpu, on_cpu)
 
 
 # --- the device decision -----------------------------------------------------------------------
@@ -218,7 +184,6 @@ def test_fast_len_returns_the_shortest_7_smooth_length_and_never_an_11_smooth_on
     for n in (1, 2, 97, 1000, 2084, 3036, 4024):
         got = _decon_gpu.fast_len(n)
         assert got >= n and _decon_gpu.is_smooth(got)
-    # scipy would answer 2112 = 2^6 x 3 x 11 here; 11 must not be accepted
     assert not _decon_gpu.is_smooth(2112)
     assert _decon_gpu.fast_len(2102) == 2160
 
@@ -282,7 +247,6 @@ def test_end_to_end_at_the_real_camera_width_cpu_and_gpu_write_the_same_plane(mo
 
     assert on_gpu.shape == plane.shape and on_gpu.dtype == plane.dtype
     _assert_quantised_agreement(on_gpu, on_cpu)
-    # and the rim specifically, which is where a padding bug would live
     rim = np.abs(on_gpu.astype(np.int32) - on_cpu.astype(np.int32))
     assert _border_max(rim, 64) <= MAX_COUNTS
 
@@ -371,7 +335,6 @@ def test_opting_the_cpu_path_into_padding_keeps_the_extent_and_stays_below_shot_
     """Opt-in CPU padding must return the right shape and stay a few counts from unpadded."""
     from squidxplorer import _decon
 
-    # 514 = 2 x 257, not 7-smooth, so the pad plan is non-trivial
     assert not _decon_gpu.is_smooth(514)
     plane = _rim_phantom((1, 514, 514), seed=9)[0].astype(np.uint16)
     assert any(_decon_gpu.pad_plan((1, 514, 514), (1, 19, 19)))

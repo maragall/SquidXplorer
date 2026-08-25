@@ -36,8 +36,7 @@ def _open_window(win, regions):
 
 
 def _wait_for_layers(qapp, pane, timeout=30):
-    """``(op, channel, levels, layer)`` per identity, read back off the REAL model — the stub's
-    recording list is gone; what the model holds is the assertion surface now."""
+    """``(op, channel, levels, layer)`` per identity, read back off the REAL model — the stub's recording list is gone; what the model holds is the"""
     from squidxplorer._napari_view import pyramid_levels
 
     assert _drain_until(qapp, lambda: bool(len(pane._viewer.layers)), timeout=timeout), (
@@ -57,24 +56,26 @@ def _wait_for_layers(qapp, pane, timeout=30):
 class TestRawPushCarriesVoxelSize:
     """The raw z-stack push must carry the acquisition's real voxel size, as numbers."""
 
-    def test_a_window_declares_the_acquisitions_voxel_depth_to_napari(
+    def test_the_raw_mosaic_declares_the_full_z_stack_at_the_acquisitions_pitch(
         self, qapp, napari_pane_stub, squid_dataset  # noqa: F811
     ):
         root, _ = squid_dataset
         win = V.PlateWindow(None)
         win.ingest(str(root))
-        w = _open_window(win, win._order)
+        w = _open_window(win, ["B3"])
         added = _wait_for_layers(qapp, napari_pane_stub[-1])
 
         meta = win._meta
+        n_z = meta["n_z"]
+        assert n_z > 1, "fixture needs a real z-stack or this asserts nothing"
+        assert meta["dz_um"] is not None and meta["dz_um"] > 0
         for op, channel, levels, layer in added:
             level0 = levels[0] if isinstance(levels, (list, tuple)) else levels
-            if level0.ndim < 3:
-                continue                     # a flat layer has no z pitch to declare
+            assert level0.ndim == 3, f"{op}/{channel} is not a (z, y, x) volume: {level0.shape}"
+            assert level0.shape[0] == n_z, (
+                f"{op}/{channel} declared {level0.shape[0]} planes, not {n_z}")
             assert float(layer.scale[0]) == meta["dz_um"], (
                 f"{op}/{channel} was placed with z pitch {layer.scale[0]!r}")
-        assert meta["dz_um"] is not None and meta["dz_um"] > 0
-        assert meta["pixel_size_um"] is not None and meta["pixel_size_um"] > 0
         shutdown_plate_window(qapp, win)
 
     def test_the_3d_volume_push_carries_the_full_voxel_scale(
@@ -111,24 +112,6 @@ class TestRawPushCarriesVoxelSize:
         aspect = scale[0] / scale[1]
         assert aspect > 0
         assert aspect == pytest.approx(win._meta["dz_um"] / pitch[0])
-        shutdown_plate_window(qapp, win)
-
-    def test_the_raw_mosaic_declares_the_full_z_stack(
-        self, qapp, napari_pane_stub, squid_dataset  # noqa: F811
-    ):
-        root, _ = squid_dataset
-        win = V.PlateWindow(None)
-        win.ingest(str(root))
-        w = _open_window(win, ["B3"])
-        added = _wait_for_layers(qapp, napari_pane_stub[-1])
-
-        n_z = win._meta["n_z"]
-        assert n_z > 1, "fixture needs a real z-stack or this asserts nothing"
-        for op, channel, levels, _layer in added:
-            level0 = levels[0] if isinstance(levels, (list, tuple)) else levels
-            assert level0.ndim == 3, f"{op}/{channel} is not a (z, y, x) volume: {level0.shape}"
-            assert level0.shape[0] == n_z, (
-                f"{op}/{channel} declared {level0.shape[0]} planes, not {n_z}")
         shutdown_plate_window(qapp, win)
 
     def test_the_3d_volume_is_LEVEL_ZERO_and_not_the_coarsest_pyramid_rung(
@@ -263,7 +246,6 @@ def test_switching_a_channel_off_darkens_EVERY_layer_rendering_it(build, mosaic)
     build(mosaic, OP, CHANNELS)
     rendering = mosaic.layers_for(OP, CHANNELS[0])
     assert rendering, "the scene rendered nothing"
-    assert rendering, "the scene rendered nothing"
 
     mosaic.find(OP, CHANNELS[0]).visible = False
 
@@ -342,8 +324,6 @@ def test_the_units_on_every_layer_are_micrometres(build, mosaic):
     build(mosaic, OP, CHANNELS)
     assert mosaic.ours()
     for ly in mosaic.ours():
-        # napari normalises "um" to a pint unit, so compare against what it made of a labelled
-        # axis rather than against the string we handed it.
         assert {str(u) for u in ly.units} == {"micrometer"}, (
             f"{ly.name} is labelled {ly.units}, so the scale bar reports pixels")
 
@@ -351,47 +331,33 @@ def test_the_units_on_every_layer_are_micrometres(build, mosaic):
 # -- facts true of volumes, declared in the shared model ----------------------------------------
 
 
-def test_a_volume_is_MANY_layers_under_ONE_identity(mosaic):
+def test_a_volume_is_MANY_bricks_under_the_ONE_key_a_2d_layer_would_carry(mosaic):
     """The premise the parametrized rules above rest on: the 3D scene really is several layers."""
     from squidxplorer._napari_view import MosaicKey, key_of
 
-    build_volume_scene(mosaic, OP, CHANNELS, bricks=3)
+    build_volume_scene(mosaic, "decon", ("c0", "c1"), bricks=3)
 
-    rendering = mosaic.layers_for(OP, CHANNELS[0])
-    assert rendering, "the scene rendered nothing"
+    rendering = mosaic.layers_for("decon", "c0")
     assert len(rendering) == 3, f"the volume rendered as {len(rendering)} layer(s)"
-    assert {key_of(ly) for ly in rendering} == {MosaicKey(OP, CHANNELS[0])}
-    assert mosaic.find(OP, CHANNELS[0]) is rendering[0]
-
-
-@pytest.mark.parametrize("op", ["raw", "decon", "demo"])
-def test_every_brick_declares_the_operator_whose_volume_it_is(op, mosaic):
-    from squidxplorer._napari_view import key_of
-
-    build_volume_scene(mosaic, op, ("c0", "c1"), bricks=3)
-
+    assert mosaic.find("decon", "c0") is rendering[0]
     keys = [key_of(ly) for ly in mosaic.model.layers]
     assert len(keys) == 6
     assert all(k is not None for k in keys), (
         "a brick with no metadata is a FOREIGN layer: no group, no checkbox, cannot be switched "
         f"off. keys={keys}")
-    assert {k.op for k in keys} == {op}, f"bricks claim the wrong operator: {[k.op for k in keys]}"
-    assert len({(k.op, k.channel) for k in keys}) == 2, (
+    assert {k.op for k in keys} == {"decon"}, f"bricks claim the wrong operator: {keys}"
+    assert {(k.op, k.channel) for k in keys} == {("decon", "c0"), ("decon", "c1")}, (
         "bricks of a channel must share one key, or the tree grows a row per brick")
+    flat = build_flat_scene(_fresh_mosaic(), "decon", ("c0",))
+    assert key_of(flat.model.layers[0]) == MosaicKey("decon", "c0") == key_of(rendering[0])
 
 
-def test_the_bricks_claim_the_same_identity_a_2d_mosaic_layer_would():
+def _fresh_mosaic():
     from napari.components import ViewerModel
 
-    from squidxplorer._napari_view import MosaicKey, MosaicLayers, key_of
+    from squidxplorer._napari_view import MosaicLayers
 
-    flat = MosaicLayers(ViewerModel())
-    build_flat_scene(flat, "decon", ("c0",))
-    volume = MosaicLayers(ViewerModel())
-    build_volume_scene(volume, "decon", ("c0",), bricks=1)
-
-    assert key_of(flat.model.layers[0]) == MosaicKey("decon", "c0")
-    assert key_of(volume.model.layers[0]) == key_of(flat.model.layers[0])
+    return MosaicLayers(ViewerModel())
 
 
 def test_a_brick_that_arrives_LATE_takes_the_identity_it_is_joining(mosaic):
@@ -412,8 +378,7 @@ def test_a_brick_that_arrives_LATE_takes_the_identity_it_is_joining(mosaic):
 
 
 def test_a_zoom_refined_brick_replaces_the_coarser_one_under_the_same_identity(mosaic):
-    """Camera-settle refinement swaps a brick's PIXELS, never its identity: the layer object,
-    the user's contrast window and the stride book survive the stride change (2026-08-19)."""
+    """Camera-settle refinement swaps a brick's PIXELS, never its identity: the layer object, the user's contrast window and the stride book survive the"""
     from squidxplorer import _bricks
 
     vol = build_volume_scene(mosaic, OP, ("c0",), bricks=0)
@@ -454,9 +419,7 @@ def test_evicting_one_brick_leaves_the_identity_and_its_other_bricks_alone(mosai
 
 
 def test_a_channel_whose_first_brick_is_blank_still_displays(mosaic):
-    """A blank first brick seeded a DEGENERATE window (lo == hi), napari refuses that with
-    ValueError, and the cached seed poisoned every later brick — so the whole channel rendered
-    NOTHING in 3D while its 2D layer had pixels (measured: 0 layers added for the channel)."""
+    """A blank first brick seeded a DEGENERATE window (lo == hi), napari refuses that with ValueError, and the cached seed poisoned every later brick — so"""
     import numpy as np
 
     vol = build_volume_scene(mosaic, OP, ("488",), bricks=0)
@@ -483,15 +446,7 @@ def test_a_channel_whose_first_brick_is_blank_still_displays(mosaic):
 
 
 def test_a_depth_keeping_operators_volume_survives_its_own_toggle(mosaic):
-    """Julio, live (2026-08-24): "I can't toggle on and off the 3D decon-ed layer in napari."
-
-    decon declares ``consumes={"z"}`` (the engine hands it the whole stack) AND ``keeps_depth``
-    (every plane comes back), but the display side read only ``consumes``: ``_reduces_z`` said
-    True for decon, so the visibility toggle's ``_present_z_axis`` COLLAPSED every decon brick
-    to a single plane the moment the volume was lit while the pane's dims were 2-D (measured:
-    (4, 8, 8) -> (8, 8) on the toggle back ON) — and ``volume_source`` refused to open 3D on a
-    decon layer at all, off the same one line. What collapses is the OUTPUT's depth, not the
-    input axis the operator eats."""
+    """Julio, live (2026-08-24): "I can't toggle on and off the 3D decon-ed layer in napari." decon declares ``consumes={"z"}`` (the engine hands it the"""
     build_volume_scene(mosaic, "decon", ("488",), bricks=3)
 
     for ly in mosaic.layers_for("decon", "488"):     # the tree checkbox: OFF ...
@@ -510,8 +465,7 @@ def test_a_depth_keeping_operators_volume_survives_its_own_toggle(mosaic):
 
 
 def test_auto_clim_never_hands_napari_a_degenerate_window():
-    """napari raises ValueError on contrast_limits with lo == hi; a blank stack must yield None
-    (napari autoscales), never (0.0, 0.0)."""
+    """napari raises ValueError on contrast_limits with lo == hi; a blank stack must yield None (napari autoscales), never (0.0, 0.0)."""
     import numpy as np
 
     from squidxplorer._napari3d import _auto_clim
@@ -543,9 +497,9 @@ def _open_over_flat(mosaic, op="raw", channels=("c0",)):
     return vol
 
 
-def test_the_flat_mosaic_leaves_the_tree_while_3d_is_up(mosaic):
+def test_the_flat_mosaic_surrenders_its_key_while_3d_is_up_and_gets_it_back_on_close(mosaic):
     """It must be FOREIGN, not merely hidden: a hidden layer still has a checkbox."""
-    from squidxplorer._napari_view import key_of
+    from squidxplorer._napari_view import MosaicKey, key_of
 
     vol = _open_over_flat(mosaic, "raw", ("c0", "c1"))
     shown, already_hidden = mosaic.find("raw", "c0"), mosaic.find("raw", "c1")
@@ -555,11 +509,19 @@ def test_the_flat_mosaic_leaves_the_tree_while_3d_is_up(mosaic):
     assert key_of(shown) is None, "the 2D mosaic can still be switched on over the volume"
     assert key_of(already_hidden) is None, "a hidden mosaic layer keeps its checkbox"
     assert shown.visible is False
+    vol._add_layer(("c0", (0, 0)), "c0", _scene_stack(5, (4, 8, 8)),
+                   (1.5, 0.75, 0.75), (0.0, 0.0, 0.0))
+    holders = [ly for ly in mosaic.model.layers if key_of(ly) == MosaicKey("raw", "c0")]
+    assert len(holders) == 1 and holders[0] is not shown, (
+        f"{len(holders)} layers answer to raw/c0; exactly the brick should")
+
+    vol.close()
+    assert key_of(shown) == MosaicKey("raw", "c0"), "2D never got its tree row back"
+    assert shown.visible is True, "2D never came back on"
 
 
 def _opened_volume(mosaic, channels=("c0",)):
-    """A `BrickedVolume` OPENED over an empty scene — the 3D child-tab flow, where the 2D
-    mosaic has not landed yet. The 8x8 window plans as ONE brick, so its key matches."""
+    """A `BrickedVolume` OPENED over an empty scene — the 3D child-tab flow, where the 2D mosaic has not landed yet."""
     from squidxplorer._brick_view import BrickedVolume
 
     vol = BrickedVolume(
@@ -576,14 +538,7 @@ def _opened_volume(mosaic, channels=("c0",)):
 
 
 def test_a_mosaic_landing_mid_volume_neither_shows_nor_strands_the_bricks(mosaic):
-    """THE 2026-08-24 sequel to the brick-add failure: the 3D child tab's own 2D mosaic
-    lands AFTER open (the fuse finishes late). ``add_mosaic`` finds a BRICK as the
-    ``(op, channel)`` representative, sees a multiscale mismatch and removes EVERY holder —
-    measured on the 25x 54-z set: all bricks of the channel gone from the viewer while the
-    volume's books still claimed them resident, so every refresh 'updated' removed layers
-    and 3D never refined to native. Two rules, one gesture: a brick the pane removed is
-    FORGOTTEN (so the next settle re-reads it), and the arriving layer gets the open()
-    treatment — hidden, identity surrendered, both restored by close()."""
+    """THE 2026-08-24 sequel to the brick-add failure: the 3D child tab's own 2D mosaic lands AFTER open (the fuse finishes late)."""
     import numpy as np
 
     from squidxplorer._napari_view import MosaicKey, key_of
@@ -599,10 +554,8 @@ def test_a_mosaic_landing_mid_volume_neither_shows_nor_strands_the_bricks(mosaic
         "raw", "c0", [np.zeros((4, 16, 16), np.uint16), np.zeros((4, 8, 8), np.uint16)],
         multiscale=True, bbox_um=(0.0, 0.0, 12.0, 12.0))
 
-    # Premise: the replace path really did wipe the brick out of the viewer.
     assert not any(l is brick_layer for l in mosaic.model.layers), (
         "add_mosaic no longer removes a mismatched identity; this test's premise is stale")
-    # Rule 1: the books agree with the viewer, and the loader idle pays the owed refresh.
     assert ("c0", brick.key) not in vol._layers, (
         "the volume still claims a brick the pane removed — no refresh will re-read it")
     requests = []
@@ -611,10 +564,8 @@ def test_a_mosaic_landing_mid_volume_neither_shows_nor_strands_the_bricks(mosaic
     assert any(b.key == vol._offset_brick(brick).key and ch == "c0"
                for req in requests for (b, ch, _s) in req), (
         "the heal never re-queued the wiped brick")
-    # Rule 2: the arrival is treated exactly like a layer present at open().
     assert key_of(arriving) is None, "the arriving 2D mosaic kept the bricks' identity"
     assert arriving.visible is False, "the arriving 2D mosaic paints over the volume"
-    # The re-delivered brick is a layer again, holding the identity.
     vol._on_brick(vol._offset_brick(brick), "c0", _scene_stack(2, (4, 8, 8)),
                   step=1, epoch=vol._epoch)
     healed = vol._layers[("c0", brick.key)]
@@ -658,15 +609,7 @@ def test_the_volume_is_the_only_thing_holding_that_key_while_3d_is_up(mosaic):
 # ══════════════════════════════════════════════════════════════════════════════════════════
 
 def test_the_bricked_volume_frames_its_roi_through_the_one_camera_rule():
-    """A tall ROI on a wide canvas must be fitted by its HEIGHT, not by its width.
-
-    ``_frame_camera`` used to read ``VispyCanvas.size`` — which returns ``(height, width)`` — as
-    ``cw, ch`` and then compute ``min(cw / w_um, ch / h_um)``, i.e. height against width. That
-    does not raise, and on a square canvas it is right by accident; on the 860 x 720 a view window
-    opens at it zoomed a tall ROI 19% too far and clipped it, looking for all the world like a
-    zoom preference. So the canvas here is deliberately non-square AND the ROI's aspect is the
-    other way round, which is the only arrangement in which the two expressions differ.
-    """
+    """A tall ROI on a wide canvas must be fitted by its HEIGHT, not by its width."""
     from squidxplorer._brick_view import BrickedVolume
     from squidxplorer._napari_view import camera_for_bbox_um
 
@@ -699,9 +642,7 @@ def test_the_bricked_volume_frames_its_roi_through_the_one_camera_rule():
     assert vol._viewer.camera.zoom == pytest.approx(expected)
     assert vol._viewer.camera.zoom == pytest.approx(0.9 * min(720 / 1000.0, 860 / 500.0))
 
-    # The bug, spelled out, so this cannot pass again by reintroducing it.
     crossed = 0.9 * min(720 / 500.0, 860 / 1000.0)
     assert vol._viewer.camera.zoom != pytest.approx(crossed)
 
-    # The camera still lands on the ROI's own centre, z from the volume.
     assert vol._viewer.camera.center == pytest.approx((5.0, 4500.0, 9250.0))

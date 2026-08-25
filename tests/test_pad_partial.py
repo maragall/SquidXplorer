@@ -1,11 +1,4 @@
-"""Pad partial acquisitions: a stopped run opens at its PLANNED final state, unwritten = black.
-
-Squid can be stopped mid-acquisition and this is a post-acquisition tool that assumes final-state
-input. The plan is on disk already: the root coordinates.csv (written up front, every position
-the run intended) plus the declared Nz/Nt. Metadata declares that grid; ``read`` serves a zeros
-plane (max_intensity = 0) for a planned-but-unwritten slot; anything outside the grid refuses
-exactly as before.
-"""
+"""Pad partial acquisitions: a stopped run opens at its PLANNED final state, unwritten = black."""
 
 from __future__ import annotations
 
@@ -43,25 +36,34 @@ def _partial(tmp_path):
     return root
 
 
-def test_a_stopped_run_declares_its_planned_final_state(tmp_path):
-    with pytest.warns(UserWarning, match="partial acquisition.*BLACK"):
-        m = open_reader(_partial(tmp_path), pad_partial=True).metadata
+def _assert_padded_open(r):
+    """The plan's grid, black unwritten slots, the real plane itself, refusal outside the plan."""
+    m = r.metadata
     assert m["regions"] == ["B2", "B3"], "the planned-but-empty region must exist"
     assert m["fovs_per_region"] == {"B2": [0, 1], "B3": [0]}
     assert m["n_z"] == 3 and m["z_levels"] == [0, 1, 2]
     assert m["n_t"] == 2
     assert len(m["fov_positions_um"]) == 3, "every planned FOV must be placeable"
-
-
-def test_an_unwritten_slot_reads_as_zeros_and_a_real_one_as_itself(tmp_path):
-    r = open_reader(_partial(tmp_path), pad_partial=True)
-    with pytest.warns(UserWarning):
-        ch = r.metadata["channels"][0]["name"]
-    assert r.read("B2", 0, ch, 0).max() == 7                      # the real plane
-    for args in (("B2", 1, ch, 0), ("B3", 0, ch, 0),              # padded FOV / region
-                 ("B2", 0, ch, 2), ("B2", 0, ch, 0, 1)):          # padded z / timepoint
+    ch = m["channels"][0]["name"]
+    assert r.read("B2", 0, ch, 0).max() == 7
+    for args in (("B2", 1, ch, 0), ("B3", 0, ch, 0),
+                 ("B2", 0, ch, 2), ("B2", 0, ch, 0, 1)):
         plane = r.read(*args)
         assert plane.shape == (8, 8) and plane.dtype == np.uint16 and plane.max() == 0, args
+    with pytest.raises(KeyError):
+        r.read("Z9", 0, ch, 0)
+    return ch
+
+
+def test_a_stopped_run_opens_at_its_planned_final_state_with_black_slots(tmp_path):
+    with pytest.warns(UserWarning, match="partial acquisition.*BLACK"):
+        r = open_reader(_partial(tmp_path), pad_partial=True)
+        r.metadata
+    ch = _assert_padded_open(r)
+    with pytest.raises(KeyError):
+        r.read("B2", 7, ch, 0)
+    with pytest.raises((KeyError, IndexError)):
+        r.read("B2", 0, ch, 9)
 
 
 def test_the_reader_declares_what_padding_invented(tmp_path):
@@ -77,18 +79,6 @@ def test_the_reader_declares_what_padding_invented(tmp_path):
 
     unpadded = open_reader(root)
     assert not unpadded.padded_slots, "an unpadded open invents nothing"
-
-
-def test_outside_the_plan_still_refuses(tmp_path):
-    r = open_reader(_partial(tmp_path), pad_partial=True)
-    with pytest.warns(UserWarning):
-        ch = r.metadata["channels"][0]["name"]
-    with pytest.raises(KeyError):
-        r.read("Z9", 0, ch, 0)
-    with pytest.raises(KeyError):
-        r.read("B2", 7, ch, 0)
-    with pytest.raises((KeyError, IndexError)):
-        r.read("B2", 0, ch, 9)
 
 
 def test_a_complete_acquisition_is_untouched(squid_dataset, recwarn):
@@ -120,43 +110,24 @@ def _partial_ome(tmp_path):
     return root
 
 
-def test_a_stopped_ome_acquisition_declares_its_planned_final_state(tmp_path):
+def test_a_stopped_ome_acquisition_opens_at_its_planned_final_state_with_black_slots(tmp_path):
     with pytest.warns(UserWarning, match="partial acquisition.*BLACK"):
-        m = open_reader(_partial_ome(tmp_path), pad_partial=True).metadata
-    assert m["regions"] == ["B2", "B3"]
-    assert m["fovs_per_region"] == {"B2": [0, 1], "B3": [0]}
-    assert m["n_z"] == 3 and m["n_t"] == 2
-    assert len(m["fov_positions_um"]) == 3, "every planned FOV must be placeable"
-
-
-def test_an_unwritten_ome_slot_reads_as_zeros_and_a_real_one_as_itself(tmp_path):
-    r = open_reader(_partial_ome(tmp_path), pad_partial=True)
-    with pytest.warns(UserWarning):
-        ch = r.metadata["channels"][0]["name"]
-    assert r.read("B2", 0, ch, 0).max() == 7                      # the real plane
-    for args in (("B2", 1, ch, 0), ("B3", 0, ch, 0),              # padded FOV / region
-                 ("B2", 0, ch, 2), ("B2", 0, ch, 0, 1)):          # z / t beyond the file's own
-        plane = r.read(*args)
-        assert plane.shape == (8, 8) and plane.dtype == np.uint16 and plane.max() == 0, args
-    with pytest.raises(KeyError):
-        r.read("Z9", 0, ch, 0)                                    # outside the plan: refused
+        r = open_reader(_partial_ome(tmp_path), pad_partial=True)
+        r.metadata
+    _assert_padded_open(r)
 
 
 def test_an_unpadded_ome_open_keeps_refusing_missing_slots(tmp_path):
     root = _partial_ome(tmp_path)
     r = open_reader(root)
-    with pytest.warns(UserWarning):                               # recorded-vs-observed Nz/Nt
+    with pytest.warns(UserWarning):
         ch = r.metadata["channels"][0]["name"]
     with pytest.raises(KeyError):
         r.read("B3", 0, ch, 0)
 
 
-# --- the padded open SAYS it prefers the plan; it never claims the executed file is absent ------
-
-
 def test_the_padded_open_names_the_plan_preference_not_an_absent_file(tmp_path):
-    """The executed 0/coordinates.csv EXISTS on a stopped run; it just cannot place a padded
-    grid. The warning must say the preference is deliberate, not call the file absent."""
+    """The executed 0/coordinates.csv EXISTS on a stopped run; it just cannot place a padded grid."""
     root = _partial(tmp_path)
     (root / "0" / "coordinates.csv").write_text("region,x (mm),y (mm)\nB2,1.0,1.0\n")
     with pytest.warns(UserWarning) as record:

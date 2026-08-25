@@ -661,6 +661,11 @@ The rules:
 - A run that showed memory pressure (MemoryError, killed workers, wildly slow collection) is not
   an authoritative result. Rerun it solo and say that happened; never report it as a plain pass
   or failure.
+- **The full suite and GATE 3 run at MERGE time, not per agent report** (Julio, 2026-08-25):
+  an agent runs the focused files for what it touched; the merge is the one full run.
+- **One pin per ruling** (Julio, 2026-08-25): a ruling gets the ONE test that would have caught
+  the defect seen, never a set of facets; an absence pin for a deletion is git history's job, not
+  the suite's, unless the thing came back once or CLAUDE.md names the pin as a rule's guard.
 - **The suite renders offscreen by default** (`tests/conftest.py` sets
   `QT_QPA_PLATFORM=offscreen` via setdefault): on the native platform every real widget test
   opens actual windows and macOS yanks focus to each one, stealing the keyboard from whoever is

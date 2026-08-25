@@ -67,9 +67,7 @@ def _ancestry(widget):
 
 
 def test_a_band_tab_is_really_inside_the_window_and_really_visible(qapp, squid_dataset):
-    """The band's no-orphan/geometry guarantee, kept after the QC sweep's shelving
-    (2026-08-25): whatever opens as a band tab (the illumination loader is the one page
-    left) must be inside the window, on screen, with real geometry."""
+    """The band's no-orphan/geometry guarantee, kept after the QC sweep's shelving (2026-08-25): whatever opens as a band tab (the illumination loader is"""
     from qtpy.QtWidgets import QLabel
 
     root, _ = squid_dataset
@@ -102,27 +100,3 @@ def test_a_band_tab_is_really_inside_the_window_and_really_visible(qapp, squid_d
         "the QC result did not land in the operator tab bar")
 
     shutdown_plate_window(qapp, win)
-
-
-def test_the_dead_reference_plane_chain_is_not_on_the_plate_window(qapp,
-                                                                  squid_dataset):
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-
-    for gone in ("_focus_btn", "_sync_focus_button", "_focus_reference_plane",
-                 "_on_focus_problem", "_on_reference_plane", "_set_z_index"):
-        assert not hasattr(win, gone), (
-            f"PlateWindow.{gone} is back. The reference plane lives on each window's z-slider; "
-            "a second copy on the plate is what produced the orphan window.")
-    shutdown_plate_window(qapp, win)
-
-
-def test_the_focus_worker_itself_survives_because_the_windows_use_it(qapp,
-                                                                    squid_dataset):
-    from squidxplorer import _workers as W
-    assert hasattr(W, "_FocusWorker")
-    from squidxplorer._region_viewer import RegionViewer
-
-    assert hasattr(RegionViewer, "_focus_reference_plane")
-    assert hasattr(RegionViewer, "_on_reference_plane")

@@ -35,9 +35,9 @@ def test_a_plane_op_s_fovs_accumulate_into_one_region_mosaic():
     assert isinstance(res, Result)
     assert res.region_id == "A1"
     assert res.channels == CHANNELS
-    # 2 FOVs, 8 px frames, 6 px step -> 14 px wide, 8 tall.
-    assert res.plane(CHANNELS[0]).shape == (8, 14)
-    # ...and the result DECLARES what it is, so no sink has to re-derive it.
+    plane = res.plane(CHANNELS[0])
+    assert plane.shape == (8, 14)
+    assert plane[0, 0] == 11 and plane[0, -1] == 22          # the OPERATOR's pixels, per FOV
     assert res.z_depth == 1
     assert res.dtype == "uint16"
     assert res.pixel_size_um == 1.0
@@ -56,16 +56,6 @@ def test_the_operator_mosaic_lands_in_THE_SAME_FRAME_as_the_raw_mosaic():
     acc.add(0, np.zeros((2, 8, 8), np.uint16))
     acc.add(1, np.zeros((2, 8, 8), np.uint16))
     assert acc.result().plane(CHANNELS[0]).shape == tuple(raw_shape)
-
-
-def test_the_pixels_are_the_OPERATOR_S_not_the_reader_s():
-    """Distinct constants per FOV make a quiet re-read of the raw file visible."""
-    acc = RegionResultAccumulator("demo", "A1", _meta(), CHANNELS)
-    acc.add(0, np.full((2, 8, 8), 11, np.uint16))
-    acc.add(1, np.full((2, 8, 8), 22, np.uint16))
-    plane = acc.result().plane(CHANNELS[0])
-    assert plane[0, 0] == 11
-    assert plane[0, -1] == 22
 
 
 def test_each_channel_keeps_its_own_pixels():
@@ -97,9 +87,7 @@ def test_an_incomplete_region_refuses_to_produce_a_result():
 
 
 def test_a_scoped_run_owes_only_its_fovs_and_lands_their_own_footprint():
-    """Julio, 2026-08-25, "Can't run decon sub FOV?": an ROI preview computed 1 of 9 fields
-    (correct) and was then refused as '1 of 9 FOV(s) have results' because the BOOKS still
-    owed the whole region. The accumulator owes exactly the run's scoped FOV set."""
+    """Julio, 2026-08-25, "Can't run decon sub FOV?": an ROI preview computed 1 of 9 fields (correct) and was then refused as '1 of 9 FOV(s) have results'"""
     from squidxplorer._mosaic_source import mosaic_fov_bboxes_um
 
     meta = _meta()
