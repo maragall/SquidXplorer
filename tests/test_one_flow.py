@@ -80,3 +80,44 @@ def test_every_operator_row_button_fits_its_text(view):
             f"{btn.text()!r}: sizeHint {btn.sizeHint().width()} px cannot fit its "
             f"{needed} px label")
         assert btn.minimumSizeHint().width() <= btn.sizeHint().width() + 1
+
+
+def test_an_roi_preview_runs_only_the_boxes_fovs_all_channels(qapp, napari_pane_stub):
+    """Julio (2026-08-25): "If I run decon on an ROI, it should run faster - this allows us
+    to run the decon on all channels, since we're able to run it on small subsets." The
+    existing ROI machinery IS the mechanism: with a box drawn, Preview scopes the run to the
+    mapping {region: [fov, ...]} of the FOVs the box touches (projection.scope_wells' own
+    spelling), the engine runs every channel of those FOVs, and delivery crops the result to
+    the box at its stage position (deliver_result's _crop_levels_to_bbox)."""
+    from squidxplorer._region_viewer import RegionViewer
+
+    frame, px = 16, 1.0
+    meta = {
+        "regions": ["A1"],
+        "channels": [{"name": "405"}, {"name": "488"}],
+        "z_levels": [0],
+        "n_z": 1,
+        "n_t": 1,
+        "dtype": "uint16",
+        "frame_shape": (frame, frame),
+        "pixel_size_um": px,
+        "dz_um": 1.5,
+        "fovs_per_region": {"A1": [0, 1, 2, 3]},
+        "fov_positions_um": {("A1", 0): (0.0, 0.0), ("A1", 1): (16.0, 0.0),
+                             ("A1", 2): (0.0, 16.0), ("A1", 3): (16.0, 16.0)},
+    }
+    calls: list = []
+    win = RegionViewer(None, meta, ["A1"], window_id=94,
+                       operator_specs=[("decon", "Deconvolution")],
+                       run_operator=lambda key, **kw: calls.append((key, kw)))
+    try:
+        win.operator_panel()
+        win._roi_bbox = (2.0, 2.0, 12.0, 12.0)     # inside FOV 0 only
+        win._btn_preview.click()
+        assert calls, "the ROI preview never launched"
+        _key, kw = calls[-1]
+        assert kw["save"] is False
+        assert kw["regions"] == {"A1": [0]}, (
+            f"the ROI preview did not narrow to the box's FOVs: {kw['regions']!r}")
+    finally:
+        win.dispose()
