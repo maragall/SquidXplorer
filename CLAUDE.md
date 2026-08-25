@@ -1129,6 +1129,30 @@ operators hidden by default and summoned, never a separate window.
   computed before the copy arm flips `save`, so a copy-writing save can never be
   z-cropped); the region arm refuses `z_level=` by name. The Preview tooltip carries the
   one honesty caption: the saved run's mid stack planes also gain from their neighbors.
+- **The operator PAGES and the decon QC sweep are shelved whole** (Julio, 2026-08-25: "You
+  should shelf those operator pages"; "The sweep code should be shelved. I can just run on
+  an ROI iteration by iteration."). Gone, grep-proven, absence-pinned
+  (tests/test_op_panels.py): StitcherPanel, DeconQCPanel, DeconQCResultView, its worker,
+  QCFrame, `stitch_operator_kwargs`/`stitch_refusal`, `_decon_qc.py` + tools/decon_qc.py
+  (the halo/core verdict went with them - it had no home without the sweep surface), the
+  `snapshot_iters` capture hook in `_decon._run`/`_decon_gpu.rl` (consumer-free after the
+  cut; matplotlib is unconditionally excluded from the frozen build again), and
+  `PlateWindow.publish_qc_result`. THE ONLY PARAMETER SURFACE is the inline slot under the
+  view's operators row: `GenericOperatorPanel` over the declaration - headline knobs plus
+  the disclosure labeled exactly "advanced parameters" (collapsed) - with the declared
+  `inner_param` drawn as a combo over the plane operators plus the keep-every-plane label
+  (`operator_inner_param` is the registry query). Kept as minimal elements, each
+  load-bearing: RegisterPanel's copy switch (not a Param: it cannot change preview
+  pixels), DeconPanel's NI row (the one PSF input no Squid file records; writes
+  `set_session_ni`), and the NON-operator illumination tab (the flat-field loader), the
+  one band page left. `_activate_operator` routes to the active view's inline slot
+  (`RegionViewer.show_operator_controls_for`) and refuses without a view;
+  `adopt_operator_panel` PARKS a released panel hidden (never a tab). The iteration
+  workflow is manual: draw an ROI, set the iterations spin, Preview, repeat.
+- **Verbosity strip** (Julio, 2026-08-25: "too many description and tooltips"): labels are
+  a word or two; tooltips at most ONE short sentence (`_param_panel._one_sentence` clips
+  declaration blurbs; the panels' title/description headers are gone; Operation blurbs are
+  one line). Refusals and warnings keep their full sentences in the LOG.
 - **The log diet**: INFO is for facts a user acts on; narration went to DEBUG (deep-zoom
   arming, preview cache/seed stats, bitdepth widening, cache pruning, measure_run's
   "starting" twin, 3D/gallery open+timing lines, well-image backfill skips). Kept INFO on

@@ -367,12 +367,12 @@ def test_controls_inserts_the_param_slot_under_the_operators_row(qapp, napari_pa
         assert v._param_slot.indexOf(panel) >= 0, "the panel is not in the view's param slot"
         assert win._left_tabs.indexOf(panel) == -1, "the panel is still a plate tab"
         # The values set IN THE SLOT are what a run reads: one source of truth.
-        panel.blend_spin.setValue(2)
-        assert win.operator_kwargs_for("stitch")["blend_px"] == 2
+        panel.widgets["registration_channel"].setValue(2)
+        assert win.operator_kwargs_for("stitch")["registration_channel"] == 2
         # The second click REMOVES the slot, and the panel survives (plate registry).
         v._show_operator_controls()
         assert v._inserted_panel is None
-        assert win._op_tabs["stitch"] is panel and panel.blend_spin.value() == 2
+        assert win._op_tabs["stitch"] is panel and panel.widgets["registration_channel"].value() == 2
     finally:
         shutdown_plate_window(qapp, win)
 
@@ -389,11 +389,11 @@ def test_a_disposed_view_releases_the_inserted_panel_alive(qapp, napari_pane_stu
                                    if combo.itemData(k) == "stitch"))
         v._show_operator_controls()
         panel = v._inserted_panel
-        panel.blend_spin.setValue(7)
+        panel.widgets["registration_channel"].setValue(7)
         v.dispose()
         qapp.processEvents()
         assert win._op_tabs["stitch"] is panel, "disposing the view lost the plate's panel"
-        assert panel.blend_spin.value() == 7, "the panel's state died with the view"
+        assert panel.widgets["registration_channel"].value() == 7, "the panel's state died with the view"
     finally:
         shutdown_plate_window(qapp, win)
 

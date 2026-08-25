@@ -307,6 +307,14 @@ def operator_params(name: str) -> tuple[Param, ...]:
     return _resolve_operator(name).params
 
 
+def operator_inner_param(name: str) -> "Optional[str]":
+    """The declared param naming *name*'s INNER operator (stitch's ``z_operator``), or None.
+
+    What lets a generated panel draw that one param as a combo over the plane operators
+    plus the keep-every-plane label, instead of a bare text field."""
+    return _resolve_operator(name).inner_param
+
+
 def operator_accepts(name: str) -> tuple[str, ...]:
     """Extra keyword arguments the operator's callable takes beyond its declared params."""
     return _resolve_operator(name).accepts

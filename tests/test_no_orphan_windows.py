@@ -66,9 +66,11 @@ def _ancestry(widget):
     return " -> ".join(chain)
 
 
-def test_a_published_qc_result_is_really_inside_the_window_and_really_visible(
-        qapp, squid_dataset):
-    from squidxplorer._op_panels import DeconQCResultView
+def test_a_band_tab_is_really_inside_the_window_and_really_visible(qapp, squid_dataset):
+    """The band's no-orphan/geometry guarantee, kept after the QC sweep's shelving
+    (2026-08-25): whatever opens as a band tab (the illumination loader is the one page
+    left) must be inside the window, on screen, with real geometry."""
+    from qtpy.QtWidgets import QLabel
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -77,8 +79,8 @@ def test_a_published_qc_result_is_really_inside_the_window_and_really_visible(
     win.ingest(str(root))
     qapp.processEvents()
 
-    view = DeconQCResultView("B2/0/c0")
-    win.publish_qc_result(view, "Decon QC · B2/0/c0")
+    view = QLabel("band probe")
+    win._open_op_tab("probe", "Band probe", lambda w=view: w)
     qapp.processEvents()
 
     ancestors = []

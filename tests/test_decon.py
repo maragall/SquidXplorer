@@ -552,26 +552,17 @@ def test_decon_over_an_nz1_acquisition_writes_a_one_plane_copy(tmp_path):
                                 DEFAULT_ITERATIONS, project=False)[0]
     np.testing.assert_array_equal(out, expected)
 
-# --- the QC sweep's capture: one solve, every iteration (2026-08-24) --------------------------
+# --- the QC sweep's capture hook is GONE (shelved with the sweep, 2026-08-25) -----------------
 
-def test_run_snapshot_iters_captures_every_iteration_of_one_solve(monkeypatch):
-    """petakit's snapshot_iters is the per-iteration hook: the sweep's LAST capture must be
-    the plain run's answer (same solve, not one solve per count), and earlier captures must
-    genuinely differ, or the stepper would page through copies."""
-    monkeypatch.setenv("SQUIDXPLORER_DECON_DEVICE", "cpu")
-    from squidxplorer._decon import _run
+def test_the_snapshot_capture_hook_is_gone_with_the_sweep():
+    """Julio: "The sweep code should be shelved. I can just run on an ROI iteration by
+    iteration." The per-iteration capture kwarg had no consumer left; absence is pinned."""
+    import inspect
 
-    psf = make_psf(FAST_OPTICS)
-    rng = np.random.default_rng(0)
-    volume = (rng.random((3, 32, 32)) * 100).astype(np.float32)
+    from squidxplorer import _decon, _decon_gpu
 
-    snaps = _run(volume, psf, 3, gpu=False, snapshot_iters=[1, 2, 3])
-    plain = _run(volume, psf, 3, gpu=False)
-
-    assert sorted(snaps) == [1, 2, 3]
-    assert np.allclose(snaps[3], plain, rtol=1e-5, atol=1e-4), (
-        "the sweep's final capture is not the plain run's answer")
-    assert not np.array_equal(snaps[1], snaps[3]), "iteration 1 equals iteration 3"
+    assert "snapshot_iters" not in inspect.signature(_decon._run).parameters
+    assert "snapshot_iters" not in inspect.signature(_decon_gpu.rl).parameters
 
 
 def test_iterations_is_a_declared_param_on_the_decon_registration():

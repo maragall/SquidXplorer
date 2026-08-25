@@ -667,30 +667,21 @@ class RegionViewer(QMainWindow):
         # NO 2D button (Julio, 2026-08-25: "There should not be 2D button since we make
         # separate tabs for the 3d view."): a 2D tab IS 2D and a 3D tab IS 3D; nothing
         # switches modes in place. The chip and `_view_roi_2d` are deleted whole.
-        self._btn_3d = self._chip("3D", "Open this view in 3D at NATIVE resolution (the region if it "
-                                  "fits the GPU texture, else draw an ROI to pick the spot). "
-                                  "Replaces this window's previous 3D view rather than adding "
-                                  "another window.",
-                                  self._open_3d)
-        self._btn_focus = self._chip("⌖ focus", "Jump the z-slider to the sharpest plane "
-                                     "(Tenengrad autofocus) of this region's centre FOV.",
+        self._btn_3d = self._chip("3D", "Open this view in 3D as a new tab.", self._open_3d)
+        self._btn_focus = self._chip("⌖ focus", "Jump the z-slider to the sharpest plane.",
                                      self._focus_reference_plane)
         # The "▣ plate" chip is GONE (UI feedback 2026-08-17): the working layout keeps the plate
         # BESIDE the views, so "bring the plate forward" stopped being a job. The ⚙ controls chip
         # is built in `operator_panel()` now — the whole per-window operator surface lives in the
         # views window's collapsible dock (2026-08-19).
         self._btn_record = self._chip(
-            "⏺ movie", "Export what this window is showing as an .mp4, sweeping the acquisition's "
-            "time axis (or its z axis when there is no time series). Runs off the UI thread; "
-            "click again to cancel.", self._record_movie)
+            "⏺ movie", "Export this view as an .mp4 over its time or z axis.",
+            self._record_movie)
         # The PNG export renders the DATA, never the canvas: a screenshot is screen resolution,
         # this is the visible layer's own pixels at native pitch (Julio: "a high-resolution
         # (i.e., zoom-able, high DPI) PNG for powerpoints").
         self._btn_png = self._chip(
-            "⎙ png", "Save what this window is showing as a high-resolution PNG: the visible "
-            "layer's own full-resolution pixels (long side capped at 8192 px), with the channels "
-            "that are visible and the contrast that is set - not a screenshot of the canvas. "
-            "Runs off the UI thread.", self._save_png)
+            "⎙ png", "Save this view as a full-resolution PNG.", self._save_png)
         # FOVs. The ROI chips beside it are for a box the user draws; this is for the boxes the
         # ACQUISITION already drew. On a sparse run — the AF sweep sets are 16 fields at 7x the
         # field pitch, so 3% of the mosaic is data — checking focus means visiting each field, and
@@ -701,11 +692,10 @@ class RegionViewer(QMainWindow):
         # paste reaches the PLATE through the automatic window → plate contrast tap, so the two
         # never disagree — see `_lut_clipboard.paste_luts`.
         self._btn_copy_luts = self._chip(
-            "⧉ copy LUTs", "Copy this window's per-channel look (contrast, colormap, which "
-            "channels are on) to the one LUT clipboard.", self._copy_luts)
+            "⧉ copy LUTs", "Copy this view's per-channel look.", self._copy_luts)
         self._btn_paste_luts = self._chip(
-            "⇩ paste LUTs", "Paste the LUT clipboard onto this window's channels. The plate "
-            "follows the same write, so plate and window contrast stay equal.", self._paste_luts)
+            "⇩ paste LUTs", "Paste the copied look onto this view and the plate.",
+            self._paste_luts)
         # One 3-column grid of equal-width chips: the ragged per-row HBoxes read as "poor
         # distribution of buttons" (Julio, live GUI 2026-08-19). The resting top row is
         # [ 3D ] [ ▭ ROI ] [ ▸ controls ], buttons sized to their text (Julio, 2026-08-25:
@@ -719,11 +709,10 @@ class RegionViewer(QMainWindow):
         grid = QGridLayout(); grid.setSpacing(4)
         chips = [
             self._btn_focus, self._btn_record, self._btn_png,
-            self._chip("⊙ select", "Select ROIs: click one, then press Delete to remove it.",
+            self._chip("⊙ select", "Click an ROI to select it; Delete removes it.",
                        self._select_rois),
             self._chip("✕ clear", "Remove all ROIs in this window.", self._clear_rois),
-            self._chip("→ window", "Open the drawn ROI(s) as child window(s) - the next "
-                       "level of the view tree.", self._open_roi_children),
+            self._chip("→ window", "Open the drawn ROIs as child views.", self._open_roi_children),
             self._btn_fovs,
             self._btn_copy_luts, self._btn_paste_luts,
         ]
@@ -780,7 +769,7 @@ class RegionViewer(QMainWindow):
         btn = getattr(self, "_btn_3d", None)
         if btn is not None and _alive(btn):
             btn.setEnabled(False)
-            btn.setToolTip("This tab IS the 3D view. Close the tab to go back to the 2D view.")
+            btn.setToolTip("This tab is the 3D view; close it to go back to 2D.")
 
     _AT_DEFAULTS_QSS = "color:#8b949e;font-size:10px;border:none;"
     _PROGRESS_QSS = (
@@ -838,16 +827,12 @@ class RegionViewer(QMainWindow):
         self._iter_spin.setStyleSheet(
             "QSpinBox{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
             "border-radius:4px;font-size:11px;padding:1px 2px;}")
-        self._iter_spin.setToolTip(
-            "The iteration count the Run button uses: the same number the plate's decon "
-            "controls and the QC sweep's 'use k iterations' button set.")
+        self._iter_spin.setToolTip("The iteration count the run uses.")
         self._iter_spin.setVisible(False)
         self._iter_spin.valueChanged.connect(self._on_quick_iterations)
         opr.addWidget(self._iter_spin)
         self._btn_controls = self._chip(
-            "⚙ controls", "Bring the plate window forward AND open the controls for the operator "
-            "this window is showing, so its parameters (iterations, thresholds) are one click "
-            "away. Says so when the window is showing raw pixels, which have none.",
+            "⚙ controls", "Insert the selected operator's parameters below.",
             self._show_operator_controls)
         opr.addWidget(self._btn_controls)
         # ONE FLOW, fewer buttons (Julio, 2026-08-25): "They can preview on the window...
@@ -856,10 +841,9 @@ class RegionViewer(QMainWindow):
         # nothing; Run on plate is THE save path (and the bulk path - the cards died with
         # the right-edge dock). The save checkbox is gone.
         self._btn_preview = self._chip(
-            "Preview", "Preview the selected operator on THIS view's regions; nothing is "
-            "written to disk. In a 2D tab a depth keeping operator previews only the z "
-            "plane in view; Run on plate processes the full stack, where mid stack planes "
-            "also gain from their neighbors.", self._preview_view_operator)
+            "Preview", "Previews this view, writing nothing; in a 2D tab a depth keeping "
+            "operator solves just the z in view, while Run on plate processes the full "
+            "stack.", self._preview_view_operator)
         opr.addWidget(self._btn_preview)
         self._btn_run_plate = self._chip(
             "Run on plate", self._RUN_PLATE_TIP, self._run_plate_operator)
@@ -1114,8 +1098,7 @@ class RegionViewer(QMainWindow):
             return
         self._refresh_controls_note()            # the note repeats what the run now gets
 
-    _RUN_PLATE_TIP = ("Run the selected operator over the plate selection (or the whole "
-                      "plate) and save the result to disk - the one save path.")
+    _RUN_PLATE_TIP = "Run on the plate selection and save to disk."
 
     def _refresh_save_tooltip(self, key) -> None:
         """The Run-on-plate chip says WHAT a save writes: a copy-saving operator's artifact
@@ -1149,6 +1132,23 @@ class RegionViewer(QMainWindow):
             log.warning("view %s could not read its layers' operators: %s: %s",
                         self.window_id, type(exc).__name__, exc)
             return []
+
+    def show_operator_controls_for(self, key: str) -> None:
+        """Select *key* in this view's dropdown and insert its controls inline: what the
+        plate's Process menu routes to now that the operator PAGES are shelved
+        (Julio, 2026-08-25)."""
+        combo = getattr(self, "_op_combo", None)
+        if combo is None:
+            self._say(f"this view has no operator row to host {key!r}.")
+            return
+        i = next((k for k in range(combo.count()) if combo.itemData(k) == str(key)), None)
+        if i is None:
+            self._say(f"{key!r} is not in this view's operator dropdown.")
+            return
+        combo.setCurrentIndex(i)
+        self.set_operators_collapsed(False)
+        if self._inserted_key != str(key) or self._inserted_panel is None:
+            self._show_operator_controls()
 
     def _show_operator_controls(self) -> None:
         """INSERT the selected operator's parameter panel into THIS view's param slot.
@@ -1773,10 +1773,7 @@ class RegionViewer(QMainWindow):
     #: The FOVs chip's own description, held apart from the per-region count appended to it. The
     #: count changes whenever the plate navigates this window somewhere else, so the two are
     #: joined at refresh time rather than the chip's tooltip being re-derived from its own text.
-    _FOVS_TIP = ("Open a child view that steps the camera through this region's FOVs one at a "
-                 "time, framed to fill the canvas - for checking focus field by field without "
-                 "zooming in and out. Press play on its FOV slider to walk them; the mosaic is "
-                 "loaded once, so stepping is instant.")
+    _FOVS_TIP = "Step through this region's FOVs one at a time."
 
     def _refresh_fovs_chip(self) -> None:
         """Enable the FOVs chip only when there are fields to walk, and SAY WHY when there are not.

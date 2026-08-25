@@ -1632,11 +1632,10 @@ class PlateWindow(QMainWindow):
         defect shape as `_workers._OperatorWorker`'s preview branch and `_command.EngineExecutor`'s,
         both fixed on 2026-08-05/06: two entry points to one run must pass the same arguments.
 
-        ONE READER, and it reads the PANEL rather than a copy of its values. Both panel families
-        already answer ``kwargs()`` -- the hand-written ones (``StitcherPanel``) and the ones
-        generated from an operator's declared ``params``
-        (``_param_panel.GenericOperatorPanel``) -- so this needs no per-operator case and a plugin's
-        operator is covered with no edit here.
+        ONE READER, and it reads the PANEL rather than a copy of its values. Every panel is
+        generated from the operator's declared ``params`` (``_param_panel``; the pages are
+        shelved, 2026-08-25) and answers ``kwargs()``, so this needs no per-operator case
+        and a plugin's operator is covered with no edit here.
 
         ``{}`` when the operator's tab has never been opened, which means "run with the declared
         defaults" and is exactly right: there is no panel, so there is nothing the user has set.
@@ -1658,14 +1657,6 @@ class PlateWindow(QMainWindow):
             log.warning("%s panel could not report its parameters: %s: %s",
                         key, type(exc).__name__, exc)
             return {}
-        # The stitcher's z handling lives on its own combo rather than in `kwargs()` (which is
-        # `stitch_region`'s keyword set). It is a PARAMETER of the run, so it is added here;
-        # the keep-every-plane label spells z_operator=None (`z_operator_choice`).
-        combo = getattr(panel, "z_operator_combo", None)
-        if combo is not None and "z_operator" not in kwargs:
-            from squidxplorer._op_panels import z_operator_choice
-
-            kwargs["z_operator"] = z_operator_choice(combo.currentText())
         return kwargs
 
     def operator_params_text(self, key: str) -> str:
@@ -1745,37 +1736,31 @@ class PlateWindow(QMainWindow):
             return f"{key}: {type(exc).__name__}: {exc}"
 
     def _activate_operator(self, key: str):
-        """Operator menu clicked: open the operator's UI as a plate tab.
+        """Operator menu clicked: put the operator's controls INLINE in the active view.
 
-        Two panel sources, in this order, and NEITHER of them is silent:
-
-        1. a HAND-WRITTEN panel, named by the ``Operation`` template's ``build_tab``
-           (``StitcherPanel`` converts units and refuses a plane-op; ``DeconQCPanel`` runs
-           the QC sweep inline), so they win.
-        2. otherwise a panel built FROM THE DECLARATION — :class:`squidxplorer._param_panel
-           .GenericOperatorPanel` over the operator's ``params``.
-
-        The right-edge dock and its cards are retired (2026-08-25); a view's ⚙ controls
-        inserts the SAME panel (``ensure_operator_panel`` + ``release_operator_panel``) into
-        that view's own left column. ONE live panel per key: the widget stays in
-        ``_op_tabs``, so ``operator_kwargs_for`` and app-exit disposal see it wherever it is
-        hosted, and this method re-tabs a panel a view currently holds.
+        The per-operator PAGES are shelved (Julio, 2026-08-25: "You should shelf those
+        operator pages"): the only parameter surface is the slot under a view's operators
+        row, so this selects *key* in the active view's dropdown and inserts its controls
+        there. The one page left is the NON-operator illumination tab (`illumination` is a
+        loader, not a run). With no view open the refusal names the fix.
         """
         if self._reader is None or self._overview is None:
             self._readout.setText("open an acquisition first")
             return
-        op = _OPERATIONS_BY_KEY.get(key)
-        if op is not None:
-            key, title, builder = op.key, op.label, getattr(self, op.build_tab)
+        if key == "illumination":
+            op = _OPERATIONS_BY_KEY.get(key)
+            self._open_op_tab(op.key, op.label, getattr(self, op.build_tab))
+            return
+        view = self._viewer_manager.active_view() if self._viewer_manager else None
+        if view is None:
+            self._readout.setText("open a view first: the operator controls live under "
+                                  "its operators row.")
+            return
+        show = getattr(view, "show_operator_controls_for", None)
+        if callable(show):
+            show(str(key))
         else:
-            from squidxplorer._param_panel import GenericOperatorPanel, panel_refusal
-
-            why = panel_refusal(key)
-            if why:
-                self._readout.setText(why)
-                return
-            title, builder = operator_label(key), (lambda k=key: GenericOperatorPanel(self, k))
-        self._open_op_tab(key, title, builder)
+            self._readout.setText(f"the active view cannot host {key!r}'s controls.")
 
     def release_operator_panel(self, key: str):
         """Detach *key*'s live panel from wherever it is hosted and hand it over.
@@ -1794,20 +1779,20 @@ class PlateWindow(QMainWindow):
         return panel
 
     def adopt_operator_panel(self, key: str) -> None:
-        """Take *key*'s live panel back as a plate tab when nothing else hosts it.
+        """PARK *key*'s live panel, hidden, when nothing else hosts it.
 
         The other half of :meth:`release_operator_panel`: a panel a view's param slot lets
         go of must never be left a parentless orphan (a deleteLater on one measured a
-        segfault in the next window's teardown), so removal hands it straight back here.
+        segfault in the next window's teardown). It used to come back as a plate TAB; the
+        operator pages are shelved (Julio, 2026-08-25), so it parks unseen until the next
+        insertion - still filed in ``_op_tabs``, still the run's single source of truth.
         """
         panel = (getattr(self, "_op_tabs", None) or {}).get(str(key))
         if panel is None or not _widget_alive(panel):
             return
-        if self._left_tabs.indexOf(panel) < 0:
-            panel.setMaximumHeight(16777215)     # undo the param slot's fixed-slot ceiling
-            self._left_tabs.addTab(panel, operator_label(str(key)))
-            panel.setVisible(True)
-        self._sync_left_tabs_visible()
+        panel.hide()
+        panel.setParent(self)                    # parked, never parentless
+        panel.setMaximumHeight(16777215)         # undo the param slot's fixed-slot ceiling
 
     # -- ONE WINDOW: the plate VIEW and the LOG render as slots in the view window ---------------
     # Julio (2026-08-25): "this refactor enables us to have only one window." The books stay
@@ -1916,19 +1901,13 @@ class PlateWindow(QMainWindow):
         return GenericOperatorPanel(self, "mip")
 
     def _build_stitch_tab(self) -> QWidget:
-        """maragall/stitcher's control surface, in pane 1 (IMA-decon-stitch-ui).
+        # The PAGES are shelved (Julio, 2026-08-25): stitch's controls are its declaration,
+        # drawn by the generic form (the z-handling param renders as a combo with the
+        # keep-every-plane label; registration_channel/_t and correct_illumination sit
+        # behind "advanced parameters"). StitcherPanel is gone whole.
+        from squidxplorer._param_panel import GenericOperatorPanel
 
-        This used to be `_build_run_tab` -- a destination picker and a "first N wells"
-        spinner, with NO stitcher controls at all. Julio: "Right now I'm blocked in testing
-        the post-processing because Stitcher doesn't have that maragall/Stitcher interface
-        embedded in our top-left subpane." What a user tunes on a registration/fusion run
-        (registration on/off, registration channel, feather width, blunder thresholds,
-        which channels to fuse) now lives in `_op_panels.StitcherPanel` and travels to both
-        the preview and the saved run through `operator_kwargs`.
-        """
-        from squidxplorer._op_panels import StitcherPanel
-
-        return StitcherPanel(self)
+        return GenericOperatorPanel(self, "stitch")
 
     def _build_register_tab(self) -> QWidget:
         # The declared params plus the copy switch; the registered copy is the disk artifact.
@@ -1937,17 +1916,12 @@ class PlateWindow(QMainWindow):
         return RegisterPanel(self)
 
     def _build_decon_tab(self) -> QWidget:
-        """The RL semi-convergence sweep's controls (IMA-252 + IMA-decon-stitch-ui).
+        # The QC sweep is shelved whole (Julio, 2026-08-25: "The sweep code should be
+        # shelved. I can just run on an ROI iteration by iteration."): iterations headline
+        # plus the NI row, and the user steps iterations by hand with ROI previews.
+        from squidxplorer._param_panel import DeconPanel
 
-        The picture the sweep produces -- the deconvolved image in turbo with the x-z and y-z
-        strips, steppable iteration by iteration -- lives INLINE in the panel (2026-08-24), so
-        the whole choose-the-iteration loop travels with the panel into the operator dock. It
-        was `_build_plane_op_tab` (a preview button and nothing else), which gave no way to
-        choose an iteration count at all.
-        """
-        from squidxplorer._op_panels import DeconQCPanel
-
-        return DeconQCPanel(self)
+        return DeconPanel(self)
 
     # -- the host surface the pane-1 operator panels use -----------------------------------
     #
@@ -1959,20 +1933,8 @@ class PlateWindow(QMainWindow):
         if text:
             self._run_readout(text)
 
-    def publish_qc_result(self, widget: QWidget, title: str) -> None:
-        """Show *widget* as a result tab beside the operators, and bring it to the front.
-
-        THE seam between an operator panel and the window. Keyed by title, so re-running the same
-        subject reuses its tab instead of stacking one per iteration.
-
-        IT LANDS IN `_left_tabs`, WHICH IS ON SCREEN. It used to go to the exploration pane's tab
-        bar, and for six weeks after 2b8fbc5 that bar had no parent at all: the decon QC composite
-        — the turbo x-y / x-z / y-z picture the whole iterate-and-look loop exists for — was
-        computed, put in a tab, and shown to nobody. Pressing Run silently produced nothing the
-        user could see. The pane is gone now, and the result goes where the controls that asked
-        for it already are.
-        """
-        self._open_op_tab(f"qc:{title}", title, lambda w=widget: w)
+    # publish_qc_result is DELETED with the QC sweep (Julio, 2026-08-25): no operator
+    # publishes a result tab any more; a preview lands as a data layer in the asking view.
 
     def _build_illumination_tab(self) -> QWidget:
         """The illumination-profile loader and estimator THAT FEED STITCH.

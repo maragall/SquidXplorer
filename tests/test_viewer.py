@@ -1139,14 +1139,16 @@ def test_a_preview_that_cannot_read_names_the_failure_instead_of_freezing_the_pl
     assert ended                                     # the plate still recomposites what it has
 
 
-def test_operator_tab_opened_twice_is_one_tab(qapp, squid_dataset):
+def test_activating_an_operator_opens_no_plate_tab(qapp, squid_dataset):
+    """The operator PAGES are shelved (Julio, 2026-08-25): activation routes to the active
+    view's inline slot; with no view open it refuses by name and the tab bar stays empty."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
     n0 = win._left_tabs.count()
     win._activate_operator("mip")
-    win._activate_operator("mip")
-    assert win._left_tabs.count() == n0 + 1
+    assert win._left_tabs.count() == n0, "an operator page opened as a plate tab"
+    assert "open a view" in win._readout.text(), win._readout.text()
     win.close()
 
 
@@ -2841,66 +2843,55 @@ def test_loading_a_profile_installs_one_field_per_channel_not_plane_zero(qapp, s
 
 
 
-def test_the_decon_card_is_the_iteration_qc_panel_not_a_bare_preview(qapp,
-                                                                    squid_dataset):
-    from squidxplorer._decon import QC_START_ITERATIONS
-    from squidxplorer._op_panels import DeconQCPanel
+def test_the_decon_panel_is_iterations_plus_ni_no_sweep(qapp, squid_dataset):
+    """The QC sweep is shelved (Julio, 2026-08-25): decon's inline panel is the declared
+    iterations plus the NI row, and no sweep control survives on it."""
+    from squidxplorer._param_panel import DeconPanel
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    op = V._OPERATIONS_BY_KEY["decon"]
-    win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
-    qapp.processEvents()
-    tab = win._op_tabs["decon"]
-    assert isinstance(tab, DeconQCPanel)
-    assert tab.iter_spin.value() == QC_START_ITERATIONS
-    assert [b for b in tab.findChildren(QPushButton) if b.text() == "+1 iteration"]
-    assert not [b for b in tab.findChildren(QPushButton)
-                if "illumination profile" in b.text()], "decon grew a profile chooser"
+    tab = win.ensure_operator_panel("decon")
+    assert isinstance(tab, DeconPanel)
+    assert "iterations" in tab.widgets and hasattr(tab, "ni_spin")
+    assert not [b for b in tab.findChildren(QPushButton) if "iteration" in b.text().lower()], (
+        "a sweep stepper survived on the decon panel")
     win.close()
 
 
-def test_the_stitch_card_is_the_stitcher_control_surface(qapp, squid_dataset):
-    from squidxplorer._op_panels import StitcherPanel
+def test_the_stitch_panel_is_generated_from_the_declaration(qapp, squid_dataset):
+    from squidxplorer._op_panels import KEEP_EVERY_PLANE
+    from squidxplorer._param_panel import GenericOperatorPanel
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    op = V._OPERATIONS_BY_KEY["stitch"]
-    win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
-    qapp.processEvents()
-    tab = win._op_tabs["stitch"]
-    assert isinstance(tab, StitcherPanel)
-    assert tab.register_cb.isChecked()
-    assert tab.reg_channel_combo.count() == len(win._meta["channels"])
-    assert not hasattr(tab, "scope_combo")      # Defect 2: the run selector owns scope
+    tab = win.ensure_operator_panel("stitch")
+    assert isinstance(tab, GenericOperatorPanel)
+    assert tab.widgets["register"].isChecked(), "register defaults ON in the declaration"
+    combo = tab.widgets["z_operator"]
+    assert combo.findText(KEEP_EVERY_PLANE) >= 0
     win.close()
 
 
-def test_the_stitcher_panel_kwargs_reach_the_worker(qapp, squid_dataset):
+def test_the_declared_stitch_kwargs_reach_the_worker(qapp, squid_dataset):
     """One flow: the operators row reads the panel via operator_kwargs_for; the same dict
     reaches the worker."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    op = V._OPERATIONS_BY_KEY["stitch"]
-    win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
-    tab = win._op_tabs["stitch"]
-    # The fixture's frames are tiny, so pick a feather that fits inside them — the panel
-    # refuses a ramp as wide as the tile, asserted separately below.
-    tab.blend_spin.setValue(2)
-    tab.rel_spin.setValue(25)
+    tab = win.ensure_operator_panel("stitch")
+    tab.widgets["registration_channel"].setValue(1)
     win.run_operator("stitch", regions=None, save=False,
                      operator_kwargs=win.operator_kwargs_for("stitch"))
     qapp.processEvents()
     assert win._worker is not None, f"the run did not start: {win._readout.text()}"
-    assert win._worker._operator_kwargs["blend_px"] == 2
-    assert win._worker._operator_kwargs["rel_thresh"] == 0.25
+    assert win._worker._operator_kwargs["registration_channel"] == 1
+    assert "z_operator" in win._worker._operator_kwargs
     win._stop_worker(); win.close()
 
 
-def test_an_impossible_feather_is_refused_at_kwargs_read_never_swallowed(
+def test_a_panel_refusal_propagates_out_of_the_kwargs_read_never_swallowed(
         qapp, squid_dataset):
     """The panel's refusal PROPAGATES out of operator_kwargs_for (swallowing it ran the
     defaults while every control on screen said otherwise) and the one-line summary a view
@@ -2908,14 +2899,17 @@ def test_an_impossible_feather_is_refused_at_kwargs_read_never_swallowed(
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    op = V._OPERATIONS_BY_KEY["stitch"]
-    win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
-    tab = win._op_tabs["stitch"]
-    tab.blend_spin.setValue(999)
+
+    class _RefusingPanel:
+        def kwargs(self):
+            raise ValueError("blend 999 px is wider than the tile")
+
+    win._op_tabs["stitch"] = _RefusingPanel()
     with pytest.raises(ValueError, match="blend"):
         win.operator_kwargs_for("stitch")
     assert "blend" in win.operator_params_text("stitch").lower()
     assert win._worker is None, "reading the panel started a run"
+    win._op_tabs.pop("stitch", None)
     win.close()
 
 
@@ -2965,804 +2959,11 @@ def test_panel_kwargs_reach_the_fused_writer_on_the_SAVE_path(qapp, squid_datase
     win._stop_worker(); win.close()
 
 
-def test_a_decon_qc_result_opens_as_a_tab_beside_the_operators(qapp, squid_dataset):
-    """Went unreachable for six weeks when routed to the exploration pane's bar, which was in no layout."""
-    from squidxplorer._op_panels import DeconQCResultView
-
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    view = DeconQCResultView("B2/0/c0")
-    win.publish_qc_result(view, "Decon QC · B2/0/c0")
-    qapp.processEvents()
-    assert win._left_tabs.indexOf(view) >= 0, "the QC result did not land beside the operators"
-    before = win._left_tabs.count()
-    # Publishing the SAME subject again must reuse its tab; a DIFFERENT widget proves it, since keying on anything unique-per-call would stack a new tab on every QC iteration.
-    win.publish_qc_result(DeconQCResultView("B2/0/c0"), "Decon QC · B2/0/c0")
-    qapp.processEvents()
-    assert win._left_tabs.count() == before, "a second tab was stacked for the same subject"
-    assert win._left_tabs.indexOf(view) >= 0, "the original tab was replaced, not reused"
-    # A DIFFERENT subject does get its own tab.
-    win.publish_qc_result(DeconQCResultView("B3/0/c0"), "Decon QC · B3/0/c0")
-    qapp.processEvents()
-    assert win._left_tabs.count() == before + 1
-    win.close()
-
-
-
-def _run_live(qapp, win, key, regions=("B3",)):
-    """Drives a real preview run to completion and returns the tiles that reached the plate."""
-    tiles = []
-    win.run_operator(key, regions=list(regions), save=False)
-    if win._worker is None:
-        return None
-    win._worker.tileReady.connect(lambda *a: tiles.append(a))
-    t0 = time.time()
-    while win._worker.isRunning() and time.time() - t0 < 90:
-        qapp.processEvents(); time.sleep(0.02)
-    for _ in range(25):
-        qapp.processEvents(); time.sleep(0.02)
-    return tiles
-
-
-@pytest.mark.parametrize("key", [
-    "mip",
-    pytest.param("stitch", marks=_needs("tilefusion")),
-    pytest.param("decon", marks=_needs("petakit")),
-])
-def test_every_operator_streams_live_to_the_plate(qapp, squid_dataset, key):
-    """reference and coordinate had no card, so run_operator raised a bare KeyError and couldn't stream live at all."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    tiles = _run_live(qapp, win, key)
-    assert tiles is not None, f"{key}: no worker started — {win._readout.text()!r}"
-    assert tiles, f"{key}: nothing reached the PLATE — {win._readout.text()!r}"
-    assert win._active_op_key == key, f"{key} streamed into layer {win._active_op_key!r}"
-    assert win._readout.text().startswith("✓"), win._readout.text()
-    # Checked for the per-FOV operators only: on this 4x4-frame fixture a region operator's blend weights divide by zero and the fused mosaic comes back NaN -> 0, which is the fixture's degenerate geometry, not the stream.
-    if key != "stitch":
-        assert any(np.asarray(t[3]).any() for t in tiles), f"{key} streamed all-zero tiles"
-    win._stop_worker(); win.close()
-
-
-def test_a_shelved_operator_key_is_refused_by_name_not_run(qapp, squid_dataset):
-    """flatfield (with its auto-estimate arm), bgsub, spot, cellpose, reference, keepz and
-    coordinate are shelved (2026-08-24): running one is the registry's named refusal, and no
-    worker or estimate starts."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    for key in ("flatfield", "bgsub", "spot", "cellpose", "reference", "keepz", "coordinate"):
-        win.run_operator(key, out_parent=None)
-        assert win._worker is None, f"a worker started for shelved key {key!r}"
-        assert key in win._readout.text(), (
-            f"the refusal for {key!r} does not name it: {win._readout.text()!r}")
-    assert getattr(win, "_ff_est_worker", None) is None, (
-        "the deleted flatfield auto-estimate arm ran")
-    win.close()
-
-
-def test_run_operator_refuses_a_non_operator_by_name(qapp, squid_dataset):
-    """A key the engine never registered used to die with a raw KeyError in the status line."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win.run_operator("no_such_op", regions=["B3"], save=False)
-    assert win._worker is None, "a non-operator started a run"
-    assert "not a runnable operator" in win._readout.text()
-    assert "KeyError" not in win._readout.text(), "raw engine exception leaked into the UI"
-    win.close()
-
-
-
-
-
-def _montage_px(qapp, ov):
-    """The active layer's montage pixels, cropped — a whole-widget grab includes chrome that swamps layer differences."""
-    ov.recomposite(ov._active); qapp.processEvents()
-    img = ov._active_source()
-    a = np.frombuffer(img.constBits().asstring(img.sizeInBytes()), np.uint8)
-    a = a.reshape(img.height(), img.bytesPerLine() // (img.depth() // 8), -1)
-    return a[:, :img.width(), :].copy()
-
-
-def _run_to_completion(qapp, win, key, regions):
-    win.run_operator(key, regions=regions, save=False)
-    t0 = time.time()
-    while win._worker is not None and win._worker.isRunning() and time.time() - t0 < 90:
-        qapp.processEvents(); time.sleep(0.02)
-    for _ in range(25):
-        qapp.processEvents(); time.sleep(0.02)
-
-
-def _layer_rows(win):
-    """{layer label -> (checkbox, up, dn)} from the REAL Layers tab."""
-    lw = win._op_tabs["layers"]
-    rows = {}
-    for cb in lw.findChildren(QCheckBox):
-        row = cb.parentWidget()
-        ups = [b for b in row.findChildren(QPushButton)]
-        rows[cb.text()] = (cb, ups[0], ups[1])
-    return rows
-
-
-def test_layer_toggle_gives_back_raw_mip_and_stitched(qapp, squid_dataset):
-    """Every operator is a layer; raw must be recoverable by toggling, never destroyed."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    _drain_until(qapp, lambda: len(win._overview._tiles) >= 2)
-    ov = win._overview
-    raw_before = _montage_px(qapp, ov)
-
-    for key in ("mip", "stitch"):
-        _run_to_completion(qapp, win, key, ["B2", "B3"])
-    assert [ly.key for ly in win._op_stack.layers()] == ["raw", "mip", "stitch"]
-    assert ov._active == "stitch"
-    stitched = _montage_px(qapp, ov)
-
-    win._open_op_tab("layers", "Layers", win._build_layers_tab)
-    qapp.processEvents()
-    rows = _layer_rows(win)
-
-    # untick the top transform -> the one underneath shows. Nothing was destroyed to get there.
-    rows["Stitch (register + fuse)"][0].setChecked(False)
-    qapp.processEvents()
-    assert ov._active == "mip", f"unticking stitch showed {ov._active!r}"
-    mip_px = _montage_px(qapp, ov)
-    assert not np.array_equal(mip_px, stitched), "the MIP layer renders the stitched pixels"
-
-    # untick that too -> back to the RAW, byte for byte. This is the whole contract.
-    rows["Maximum Intensity Projection"][0].setChecked(False)
-    qapp.processEvents()
-    assert ov._active == "raw", f"unticking every transform showed {ov._active!r}"
-    assert win._plate_mode == "raw"
-    raw_after = _montage_px(qapp, ov)
-    assert raw_after.shape == raw_before.shape
-    assert np.array_equal(raw_after, raw_before), \
-        "the raw acquisition was not recovered by toggling — a transform destroyed it"
-    assert not np.array_equal(raw_after, mip_px), "raw and MIP render identical pixels"
-
-    # and re-ticking brings the transform straight back: the layers kept their pixels
-    rows["Maximum Intensity Projection"][0].setChecked(True)
-    qapp.processEvents()
-    assert ov._active == "mip"
-    assert np.array_equal(_montage_px(qapp, ov), mip_px), "re-enabling a layer lost its pixels"
-    win.close()
-
-
-def test_the_base_layer_can_be_neither_disabled_nor_reordered(qapp, squid_dataset):
-    """toggle('raw', False) used to leave the plate painting the last operator with every checkbox off, and move('raw', +1) let the base be reordered above an operator."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    _drain_until(qapp, lambda: len(win._overview._tiles) >= 2)
-    _run_to_completion(qapp, win, "mip", ["B2", "B3"])
-    win._open_op_tab("layers", "Layers", win._build_layers_tab)
-    qapp.processEvents()
-    rows = _layer_rows(win)
-    raw_cb, raw_up, raw_dn = next(v for k, v in rows.items() if k.startswith("raw"))
-
-    # the controls SAY it, rather than accepting a click the model then ignores
-    assert not raw_cb.isEnabled() and raw_cb.isChecked(), "the base layer's checkbox is clickable"
-    assert not raw_up.isEnabled() and not raw_dn.isEnabled(), "the base layer can be reordered"
-
-    # ...and the model enforces it even when driven directly
-    win._on_layer_toggle("raw", False)
-    assert win._op_stack.top_enabled() is not None, "every layer got disabled"
-    assert [ly for ly in win._op_stack.layers() if ly.key == "raw"][0].enabled
-    win._on_layer_move("raw", +1)
-    assert [ly.key for ly in win._op_stack.layers()][0] == "raw", "the base moved off the bottom"
-    win._on_layer_move("mip", -1)
-    assert [ly.key for ly in win._op_stack.layers()] == ["raw", "mip"], \
-        "an operator was pushed below the base"
-    assert win._overview._active == "mip"
-    win.close()
-
-
-def test_layer_reorder_changes_what_the_plate_shows(qapp, squid_dataset):
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    _drain_until(qapp, lambda: len(win._overview._tiles) >= 2)
-    for key in ("mip", "stitch"):
-        _run_to_completion(qapp, win, key, ["B2", "B3"])
-    ov = win._overview
-    win._open_op_tab("layers", "Layers", win._build_layers_tab)
-    qapp.processEvents()
-    assert ov._active == "stitch"
-    stitched = _montage_px(qapp, ov)
-
-    _layer_rows(win)["Maximum Intensity Projection"][1].click()   # the ↑ GESTURE
-    qapp.processEvents()
-    assert [ly.key for ly in win._op_stack.layers()] == ["raw", "stitch", "mip"]
-    assert ov._active == "mip", f"MIP moved to the top but the plate shows {ov._active!r}"
-    assert not np.array_equal(_montage_px(qapp, ov), stitched), \
-        "the reorder changed the stack but not the plate"
-    win.close()
-
-
-
-
-def test_previewing_a_subset_leaves_the_wells_outside_it_showing(qapp, squid_dataset):
-    """Previewing an operator on one region used to clear thumbnails for every well, not just the ones being processed."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    _drain_until(qapp, lambda: len(win._overview._tiles) >= 2)
-    ov = win._overview
-    b2, b3 = win._fov_index["B2"]["rc"], win._fov_index["B3"]["rc"]
-    assert {b2, b3} <= ov._tiles_by_layer["raw"], "the raw preview did not fill both wells"
-
-    _run_to_completion(qapp, win, "mip", ["B2"])
-
-    assert ov._active == "mip" and ov._tiles_by_layer["mip"] == {b2}   # the run covered B2 only
-    assert b3 in ov.shown_cells(), "B3 was not in the run and lost its thumbnail anyway"
-    assert ov.underlay_cells() == {b3}
-    win._stop_worker(); win.close()
-
-
-def test_dropping_a_layer_frees_its_store_and_composite(qapp, squid_dataset):
-    """~95MB per layer lives in _store/_final_arr; dropping only the canvas leaks most of the memory."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    _drain_until(qapp, lambda: len(win._overview._tiles) >= 2)
-    _run_to_completion(qapp, win, "mip", ["B2", "B3"])
-    ov = win._overview
-    ov.recomposite("mip"); qapp.processEvents()
-    for d in ("_store", "_final_arr", "_op_canvas", "_op_final", "_tiles_by_layer"):
-        assert "mip" in getattr(ov, d), f"mip never reached {d}"
-    ov.drop_layer("mip")
-    for d in ("_store", "_final_arr", "_op_canvas", "_op_final", "_tiles_by_layer"):
-        assert "mip" not in getattr(ov, d), f"drop_layer leaked {d}['mip']"
-    assert ov._active == "raw", "dropping the shown layer left the plate on it"
-    assert "raw" in ov._store, "dropping a layer took the raw with it"
-    win.close()
-
-
-
-_NONSQUARE_YAML = """\
-version: 1
-objective: 20x
-channels:
-- name: Fluorescence 638 nm - Penta
-  camera_settings:
-    '1':
-      display_color: '#FF0000'
-      exposure_time_ms: 50.0
-"""
-
-_NONSQUARE_ACQ_YAML = """\
-objective:
-  pixel_size_um: 0.325
-  magnification: 20.0
-  sensor_pixel_size_um: 3.76
-sample:
-  wellplate_format: 1536 well plate
-z_stack:
-  nz: 1
-  delta_z_mm: 0.0015
-time_series:
-  nt: 1
-"""
-
-
-@pytest.fixture
-def nonsquare_mosaic_dataset(tmp_path):
-    """A real stitchable acquisition whose mosaic is deliberately non-square (frame 256x256, mosaic 456x656), so a viewer sized as a frame vs sized as the mosaic gives different, distinguishable numbers. Returns (root, region, frame_px, mosaic_extent_px)."""
-    import json
-
-    import tifffile
-
-    frame, step, cols, rows = 256, 200, 3, 2
-    region, ch = "B2", CH_IN_YAML
-    mh, mw = step * (rows - 1) + frame, step * (cols - 1) + frame     # 456 x 656
-    rng = np.random.default_rng(245)
-    source = rng.integers(0, 4000, size=(mh, mw), dtype=np.uint16)
-
-    folder = tmp_path / "acq_nonsquare" / "0"
-    folder.mkdir(parents=True)
-    px_um, lines = 0.325, ["region,x (mm),y (mm),z (mm)"]
-    for r in range(rows):
-        for c in range(cols):
-            fov = r * cols + c
-            top, left = r * step, c * step
-            tifffile.imwrite(folder / f"{region}_{fov}_0_{ch}.tiff",
-                             source[top:top + frame, left:left + frame])
-            # stage mm: px -> um -> mm. The reader turns these back into fov_positions_um, which is what _placement lays the mosaic out from.
-            lines.append(f"{region},{left * px_um / 1000.0},{top * px_um / 1000.0},")
-    root = tmp_path / "acq_nonsquare"
-    (root / "acquisition_channels.yaml").write_text(_NONSQUARE_YAML)
-    (root / "acquisition.yaml").write_text(_NONSQUARE_ACQ_YAML)
-    (root / "acquisition parameters.json").write_text(
-        json.dumps({"Nz": 1, "Nt": 1, "dz(um)": 1.5,
-                    "objective": {"magnification": 20.0}, "sensor_pixel_size_um": 3.76}))
-    (root / "coordinates.csv").write_text("\n".join(lines) + "\n")
-    return root, region, frame, (mh, mw)
-
-
-
-
-# The part of IMA-245 about the plate CELL — a fused mosaic landing exactly where the raw mosaic does — is content_box, asserted below.
-
-
-# A region operator has no per-FOV sub-boxes (the fused mosaic IS the cell), so it took the box=None branch that resizes to exactly (_CELL, _CELL) — stretching the mosaic off its own aspect ratio and off the raw cell's centred band.
-
-def test_a_stitched_cell_lands_exactly_where_the_raw_cell_does(
-        qapp, nonsquare_mosaic_dataset):
-    from functools import reduce
-
-    from squidxplorer import available_region_operators
-
-    root, region, _frame_px, (mh, mw) = nonsquare_mosaic_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-
-    # RAW: the union of the boxes `cell_boxes` puts this region's FOVs in — what the preview paints.
-    raw = reduce(V._box_union,
-                 [b for (r, _f), b in V._mosaic_boxes(win._meta).items() if r == region], None)
-    assert raw != (0, 0, V._CELL, V._CELL), \
-        "the fixture stopped being non-square: it must letterbox, or this test proves nothing"
-
-    for op in available_region_operators():
-        w = V._OperatorWorker(op, win._reader, win._meta, win._fov_index, "",
-                              regions=[region], save=False, n_fovs=None)
-        assert w.mosaic_boxes == {}, "a region operator has no per-FOV sub-boxes; that is the trap"
-        got: list = []
-        w.tileReady.connect(lambda *a: got.append(a))
-        # One fused mosaic per region, the shape the region loop yields: (T, C, 1, Y, X).
-        fused = np.zeros((1, len(win._meta["channels"]), 1, mh, mw), win._meta["dtype"])
-        w._on_well(region, 0, fused)
-        _ri, _ci, _wid, tile, box = got[0]
-        assert box == raw, f"{op!r} paints its cell at {box}, the raw preview at {raw}"
-        assert tile.shape[1:] == (raw[2], raw[3]), \
-            f"{op!r} emitted a {tile.shape[1:]} tile for a {raw[2]}x{raw[3]} box"
-        # And the warp itself, named: the cell's aspect ratio is the mosaic's, not 1:1.
-        assert abs(box[3] / box[2] - mw / mh) < 0.05
-    win.close()
-
-
-def test_content_box_is_a_no_op_on_a_square_field(qapp):
-    """content_box replaced _fit_cell on the whole-cell branch; guards that the fix costs nothing on the historical single-FOV path."""
-    assert V.content_box((2084, 2084)) == (0, 0, V._CELL, V._CELL)
-    assert V.content_box((37, 37)) == (0, 0, V._CELL, V._CELL)
-    # Wider than tall -> full width, centred vertically. Never taller than the cell.
-    top, left, h, w = V.content_box((100, 400))
-    assert (left, w) == (0, V._CELL) and h == V._CELL // 4 and top == (V._CELL - h) // 2
-
-
-
-
-# Measured on the montage, never a whole-widget grab: labels, grid and status dots keep whole-frame variance high enough that a widget-level check would pass against a blank montage.
-
-def _region_crop(ov, region):
-    """The rendered pixels of ONE region's cell — its own rectangle, not a grid square."""
-    rc = next(k for k, v in ov._by_rc.items() if v == region)
-    return _grab_bgr(ov)[_cell_slices(ov, rc)]
-
-
-def test_ima253_real_tissue_previews_both_regions_as_mosaics_before_any_operator_runs(
-        qapp, real_dataset):
-    """Before the fix, boxes were 0 and each region showed one frame stretched over its cell, because set_mosaic_boxes was only reachable from run_operator."""
-    win = V.PlateWindow(None)
-    win.ingest(str(real_dataset))
-    ov = win._overview
-    assert len(ov._boxes) == 55, (
-        f"the mosaic geometry is pure arithmetic on coordinates.csv and is known at ingest, but "
-        f"only {len(ov._boxes)} boxes reached the plate. This is IMA-249: the boxes existed and "
-        f"were never handed to the widget until an operator ran.")
-    per_region: dict = {}
-    for region, _fov in ov._boxes:
-        per_region[region] = per_region.get(region, 0) + 1
-    assert per_region == {"manual0": 27, "manual1": 28}, per_region
-
-    # ...and the preview really composites all of them, rather than one frame per region.
-    assert _drain_until(qapp, lambda: win._preview is None or not win._preview.isRunning(), 180)
-    assert win._worker is None, "no operator ran; the mosaic must be there without one"
-    for region in ("manual0", "manual1"):
-        crop = _region_crop(ov, region)
-        assert crop.size and crop.std() > 3, f"{region} renders blank/uniform (std {crop.std():.2f})"
-    win.close()
-
-
-def test_ima253_preview_plan_reads_every_fov_of_a_region_but_only_one_of_a_single_fov_well(
-        qapp, real_dataset, squid_dataset):
-    from squidxplorer import open_reader
-
-    meta = open_reader(str(real_dataset)).metadata
-    idx = {r: {"rc": (i, 0), "idx": i} for i, r in enumerate(meta["regions"])}
-    plan = W._PreviewWorker(None, meta, idx, list(meta["regions"]))._plan()
-    assert len(plan) == 55, f"the preview reads {len(plan)} planes/channel, not 55"
-    assert all(box is not None for _r, _f, box in plan)
-
-    root, _ = squid_dataset                       # 2 FOVs/region, but specks apart on this fixture
-    m2 = open_reader(str(root)).metadata
-    idx2 = {r: {"rc": (i, 0), "idx": i} for i, r in enumerate(m2["regions"])}
-    plan2 = W._PreviewWorker(None, m2, idx2, list(m2["regions"]))._plan()
-    assert all(box is None for _r, _f, box in plan2), \
-        "sub-_MIN_PREVIEW_BOX_PX fields are specks: reading one plane each is cost with no picture"
-
-
-def test_ima253_real_tissue_regions_are_laid_out_by_geometry_in_even_non_overlapping_cells(
-        qapp, real_dataset):
-    """even_carrier_layout replaced stage-proportional placement (which stacked regions into a tall, tiny column); still guarded: placement follows geometry, not enumeration order, and cells never overlap."""
-    from squidxplorer._plate import even_carrier_layout, region_stage_boxes_um
-
-    win = V.PlateWindow(None)
-    win.ingest(str(real_dataset))
-    ov = win._overview
-    assert ov._layout is not None, "a freeform holder must be placed by geometry"
-    boxes = region_stage_boxes_um(win._meta)          # the SAME key the carrier orders cells by
-    assert boxes and boxes["manual0"][0] < boxes["manual1"][0], (
-        f"fixture assumption broken: manual0 is no longer the lower stage x ({boxes})")
-
-    r0 = ov._cell_rect(*next(k for k, v in ov._by_rc.items() if v == "manual0"))
-    r1 = ov._cell_rect(*next(k for k, v in ov._by_rc.items() if v == "manual1"))
-
-    # 1. geometry, not enumeration order: the lower stage x renders further left.
-    assert r1[0] > r0[0], "manual1 is further +x than manual0, as the stage records"
-    # Geometry, not enumeration order: the lower stage x renders further left; reversing the reported order cannot move a cell, since the ordering key is the stage box, not the report order.
-    fwd = even_carrier_layout(["manual0", "manual1"], order_key=boxes)
-    rev = even_carrier_layout(["manual1", "manual0"], order_key=boxes)
-    assert fwd == rev, "the carrier layout follows enumeration order, not stage geometry"
-    assert fwd[2]["manual0"][1] < fwd[2]["manual1"][1] or fwd[2]["manual0"][0] < fwd[2]["manual1"][0]
-
-    # 2. equal cells that do not overlap. Rectangles are (x, y, w, h).
-    assert r0[2] == pytest.approx(r1[2], rel=0.02)
-    assert r0[3] == pytest.approx(r1[3], rel=0.02)
-    sep_x = r1[0] >= r0[0] + r0[2] or r0[0] >= r1[0] + r1[2]
-    sep_y = r1[1] >= r0[1] + r0[3] or r0[1] >= r1[1] + r1[3]
-    assert sep_x or sep_y, (
-        f"the two tissue cells overlap: {r0} / {r1} — this is the 'squares overlapped with each "
-        "other under different regions' the even carrier exists to prevent")
-    win.close()
-
-
-def test_ima253_shuffling_the_region_names_does_not_move_anything(qapp, real_dataset):
-    """Reversing the acquisition's region order must not move anything — a layout driven by enumeration order would."""
-    from squidxplorer import open_reader
-    from squidxplorer._plate import build_plate
-
-    meta = open_reader(str(real_dataset)).metadata
-    ref = build_plate(meta)
-    flipped = build_plate({**meta, "regions": list(reversed(meta["regions"]))})
-    assert flipped.cell_layout() == ref.cell_layout()
-    assert flipped.occupied_map == ref.occupied_map
-
-
-def test_ima253_the_default_paint_path_loads_no_carrier_png(qapp, squid_dataset,
-                                                            monkeypatch):
-    """The carrier photograph needs calibration constants to agree with the geometry; when they disagreed nothing raised and wells were drawn in the wrong place, so the art stays off the path."""
-    import squidxplorer._plate as P
-
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    _drain_until(qapp, lambda: len(win._overview._tiles) >= 2)
-    before = _montage_px(qapp, win._overview)
-    shot = win._overview.grab().toImage()
-
-    calls = []
-    monkeypatch.setattr(P, "carrier_art", lambda *a, **k: calls.append(a) or None)
-    win2 = V.PlateWindow(None)
-    win2.ingest(str(root))
-    _drain_until(qapp, lambda: len(win2._overview._tiles) >= 2)
-    assert np.array_equal(_montage_px(qapp, win2._overview), before)
-    assert win2._overview.grab().toImage() == shot, \
-        "the render changed when the art registry was disabled -- art is still on the paint path"
-    assert not calls, f"carrier_art() was called {len(calls)}x during a default open"
-    assert not hasattr(win2._overview, "_art_img")
-    win.close(); win2.close()
-
-
-def test_ima253_empty_slots_are_visibly_distinct_from_occupied_ones(qapp):
-    from squidxplorer._plate import SlideCarrier
-
-    plate = SlideCarrier.from_format("4 slide carrier", occupancy={"manual0": [0]},
-                                     cell_ids=["manual0"])
-    ov = V.PlateOverview(plate.row_labels, plate.col_labels, plate.occupied_map)
-    ov.set_carrier(plate)
-    ov.resize(600, 240)
-    a = _grab_bgr(ov)
-    occupied, empty = (a[_cell_slices(ov, (0, ci), inset=2)] for ci in (0, 1))
-    assert occupied.size and empty.size
-    assert abs(float(occupied.mean()) - float(empty.mean())) > 1.5, \
-        "an empty slot must not look like an occupied one"
-    ov.deleteLater()
-
-
-# The earlier three-pane check passed fake-green because it never showed the window: an unshown QSplitter reports whatever sizes it was handed with zero real geometry — everything below shows the window at a real size first.
-
-def _drain_preview(win, app, timeout_s=60):
-    """Blocks until the raw preview worker stops streaming — a fixed settle() races it, since duration depends on well count."""
-    _drain_until(app, lambda: getattr(win, "_preview", None) is None or not win._preview.isRunning(),
-                 timeout=timeout_s)
-    for _ in range(20):                 # let the queued tileReady slots actually run
-        app.processEvents()
-
-
-def _shown(qapp, path=None, size=(1600, 900)):
-    """A window the user could actually look at: real size, really shown, really ingested."""
-    win = V.PlateWindow(None)
-    win.resize(*size)
-    win.show()
-    qapp.processEvents()
-    if path is not None:
-        win.ingest(str(path))
-        _drain_preview(win, qapp)
-    return win
-
-
-
-
-
-
-
-
-# The written-OME-Zarr path has always given napari a multiscale pyramid; the raw preview path gave full-resolution fused planes instead (54.9MB per channel per z, re-fused every z step). These pin the wiring that closes that gap.
-
-
-class _PyrReader:
-    #: The plane cache keys on the acquisition a reader reads, so every reader must name it.
-    def __init__(self, frame=(256, 256), path="/fake/acquisition/viewer"):
-        self.frame = frame
-        self._path = path
-
-    def read(self, region, fov, channel, z_level, time_point=0):
-        return np.full(self.frame, z_level + 1, dtype=np.uint16)
-
-
-def _pyr_meta(nz=4, n=16, frame=(256, 256), px=1.0):
-    return {
-        "regions": ["A1"],
-        "fovs_per_region": {"A1": list(range(n))},
-        "fov_positions_um": {("A1", i): (i * frame[1] * px, 0.0) for i in range(n)},
-        "pixel_size_um": px,
-        "frame_shape": frame,
-        "dtype": "uint16",
-        "n_z": nz,
-        "dz_um": 1.5,
-        "channels": [{"name": "488"}, {"name": "561"}],
-    }
-
-
-def test_the_mosaic_worker_emits_a_pyramid_not_a_single_resolution_stack(qapp):
-    meta = _pyr_meta()
-    got, problems = [], []
-    w = W._MosaicWorker(_PyrReader(), meta, "A1", ["488", "561"])
-    w.ready.connect(lambda r, ch, data, bbox, win: got.append((ch, data)))
-    w.problem.connect(problems.append)         # or a failure reads as a silent empty list
-    w.run()                                    # synchronous; no thread, no event loop
-
-    assert problems == [], f"the worker reported: {problems}"
-    assert [ch for ch, _ in got] == ["488", "561"]
-    for ch, data in got:
-        assert isinstance(data, list), f"{ch}: napari's multiscale contract is a LIST of levels"
-        assert len(data) > 1, f"{ch}: a 256x4096 mosaic has room for a pyramid; got one level"
-        for above, below in zip(data, data[1:]):
-            assert below.shape[-2] < above.shape[-2] and below.shape[-1] < above.shape[-1]
-        assert all(lv.shape[0] == 4 for lv in data), "every level keeps the z axis"
-
-
-def test_the_mosaic_worker_derives_the_contrast_seed_ITSELF(qapp):
-    """Sampling the contrast seed on the UI thread decodes every FOV of the region (measured ~128-600ms), because even the coarsest pyramid level is fused from FOV TIFFs; must happen on the worker thread instead."""
-    from squidxplorer._napari_view import _auto_window_for
-
-    meta = _pyr_meta()
-    got, problems = [], []
-    w = W._MosaicWorker(_PyrReader(), meta, "A1", ["488", "561"])
-    w.ready.connect(lambda r, ch, data, bbox, win: got.append((ch, data, win)))
-    w.problem.connect(problems.append)
-    w.run()
-
-    assert problems == [], f"the worker reported: {problems}"
-    assert [ch for ch, _d, _w in got] == ["488", "561"]
-    for ch, data, window in got:
-        assert window == _auto_window_for(data, True), (
-            f"{ch}: the worker's seed is not the window add_mosaic would have derived")
-
-
-def test_the_mosaic_worker_reads_exactly_the_coarsest_level_at_one_z(qapp):
-    """Opening a region must cost one coarse fuse per channel at one z — not one read per pyramid level and not the whole z-stack — and level 0 must stay unmaterialised."""
-    from squidxplorer import _mosaic_source as MS
-    from squidxplorer._contrast import opening_z
-
-    reads = []
-
-    class _Counting(_PyrReader):
-        def read(self, *a, **kw):
-            reads.append(a)
-            return super().read(*a, **kw)
-
-    meta = _pyr_meta()
-    n_fovs, n_channels, nz = len(meta["fovs_per_region"]["A1"]), 2, meta["n_z"]
-    problems = []
-    MS._PLANE_CACHE.clear()
-    w = W._MosaicWorker(_Counting(), meta, "A1", ["488", "561"])
-    w.ready.connect(lambda *a: None)
-    w.problem.connect(problems.append)
-    w.run()
-
-    assert problems == [], f"the worker reported: {problems}"
-    assert len(reads) == n_fovs * n_channels, (
-        f"the seed read {len(reads)} frames; one pass over {n_fovs} FOVs per channel is "
-        f"{n_fovs * n_channels}")
-    # read(region, fov, channel, z, t) -> a[3] is z, a[4] is t.
-    assert {r[3] for r in reads} == {opening_z(nz)}, (
-        "the seed must sample the ONE z the viewer opens on, not the whole stack")
-    assert {r[4] for r in reads} == {0}, "and the timepoint this worker was built for"
-    # The z axis is still 4 deep and level 0 still exists — the pyramid was not flattened to make the seed cheap.
-    assert MS._PLANE_CACHE.nbytes > 0, "the seed's decode must be cached, not thrown away"
-
-
-# Called UNBOUND on a duck shell, same as the PlateWindow tests above — what's under test is the slot, not the widget.
-
-
-class _PlaneView:
-    """A RegionViewer reduced to what _on_plane reads."""
-
-    _roi_bbox = None
-    open_clock = None
-    window_id = 1
-
-    def __init__(self, pane, meta, region):
-        from squidxplorer._region_nav import RegionCursor
-
-        self._pane = pane
-        self._meta = meta
-        self._cursor = RegionCursor()
-        self._cursor.set_order([region])
-        self._cursor.activate(region)
-
-    def _say(self, msg):
-        pass
-
-    def on_plane(self, *a, **kw):
-        from squidxplorer._region_viewer import RegionViewer
-
-        return RegionViewer._on_plane(self, *a, **kw)
-
-
-def test_on_plane_tells_napari_the_data_is_multiscale(qapp):
-    """A pyramid without multiscale=True is just a list napari can't use — it errors or falls back to level 0."""
-    calls = []
-
-    class _Mosaic:
-        def add_mosaic(self, op, channel, data, **kw):
-            calls.append((op, channel, data, kw))
-
-    class _Pane:
-        ok = True
-        mosaic = _Mosaic()
-
-        def say(self, msg):
-            pass
-
-    view = _PlaneView(_Pane(), _pyr_meta(), "A1")
-
-    levels = [np.zeros((4, 64, 48), "uint16"), np.zeros((4, 32, 24), "uint16")]
-    view.on_plane("A1", "488", levels, (0.0, 0.0, 10.0, 8.0), (12.0, 345.0))
-
-    assert len(calls) == 1
-    _op, _ch, data, kw = calls[0]
-    assert kw.get("multiscale") is True, "napari must be told the data is a pyramid"
-    assert data is levels
-    # The worker's contrast seed is passed through unchanged; what moved off the UI thread is which thread samples for it (add_mosaic still treats a missing/None window as 'derive one').
-    assert kw.get("contrast_limits") == (12.0, 345.0)
-    # the z scale commit 19cd491 established must survive the pyramid
-    assert kw.get("z_scale_um") == 1.5
-
-
-def test_on_plane_without_a_window_still_lets_add_mosaic_derive_one(qapp):
-    """window=None must reach add_mosaic as None (derive it), not as (None, None)."""
-    calls = []
-
-    class _Mosaic:
-        def add_mosaic(self, op, channel, data, **kw):
-            calls.append(kw)
-
-    class _Pane:
-        ok = True
-        mosaic = _Mosaic()
-
-        def say(self, msg):
-            pass
-
-    view = _PlaneView(_Pane(), _pyr_meta(), "A1")
-    view.on_plane("A1", "488", [np.zeros((4, 64, 48), "uint16")], (0.0, 0.0, 10.0, 8.0), None)
-    assert calls and calls[0].get("contrast_limits") is None
-
-
-# _OPERATIONS (the card table) and runnable_operators() (the engine registry) used to diverge silently — a card whose key isn't runnable produced a dead button that said nothing; these pin the contract instead of restating it in prose.
-
-
-def test_a_cards_runnability_is_the_engines_answer_and_cannot_go_stale():
-    """Operation.runnable is now a property over runnable_operators(), not a hand-written bool that could drift."""
-    from squidxplorer import add_operator, plane_op
-
-    assert V._OPERATIONS_BY_KEY["mip"].runnable is True
-
-    card = V.Operation("card_only_key", "Card only", "no engine entry", "_build_mip_tab")
-    assert card.runnable is False
-    add_operator("card_only_key", plane_op(lambda p: p))
-    assert card.runnable is True, "runnable is stale; it must be read, not stored"
-
-
-def test_gallery_view_is_a_view_menu_command_and_not_an_operator(qapp):
-    """Gallery View consumes no axis and produces no pixels, so it is a View-menu command with no card, not a runnable operator."""
-    win = V.PlateWindow(None)
-    try:
-        assert not hasattr(win, "_op_cards"), "the bulk cards are back (retired 2026-08-25)"
-        assert "galleryview" not in win._op_actions
-        assert "galleryview" not in {op.key for op in V._OPERATIONS}
-        assert "galleryview" not in V.runnable_operators()
-
-        act = win._gallery_act
-        assert act.menu() is not None or act.parent() is not None
-        assert [a for a in win.menuBar().actions()
-                if a.text() == "&View" and act in a.menu().actions()], (
-            "Gallery View is not in the View menu, so it is nowhere")
-        # window management is not gated on an acquisition; the operator cards are
-        assert act.isEnabled() is True
-
-        act.trigger()
-        assert win._gallery is None, "Gallery View opened a window with no acquisition to tile"
-        assert "open an acquisition" in win._readout.text().lower(), (
-            f"Gallery View with nothing open said {win._readout.text()!r}, which does not name "
-            "the missing acquisition as the reason")
-    finally:
-        win.close()
-
-
-# The reverse direction: an operator the engine can run but with no card is invisible to the card-walking test, which is exactly how reference stayed CLI-only for months — every runnable operator must now either have a card or be declared CLI-only here, with the reason written down.
-
-#: Runnable operators that deliberately have no GUI card, and why — adding one without listing it here (or giving it a card) fails the test below.
-CLI_ONLY_OPERATORS = {
-    # (2026-08-24: every then-surviving operator — mip, decon, stitch, register — has a card.
-    # spot/cellpose/decon3d/coordinate/keepz left this dict by being shelved, not by gaining
-    # cards.)
-    # fstack (2026-08-25): deliberately cardless while one-window-dock reshapes the operator
-    # rows; it reaches the GUI through Process well-plates -> From their declaration.
-    "fstack": "the declaration-built panel serves it; a bespoke card waits on the dock refactor",
-}
-
-
-def test_every_runnable_operator_is_either_carded_or_declared_cli_only():
-    """The reverse of the card->engine check: reference ran in the engine since IMA-210 with no GUI surface at all."""
-    carded = {op.key for op in V._OPERATIONS}
-    for key in V.runnable_operators():
-        assert key in carded or key in CLI_ONLY_OPERATORS, (
-            f"the engine can run {key!r} but no card offers it and it is not declared CLI-only. "
-            f"Either add an Operation for it to _OPERATIONS (plus its _build_<x>_tab), or add it "
-            f"to CLI_ONLY_OPERATORS with the reason it is deliberately not in the GUI."
-        )
-
-
-def test_the_cli_only_declaration_cannot_go_stale():
-    """Prevents the CLI-only allowlist from keeping an operator that has since gained a card or lost its registration."""
-    runnable = set(V.runnable_operators())
-    carded = {op.key for op in V._OPERATIONS}
-    for key in CLI_ONLY_OPERATORS:
-        assert key in runnable, (
-            f"{key!r} is declared CLI-only but the engine no longer runs it; delete the entry.")
-        assert key not in carded, (
-            f"{key!r} is declared CLI-only but now HAS a card; delete the entry.")
-
-
-def test_the_save_button_names_its_operator_instead_of_taking_the_first_card():
-    """_OPERATIONS[0].key made the save button run whatever card happened to be first; it's now named explicitly."""
-    assert V._SAVE_OPERATOR == "mip"
-    assert V._SAVE_OPERATOR in V.runnable_operators()
-    # and it must not be a positional accident: reordering the cards must not change it
-    assert V._SAVE_OPERATOR in V._OPERATIONS_BY_KEY
-
-
-def test_a_cardless_operator_opens_a_panel_built_from_its_declaration(qapp,
-                                                                     squid_dataset,
-                                                                     blob_operator):
-    """A registered operator with no card; _activate_operator used to silently do nothing for it."""
+def test_a_cardless_operator_gets_a_panel_built_from_its_declaration(qapp,
+                                                                    squid_dataset,
+                                                                    blob_operator):
+    """A registered operator with no card still gets its declaration panel (the run's
+    single source of truth); activation routes it to a view's inline slot."""
     from squidxplorer._engine import operator_params
     from squidxplorer._param_panel import GenericOperatorPanel
 
@@ -3771,23 +2972,21 @@ def test_a_cardless_operator_opens_a_panel_built_from_its_declaration(qapp,
     win.ingest(str(root))
     assert blob_operator not in V._OPERATIONS_BY_KEY, (
         "the fixture gained a card; pick another cardless exemplar")
-    win._activate_operator(blob_operator)
-    panel = win._op_tabs.get(blob_operator)
-    assert panel is not None, f"no panel opened; readout said {win._readout.text()!r}"
+    panel = win.ensure_operator_panel(blob_operator)
+    assert panel is not None, "no panel could be built from the declaration"
     assert isinstance(panel, GenericOperatorPanel)
     assert sorted(panel.widgets) == sorted(p.name for p in operator_params(blob_operator))
     win.close()
 
 
-def test_a_key_that_has_no_panel_at_all_is_refused_by_name_never_silently(qapp,
-                                                                         squid_dataset):
+def test_activation_with_no_view_refuses_by_name_and_opens_nothing(qapp, squid_dataset):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    before = dict(win._op_tabs)
+    before = win._left_tabs.count()
     win._activate_operator("stitch_but_misspelled")
-    assert win._op_tabs == before, "a refused operator must not open a tab"
-    assert "stitch_but_misspelled" in win._readout.text()
+    assert win._left_tabs.count() == before, "a refused operator opened a tab"
+    assert "open a view" in win._readout.text(), win._readout.text()
     win.close()
 
 

@@ -27,27 +27,22 @@ class Operation:
 # survivors are exactly the runnable set — mip, decon, stitch, register — plus one NON-operator
 # card, `illumination`: the profile loader/estimator STITCH rides, which outlived the shelved
 # flatfield operator on purpose.)
+# Blurbs are ONE short sentence (verbosity strip, Julio 2026-08-25).
 _OPERATIONS = (
     Operation("mip", "Maximum Intensity Projection",
-              "Collapse each well's z-stack to one max-intensity image; save a navigable OME-Zarr plate.",
+              "Collapse each well's z-stack to one max-intensity image.",
               "_build_mip_tab"),
     Operation("stitch", "Stitch (register + fuse)",
-              "Register every FOV of a well against its neighbours and fuse one seamless mosaic "
-              "per well, instead of trusting the stage coordinates alone.",
+              "Register every FOV against its neighbours and fuse one mosaic per well.",
               "_build_stitch_tab"),
     Operation("register", "Register FOVs (no fusion)",
-              "Solve each well's per-FOV offsets from the overlaps without fusing or touching a "
-              "pixel, and optionally write stitched_<folder>: a hardlinked copy of the "
-              "acquisition whose coordinates.csv carries the registered positions.",
+              "Solve per-FOV offsets and optionally write stitched_<folder>.",
               "_build_register_tab"),
     Operation("decon", "Deconvolution (Richardson-Lucy)",
-              "3-D Richardson-Lucy per FOV, vectorial PSF from this acquisition's own optics. "
-              "Pick the iteration count by eye with the sweep.",
+              "Deconvolve each FOV's z stack with the acquisition's own optics.",
               "_build_decon_tab"),
     Operation("illumination", "Illumination profile (for stitching)",
-              "Load a stored per-channel illumination profile (.npy) or estimate one live from "
-              "plate tiles (the stitcher's BaSiC estimator). Stitch's read path corrects tiles "
-              "with what is installed here when it covers every channel of the run.",
+              "Load or estimate the per-channel illumination profile stitch corrects with.",
               "_build_illumination_tab"),
 )
 _OPERATIONS_BY_KEY = {op.key: op for op in _OPERATIONS}

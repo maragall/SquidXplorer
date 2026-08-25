@@ -146,50 +146,31 @@ def make_psf(optics: OpticsParams) -> np.ndarray:
     return np.ascontiguousarray(psf, dtype=np.float32)
 
 
-def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool,
-         snapshot_iters=None):
+def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool):
     """One call into RL: device selection, optional FFT-length padding, and an all-zero result guard.
 
-    ``snapshot_iters`` (petakit's own contract) asks ONE solve to capture the estimate after
-    each named iteration; the return is then ``{iter: volume}`` instead of one array. The
-    QC sweep steps those captures back and forth for free — never a re-solve per count.
+    The per-iteration ``snapshot_iters`` capture hook is DELETED with the QC sweep (Julio,
+    2026-08-25: "The sweep code should be shelved. I can just run on an ROI iteration by
+    iteration."); reinstating starts from git history.
     """
     volume = np.ascontiguousarray(volume, dtype=np.float32)
-    snaps = sorted({int(i) for i in snapshot_iters}) if snapshot_iters else None
-    if snaps is not None:
-        iterations = max(int(iterations), snaps[-1])
     device = _decon_gpu.select_device(volume.shape, gpu=gpu, psf_shape=psf.shape)
     _decon_gpu.log_choice(volume.shape, gpu=gpu, psf_shape=psf.shape)
     if device is not None:
-        out = _decon_gpu.rl(volume, psf, iterations, device, snapshot_iters=snaps)
+        out = _decon_gpu.rl(volume, psf, iterations, device)
     else:
         petakit = _petakit()
         widths = (_decon_gpu.pad_plan(volume.shape, psf.shape)
                   if _decon_gpu.cpu_padding_enabled() else (0, 0, 0))
         padded = _decon_gpu._wrap_pad(volume, widths)
-        if snaps is not None:
-            import inspect
-
-            if "snapshot_iters" not in inspect.signature(petakit.engine.rl).parameters:
-                raise RuntimeError(
-                    "this petakit build's engine.rl takes no snapshot_iters, so a "
-                    "per-iteration QC sweep cannot capture inside one solve. Update petakit "
-                    "(the pinned SHA in pyproject carries it); refusing to fall back to one "
-                    "full re-solve per iteration count without saying so.")
-            out = petakit.engine.rl(
-                np.ascontiguousarray(padded), psf,
-                n_iter=iterations, gpu=gpu, snapshot_iters=snaps,
-            )
-        else:
-            out = petakit.deconvolve(
-                np.ascontiguousarray(padded), psf,
-                method=METHOD, iterations=iterations, gpu=gpu,
-            )
+        out = petakit.deconvolve(
+            np.ascontiguousarray(padded), psf,
+            method=METHOD, iterations=iterations, gpu=gpu,
+        )
         if any(widths):
             core = tuple(slice(w, w + n) for w, n in zip(widths, volume.shape))
-            out = ({k: v[core] for k, v in out.items()} if snaps is not None
-                   else out[core])
-    final = out[snaps[-1]] if snaps is not None else out
+            out = out[core]
+    final = out
     if np.any(volume) and not np.any(final):
         raise RuntimeError(
             "petakit returned an all-zero result for a non-empty input. That is the failure "

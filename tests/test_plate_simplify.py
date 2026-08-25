@@ -232,11 +232,12 @@ def test_the_operator_row_offers_iterations_for_a_declaring_operator(qapp, napar
         v._iter_spin.setValue(7)
         assert win.operator_kwargs_for("decon") == {"iterations": 7}, (
             "the inline spin's value is not what the run would get — two sources of truth")
-        # ONE source of truth: the plate's own decon panel spin holds the same number.
-        assert win._op_tabs["decon"].run_iter_spin.value() == 7
+        # ONE source of truth: the panel's own declared widget holds the same number (the
+        # QC sweep and its adoption button are shelved, 2026-08-25).
+        assert win._op_tabs["decon"].widgets["iterations"].value() == 7
 
-        # ...and the QC's 'use k iterations' adoption shows back up in the window's spin.
-        win._op_tabs["decon"]._adopt_iterations(5)
+        # ...and an outside write through the plate shows back up in the window's spin.
+        win.set_operator_param("decon", "iterations", 5)
         v._refresh_controls_note()
         assert v._iter_spin.value() == 5
 

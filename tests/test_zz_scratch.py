@@ -16,8 +16,8 @@ def test_bisect(qapp, napari_pane_stub, squid_dataset, step):
         qapp.processEvents()
         panel = v._inserted_panel
         if step in ("insert_kwargs", "insert_toggle"):
-            panel.blend_spin.setValue(2)
-            assert win.operator_kwargs_for("stitch")["blend_px"] == 2
+            panel.widgets["registration_channel"].setValue(2)
+            assert win.operator_kwargs_for("stitch")["registration_channel"] == 2
         if step == "insert_toggle":
             v._show_operator_controls()
             assert v._inserted_panel is None
