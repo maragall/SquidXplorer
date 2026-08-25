@@ -778,7 +778,11 @@ Julio's rulings, verbatim: "spot, shelf"; "cellpose, shelf"; Detect row -> "Shel
 ("3D decon would still use a 2D PSF, since there is no more to draw from"). The Minerva rule
 applies: deleted whole, grep-proven, reinstating starts from git history, absences pinned in
 tests (`test_operator_declaration.py::test_the_shelved_operators_are_gone_whole` and per-file
-pins). **The surviving registry is exactly `mip`, `decon`, `stitch`, `register`.**
+pins). **The surviving registry is exactly `mip`, `decon`, `fstack`, `stitch`, `register`**
+(fstack, 4d25302, gained its card on 2026-08-25: "Focus stack (all-in-focus)", generic
+declaration panel, all three knobs advanced; `_operations.CLI_ONLY_OPERATORS` is empty and
+`test_every_runnable_operator_has_a_card` fails the build on a registry entry with no card;
+measured 2.33 GiB peak per FOV on this Mac, 15z x 3ch x 2050^2, one FOV in flight).
 
 - **Shelved whole**: `_background.py` (bgsub + its exports + scikit-image core dep, whose one
   stated consumer was rolling_ball — napari declares scikit-image itself, measured, so the
@@ -1216,6 +1220,23 @@ operators hidden by default and summoned, never a separate window.
   progress report after the run ended shows no bar (`operator_progress` returns with no
   `_op_action`). NOT done: the ~110 px blank band above the chips in a CHILD view cannot be
   measured here (offscreen has no OpenGL, so no docked real pane builds); check live.
+- **The left column's height goes to the layer list** (Julio's screenshot on 2888349:
+  blank bands under the operators band and the layer controls, the layer list squeezed to
+  two rows, the log band pushed out of the plate/log dock). A QDockWidget ignores its
+  child's size policy, so every dock the app adds is FIXED at its content's hint
+  (`_napari_pane.fit_dock_to_content`, kept by `_DockFitter` on every LayoutRequest via
+  `watch_dock_fit`: chips column, plate/log host, napari's layer-controls dock) and the
+  layer tree's dock is the ONE stretch consumer (`stretch_dock`; `_balance_left_column`
+  applies both, idempotent). `_FoldSection.showEvent` re-asserts its own fold (the
+  operators band was open on a fresh launch; the summoner was not found in code); the
+  "defaults" note row does not render when it has nothing set.
+- **A preview's layer has the asking view's raw extent and lands ONLY there** (Julio, live:
+  "decon layer is != raw view"). The ROI child crops a delivered result against the RESULT's
+  own extent (`deliver_result`; a scoped result's pixels cover only its FOVs, so cropping
+  against the region's mosaic bbox took the wrong window and gained a full-field layer);
+  `_deliver_to_views` delivers to `OperatorRun.requester` alone when a view asked (the dark
+  fan-out survives only for a run no view asked for), and a scoped result is never filed in
+  the cross-window cache. The solve stays whole-FOV; the save path never crops.
 - **Verbosity strip, measured** (labels + tooltips in a view's left column, folds summoned,
   via a scratch probe at f063f55 vs bf982a2): resting column 33 elements both before and
   after but 431 -> 207 words; with every operator's inline panel inserted once, 108 -> 64

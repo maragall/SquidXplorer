@@ -257,6 +257,13 @@ class _FoldSection(QWidget):
     def toggle(self, *_) -> None:
         self.set_collapsed(not self.collapsed)
 
+    def showEvent(self, event) -> None:          # noqa: N802 - Qt naming
+        """The section owns its fold: whatever host shows it (a dock re-add, a tab switch,
+        a fresh launch) gets the state it holds, never an expanded body it never summoned
+        (measured live on 2888349: the operators band open on launch)."""
+        super().showEvent(event)
+        self._body.setVisible(not self.collapsed)
+
 
 def _level_shape(level: Any) -> "Optional[tuple[int, int]]":
     """The (height, width) of one pyramid level, or None if it has no 2-D+ shape."""
@@ -1048,10 +1055,15 @@ class RegionViewer(QMainWindow):
         self._refresh_quick_iterations(key)
         if not key:
             note.setText("")
+            note.setVisible(False)
             return
         # No 2D/3D mode prefix (Julio, 2026-08-25: "2D 3D buttons are just how we view
         # it"): the operator is the same operator whatever the tab shows.
-        note.setText(self._params_summary(str(key)))
+        text = self._params_summary(str(key))
+        note.setText(text)
+        # "defaults" is not a fact a user acts on: with nothing set the row does not render
+        # (verbosity strip; the bare 'defaults' row measured live on 2888349).
+        note.setVisible(bool(text) and text != "defaults")
 
     def _iterations_param(self, key):
         """The integer ``iterations`` :class:`Param` the selected operator DECLARES, or None.
@@ -1612,7 +1624,14 @@ class RegionViewer(QMainWindow):
             if int(result.z_depth) <= 1 and getattr(plane, "ndim", 0) == 3 and plane.shape[0] == 1:
                 plane = plane[0]
             placement = getattr(plane, "placement", None)
-            bbox = region_bbox = (placement.bbox_um if placement is not None else preview_bbox)
+            # THE RESULT'S OWN FOOTPRINT, never the whole region's: a scoped run's pixels
+            # cover only its FOVs (2026-08-25), so cropping them against the region's mosaic
+            # bbox took the wrong window and the ROI child gained a full-field layer (Julio:
+            # "decon layer is != raw view"). The whole-region bbox is the fallback only for
+            # a result that declares none.
+            result_bbox = getattr(getattr(result, "extent", None), "bbox_um", None)
+            bbox = region_bbox = (placement.bbox_um if placement is not None
+                                  else (result_bbox or preview_bbox))
             # A copy-saving operator's look is a PASTE at solved positions, so it can be served
             # like raw: the on-demand pyramid with the registered positions substituted — full
             # native resolution under zoom. A FUSED result (stitch) is never substituted: its

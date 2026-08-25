@@ -1689,6 +1689,17 @@ class PlateWindow(QMainWindow):
             kwargs = self.operator_kwargs_for(key)
         except ValueError as exc:                # a refused setting: the summary IS the refusal
             return str(exc)
+        # Only what DIFFERS from the declaration: a row listing every advanced default is
+        # a paragraph with nothing to say (verbosity strip, 2026-08-25; fstack's three
+        # advanced knobs printed as a row under an empty headline).
+        try:
+            from squidxplorer import operator_params
+
+            declared = {p.name: p.default for p in operator_params(key)}
+        except Exception:                        # noqa: BLE001 - no declaration: print all
+            declared = {}
+        kwargs = {n: v for n, v in kwargs.items()
+                  if n not in declared or v != declared[n]}
         if not kwargs:
             return "defaults"
         parts = []
@@ -1915,6 +1926,13 @@ class PlateWindow(QMainWindow):
         from squidxplorer._param_panel import GenericOperatorPanel
 
         return GenericOperatorPanel(self, "stitch")
+
+    def _build_fstack_tab(self) -> QWidget:
+        # fstack's three knobs are all declared advanced: the generic form's headline is
+        # empty and only the "advanced parameters" disclosure renders (Julio, 2026-08-25).
+        from squidxplorer._param_panel import GenericOperatorPanel
+
+        return GenericOperatorPanel(self, "fstack")
 
     def _build_register_tab(self) -> QWidget:
         # The declared params plus the copy switch; the registered copy is the disk artifact.
@@ -3241,7 +3259,11 @@ class PlateWindow(QMainWindow):
         # same-process reuse, not IPC, and nothing has to be serialised.
         from squidxplorer._recipe import acquisition_version, cache_operator_result
 
-        cache_operator_result(op, result, acquisition_version(self._reader))
+        # A SCOPED result (an ROI preview's own fields) is never cached: the cache is per
+        # region, and a replay would hand a later mosaic window a partial layer as if it
+        # were the region's (Julio, 2026-08-25: "decon layer is != raw view").
+        if self._run is None or self._run.scope is None:
+            cache_operator_result(op, result, acquisition_version(self._reader))
         added = self._deliver_to_views(op, result)
         if added:
             self._readout.setText(
@@ -3271,8 +3293,13 @@ class PlateWindow(QMainWindow):
         if mgr is None:
             return 0
         requester = self._run.requester if self._run is not None else None
+        # THE VIEW THAT ASKED IS THE ONLY SINK (Julio, 2026-08-25: a preview's layer "lands
+        # ONLY in that view"; live, an ROI child's decon reached the mosaic tab). The dark
+        # fan-out survives only for a run no view asked for (a plate-scoped save).
+        sinks = ([requester] if getattr(requester, "deliver_result", None) is not None
+                 else list(mgr.windows))
         added = 0
-        for win in mgr.windows:
+        for win in sinks:
             deliver = getattr(win, "deliver_result", None)
             if deliver is None:
                 continue

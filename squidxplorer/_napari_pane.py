@@ -6,7 +6,7 @@ import os
 import time
 from typing import Any, Callable, Optional
 
-from qtpy.QtCore import Qt, QTimer
+from qtpy.QtCore import QEvent, QObject, Qt, QTimer
 from qtpy.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from squidxplorer._napari_view import _DEFAULT_MAX_3D_TEXTURE, MosaicLayers, resolve_viewer
@@ -210,6 +210,81 @@ def fit_controls_container(container) -> None:
     if lay is not None:
         lay.activate()
     container.setMaximumHeight(max(1, int(current.sizeHint().height())))
+
+
+def fit_dock_to_content(dock) -> int:
+    """Make *dock* exactly as tall as its content wants (title bars are slimmed to 0 here).
+
+    THE LEFT-COLUMN MECHANISM (Julio, 2026-08-25, screenshot: "realstate not being allocated
+    efficiently"; measured on 2888349: ~130 px blank under the operators band, ~80 px under
+    the layer controls, the layer list squeezed to two rows, the log band pushed out of its
+    dock). A QDockWidget ignores its child's size policy: the dock area hands spare height to
+    every dock, and ours top-align their content and paint the rest blank. So every dock the
+    app adds is FIXED at its content's hint, and the layer list is the one stretch consumer
+    (`stretch_dock`). Returns the height set."""
+    w = dock.widget()
+    if w is None:
+        return 0
+    lay = w.layout()
+    if lay is not None:
+        lay.activate()
+    h = min(int(w.sizeHint().height()), int(w.maximumHeight()))
+    tb = dock.titleBarWidget()
+    if tb is not None and tb.maximumHeight() < 16777215:
+        h += int(tb.maximumHeight())
+    h = max(0, h)
+    if dock.minimumHeight() != h or dock.maximumHeight() != h:
+        dock.setFixedHeight(h)
+    return h
+
+
+class _DockFitter(QObject):
+    """Keeps a dock fitted to its content across every relayout of that content (a fold
+    collapsing, a param slot inserting, the log band re-capping): one deferred refit per
+    LayoutRequest, so the hint is read after the layout pass, never inside it."""
+
+    def __init__(self, dock) -> None:
+        super().__init__(dock)
+        self._dock = dock
+        self._pending = False
+        content = dock.widget()
+        if content is not None:
+            content.installEventFilter(self)
+
+    def eventFilter(self, obj, event):           # noqa: N802 - Qt naming
+        if event.type() == QEvent.Type.LayoutRequest and not self._pending:
+            self._pending = True
+            QTimer.singleShot(0, self._refit)
+        return False
+
+    def _refit(self) -> None:
+        self._pending = False
+        try:
+            fit_dock_to_content(self._dock)
+        except RuntimeError:                     # the dock is gone
+            pass
+
+
+def watch_dock_fit(dock) -> None:
+    """Fit *dock* to its content now and on every content relayout (idempotent)."""
+    if getattr(dock, "_squid_fitter", None) is None:
+        dock._squid_fitter = _DockFitter(dock)
+    fit_dock_to_content(dock)
+
+
+def stretch_dock(dock) -> None:
+    """Make *dock* the column's ONE stretch consumer: the layer list takes what the fitted
+    docks leave, instead of a scrollbar over two rows."""
+    from qtpy.QtWidgets import QSizePolicy
+
+    dock.setMinimumHeight(0)
+    dock.setMaximumHeight(16777215)
+    dock.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+    w = dock.widget()
+    if w is not None:
+        w.setMinimumHeight(0)
+        w.setMaximumHeight(16777215)
+        w.setSizePolicy(w.sizePolicy().horizontalPolicy(), QSizePolicy.Expanding)
 
 
 def hoist_left_dock(qt_window, dock) -> None:
@@ -420,7 +495,7 @@ class MosaicPane(QWidget):
             from squidxplorer._layer_tree import MosaicTree
 
             tree = MosaicTree(self.mosaic)
-            self._viewer.window.add_dock_widget(
+            self.layer_tree_dock = self._viewer.window.add_dock_widget(
                 tree, name="mosaic layers", area="left", tabify=True,
             )
             self._hide_flat_layer_list()
@@ -522,6 +597,7 @@ class MosaicPane(QWidget):
                 fit_controls_container(container)
             except Exception:                    # noqa: BLE001 - cosmetic, never fatal
                 pass
+        self._balance_left_column()
         # Slim titles must STAY slim: napari re-installs its title bar on every
         # visibilityChanged(True); connected here (after napari's own handler) so ours
         # runs last in the same emission.
@@ -560,7 +636,31 @@ class MosaicPane(QWidget):
             self.say(f"the plate and log slots could not be docked ({type(exc).__name__}: "
                      f"{exc}); they are in the window body instead.")
             return False
+        watch_dock_fit(self.plate_slots_dock)
+        self._balance_left_column()
         return True
+
+    #: The grouped layer tree's dock, once mounted: the left column's one stretch consumer.
+    layer_tree_dock = None
+
+    def _balance_left_column(self) -> None:
+        """Fixed docks at their content, the layer list stretching (see fit_dock_to_content).
+        Idempotent; called whenever a dock joins the column and at the chrome diet."""
+        try:
+            controls_dock = self._viewer.window._qt_viewer.dockLayerControls
+        except Exception:                        # noqa: BLE001 - napari moved it: leave it
+            controls_dock = None
+        if controls_dock is not None:
+            try:
+                watch_dock_fit(controls_dock)
+            except Exception:                    # noqa: BLE001 - cosmetic, never fatal
+                pass
+        tree_dock = self.layer_tree_dock
+        if tree_dock is not None:
+            try:
+                stretch_dock(tree_dock)
+            except Exception:                    # noqa: BLE001 - cosmetic, never fatal
+                pass
 
     def dock_view_controls(self, widget: QWidget) -> bool:
         """Dock *widget* (the window's "2D / 3D · ROI" chip block) at the TOP of napari's left
@@ -594,6 +694,8 @@ class MosaicPane(QWidget):
         except Exception:                        # noqa: BLE001 - cosmetic, never fatal
             pass
         self.view_controls_dock = dock
+        watch_dock_fit(dock)
+        self._balance_left_column()
         return True
 
     def _hoist_left_dock(self, dock) -> None:

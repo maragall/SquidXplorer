@@ -984,3 +984,279 @@ def test_the_layer_controls_container_takes_only_what_its_page_needs(qapp):
     stack.setCurrentWidget(tall)
     fit_controls_container(stack)
     assert stack.maximumHeight() == tall.sizeHint().height()
+
+
+# --- ruling p: the left column's height goes to the layer list, our docks are content-sized --
+# Live on 2888349 (coordinator's screenshot): ~130 px blank under the operators band, ~80 px
+# blank under the layer controls, the layer list squeezed to two rows, and the log band gone
+# (the plate/log dock got only the plate's fixed 240 px). The dock area was handing spare
+# height to OUR docks, which top-align their content and paint the rest blank.
+
+
+def _left_docks(win):
+    from qtpy.QtCore import Qt
+    from qtpy.QtWidgets import QDockWidget
+
+    return [d for d in win.findChildren(QDockWidget)
+            if win.dockWidgetArea(d) == Qt.LeftDockWidgetArea]
+
+
+def _settle(qapp, n=30):
+    for _ in range(n):
+        qapp.processEvents()
+
+
+def test_our_docks_are_content_sized_and_the_layer_list_is_the_one_stretch_consumer(qapp):
+    from qtpy.QtCore import Qt
+    from qtpy.QtWidgets import QDockWidget, QLabel, QMainWindow, QSizePolicy, QVBoxLayout, QWidget
+
+    from squidxplorer._napari_pane import stretch_dock, watch_dock_fit
+
+    win = QMainWindow()
+    win.resize(400, 900)
+    chips_content = QWidget()
+    cv = QVBoxLayout(chips_content)
+    row = QLabel("[3D][ROI]")
+    cv.addWidget(row)
+    band = QLabel("operators row")
+    cv.addWidget(band)
+    chips = QDockWidget("2D / 3D · ROI", win)
+    chips.setWidget(chips_content)
+    layers = QDockWidget("mosaic layers", win)
+    layers.setWidget(QLabel("raw\n 561\n 488\n BF"))
+    slots = QDockWidget("plate · log", win)
+    slots_content = QWidget()
+    sv = QVBoxLayout(slots_content)
+    plate = QLabel("plate")
+    plate.setFixedHeight(240)
+    log = QLabel("▸ Log  idle")
+    sv.addWidget(plate)
+    sv.addWidget(log)
+    slots.setWidget(slots_content)
+    for d in (chips, layers, slots):
+        win.addDockWidget(Qt.LeftDockWidgetArea, d)
+    watch_dock_fit(chips)
+    watch_dock_fit(slots)
+    stretch_dock(layers)
+    win.show()
+    _settle(qapp)
+
+    assert chips.height() == chips_content.sizeHint().height(), (
+        f"the chips dock is {chips.height()} px for {chips_content.sizeHint().height()} px of content")
+    assert slots.height() == slots_content.sizeHint().height()
+    assert log.isVisibleTo(win) and log.height() > 0, "the log band fell out of the slot dock"
+    assert layers.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
+    assert layers.height() > chips.height() + slots.height(), (
+        "the spare height did not go to the layer list")
+    band.hide()                                  # the operators band collapses
+    _settle(qapp)
+    assert chips.height() == chips_content.sizeHint().height() < 60, (
+        f"a collapsed band left the dock at {chips.height()} px")
+    band.show()
+    _settle(qapp)
+    assert chips.height() == chips_content.sizeHint().height()
+
+
+def test_the_hosted_log_band_is_on_screen_under_the_plate_slot(qapp, napari_pane_stub,
+                                                              squid_dataset):
+    from tests.test_view_deck import _tabbed_plate
+
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    try:
+        v = views[0]
+        _settle(qapp)
+        assert v._hosts_plate_slots
+        log = win._log_panel
+        assert log.collapsed
+        assert log.isVisibleTo(v), "the collapsed log is not on screen"
+        assert log.height() >= log.minimumSizeHint().height() > 0, (
+            f"the log band is {log.height()} px: not a reachable band")
+        host = v._plate_log_host
+        assert host.height() >= win._plate_slot_box.height() + log.height(), (
+            "the slot host is shorter than plate + log: the band is clipped")
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_a_fresh_view_rests_with_the_operators_band_collapsed_and_no_defaults_row(
+        qapp, napari_pane_stub, squid_dataset):
+    """Live on 2888349 the band opened by itself on launch with a bare 'defaults' row."""
+    root, _ = squid_dataset
+    win, (v,) = _open_view(qapp, root)
+    try:
+        v.show()
+        _settle(qapp)
+        fold = v._operators_fold
+        assert fold.collapsed, "the operators band opened without a summon"
+        assert not fold._body.isVisibleTo(v)
+        assert fold.grip.text().startswith("▸")
+        note = v._controls_note
+        assert not note.isVisibleTo(v) or note.text() not in ("", "defaults"), (
+            "a bare 'defaults' row renders with nothing to say")
+        fold.set_collapsed(False)
+        v._refresh_controls_note()
+        assert not note.isVisibleTo(v), "'defaults' is not a fact; the row stays hidden"
+        # A re-show of the host (a dock re-add, a tab switch) keeps the FOLD's own state.
+        fold.set_collapsed(True)
+        fold.hide()
+        fold.show()
+        _settle(qapp)
+        assert not fold._body.isVisibleTo(v)
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+# --- ruling q: fstack is an operator with a card ---------------------------------------------
+# Julio: "Why isn't the fstack stuff integrated as an operator?" Measured: registered and CLI-
+# runnable, no card, so the view's dropdown (built from the cards) could not select it.
+
+
+def test_every_runnable_operator_has_a_card():
+    from squidxplorer import runnable_operators
+    from squidxplorer._operations import CLI_ONLY_OPERATORS, _OPERATIONS_BY_KEY
+
+    assert CLI_ONLY_OPERATORS == frozenset(), "every survivor has a card; the CLI-only set stays empty"
+    missing = [n for n in runnable_operators()
+               if n not in _OPERATIONS_BY_KEY and n not in CLI_ONLY_OPERATORS]
+    assert not missing, f"runnable operator(s) without a card, invisible to the GUI: {missing}"
+
+
+def test_fstack_is_selectable_in_the_view_and_declares_a_depth_collapsing_plane_op(
+        qapp, napari_pane_stub, squid_dataset):
+    from squidxplorer import is_region_operator, operator_consumes
+    from squidxplorer._engine import operator_output
+    from squidxplorer._operations import _OPERATIONS_BY_KEY
+
+    card = _OPERATIONS_BY_KEY["fstack"]
+    assert card.label == "Focus stack (all-in-focus)"
+    assert card.blurb == "Fuse each z stack into one all-in-focus image (Pertuz SAF)."
+    assert len(card.blurb.split(". ")) == 1
+    # The same facts Preview / Run on plate read: per-FOV, z-collapsing (the 2D tab shows its
+    # one plane; a save writes the acquisition-format copy like mip).
+    assert not is_region_operator("fstack")
+    assert "z" in operator_consumes("fstack")
+    assert operator_output("fstack", {}) == (True, "intensity")
+
+    root, _ = squid_dataset
+    win, (v,) = _open_view(qapp, root)
+    try:
+        combo = v._op_combo
+        keys = [combo.itemData(i) for i in range(combo.count())]
+        assert "fstack" in keys, f"fstack is not in the view's dropdown: {keys}"
+        v.show_operator_controls_for("fstack")
+        _settle(qapp)
+        panel = v._inserted_panel
+        assert panel is not None, "fstack's inline panel did not insert"
+        assert panel.adv_btn is not None and panel.adv_btn.text() == "advanced parameters"
+        assert sorted(panel.widgets) == ["alpha", "nhsize", "sth"]
+        assert not v._controls_note.isVisibleTo(v), "an empty headline must not render a row"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+# --- ruling r: a preview's layer has the asking view's raw extent and lands only there --------
+# Julio, live on 2888349: "when I run decon on an ROI, it adds the full FOV to the layer. When
+# I go to a tab that's the mosaic, it still enables me to click decon and look at a single ROI
+# in comparison to the whole mosaic. In other words, decon layer is != raw view".
+
+
+def _scoped_result(win, region, fov, op="mip"):
+    from squidxplorer._op_result import RegionResultAccumulator
+
+    meta = win._meta
+    acc = RegionResultAccumulator(op, region, meta, [c["name"] for c in meta["channels"]],
+                                  fovs=[fov])
+    acc.add(fov, np.full((len(meta["channels"]),) + tuple(meta["frame_shape"]), 7, np.uint16))
+    return acc.result()
+
+
+def _layer_bbox(layer):
+    ty, tx = float(layer.translate[-2]), float(layer.translate[-1])
+    sy, sx = float(layer.scale[-2]), float(layer.scale[-1])
+    h, w = layer.data.shape[-2], layer.data.shape[-1]
+    return (tx, ty, tx + w * sx, ty + h * sy), (h, w)
+
+
+def test_an_roi_child_shows_a_preview_cropped_to_its_own_box(qapp, napari_pane_stub,
+                                                            squid_dataset):
+    from squidxplorer._mosaic_source import mosaic_fov_bboxes_um
+
+    root, _ = squid_dataset
+    win, (parent,) = _open_view(qapp, root)
+    mgr = win._viewer_manager
+    try:
+        region = parent.current_region()
+        fov = list(win._meta["fovs_per_region"][region])[0]
+        px = float(win._meta["pixel_size_um"])
+        x0, y0, x1, y1 = mosaic_fov_bboxes_um(win._meta, region)[fov].bbox()
+        roi = (x0 + 1 * px, y0 + 1 * px, x0 + 3 * px, y0 + 3 * px)   # a 2 x 2 px window in a 4 px field
+        child = mgr.open_child([region], roi_bbox=roi, parent_id=parent.window_id)
+        _drain_until(qapp, lambda: child._pane is not None, timeout=10)
+        _settle(qapp)
+        added = child.deliver_result("mip", _scoped_result(win, region, fov), visible=True)
+        assert added >= 1
+        channel = win._meta["channels"][0]["name"]
+        layer = child._pane.mosaic.find("mip", channel)
+        assert layer is not None
+        bbox, shape = _layer_bbox(layer)
+        for got, want in zip(bbox, roi):
+            assert abs(got - want) <= px, f"layer bbox {bbox} is not the ROI {roi}"
+        assert shape == (2, 2), f"the layer is {shape}, not the ROI's 2 x 2 px window"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_a_preview_lands_only_in_the_view_that_asked(qapp, napari_pane_stub, squid_dataset,
+                                                    monkeypatch):
+    from squidxplorer._run import OperatorRun
+
+    root, _ = squid_dataset
+    win, (asker, other) = _open_view(qapp, root, n_views=2)
+    try:
+        region = asker.current_region()
+        fov = list(win._meta["fovs_per_region"][region])[0]
+        got = {}
+        for v in (asker, other):
+            monkeypatch.setattr(v, "deliver_result",
+                                lambda op, res, visible, _v=v: got.setdefault(_v.window_id, []).append(visible) or 1)
+        win._active_op_key = "mip"
+        win._run = OperatorRun(key="mip", layer_key="mip", label="mip", action="mip", dest="",
+                               address=None, requester=asker, is_partial=True, t0=0.0,
+                               scope={region: [fov]})
+        planes = np.ones((len(win._meta["channels"]),) + tuple(win._meta["frame_shape"]),
+                         np.uint16)
+        win._on_result(region, fov, planes)
+        assert got.get(asker.window_id) == [True], "the asking view did not get its layer"
+        assert other.window_id not in got, "a view that did not ask received the layer"
+        # ...and the scoped result was NOT filed in the cross-window cache.
+        from squidxplorer._recipe import acquisition_version, cached_operator_results
+
+        assert not list(cached_operator_results(region, acquisition_version(win._reader))), (
+            "a scoped (ROI) result was cached under the whole region")
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_a_mosaic_tab_preview_covers_the_whole_mosaic(qapp, napari_pane_stub, squid_dataset):
+    from squidxplorer._mosaic_source import mosaic_bbox_um
+    from squidxplorer._op_result import RegionResultAccumulator
+
+    root, _ = squid_dataset
+    win, (v,) = _open_view(qapp, root)
+    try:
+        region = v.current_region()
+        meta = win._meta
+        acc = RegionResultAccumulator("mip", region, meta, [c["name"] for c in meta["channels"]])
+        for fov in meta["fovs_per_region"][region]:
+            acc.add(fov, np.full((len(meta["channels"]),) + tuple(meta["frame_shape"]), 3,
+                                 np.uint16))
+        assert v.deliver_result("mip", acc.result(), visible=True) >= 1
+        layer = v._pane.mosaic.find("mip", meta["channels"][0]["name"])
+        bbox, _ = _layer_bbox(layer)
+        want = mosaic_bbox_um(meta, region)
+        px = float(meta["pixel_size_um"])
+        for got, w in zip(bbox, want):
+            assert abs(got - w) <= px, f"mosaic-tab layer bbox {bbox} != mosaic {want}"
+    finally:
+        shutdown_plate_window(qapp, win)

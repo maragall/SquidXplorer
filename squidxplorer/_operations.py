@@ -41,11 +41,21 @@ _OPERATIONS = (
     Operation("decon", "Deconvolution (Richardson-Lucy)",
               "Deconvolve each FOV's z stack with the acquisition's own optics.",
               "_build_decon_tab"),
+    # Julio, 2026-08-25: "Why isn't the fstack stuff integrated as an operator?" It was
+    # registered and CLI-runnable with no card, so the view's dropdown could not offer it.
+    Operation("fstack", "Focus stack (all-in-focus)",
+              "Fuse each z stack into one all-in-focus image (Pertuz SAF).",
+              "_build_fstack_tab"),
     Operation("illumination", "Illumination profile (for stitching)",
               "Load or estimate the per-channel illumination profile stitch corrects with.",
               "_build_illumination_tab"),
 )
 _OPERATIONS_BY_KEY = {op.key: op for op in _OPERATIONS}
+
+#: Runnable operators deliberately WITHOUT a card. Empty: every survivor has one, and the
+#: test `test_every_runnable_operator_has_a_card` fails the build on a registry entry the GUI
+#: cannot select (fstack was one, 2026-08-25).
+CLI_ONLY_OPERATORS: frozenset = frozenset()
 
 # The operator a "save this to disk" button runs. Named, never spelled positionally.
 _SAVE_OPERATOR = "mip"
