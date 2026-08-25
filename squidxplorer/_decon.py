@@ -174,7 +174,7 @@ def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool,
                 raise RuntimeError(
                     "this petakit build's engine.rl takes no snapshot_iters, so a "
                     "per-iteration QC sweep cannot capture inside one solve. Update petakit "
-                    "(the pinned SHA in pyproject carries it); refusing to fall back to one "
+                    "(the pinned SHA in pyproject does not carry it yet); refusing to fall back to one "
                     "full re-solve per iteration count without saying so.")
             out = petakit.engine.rl(
                 np.ascontiguousarray(padded), psf,

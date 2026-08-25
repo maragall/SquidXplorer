@@ -29,8 +29,7 @@ refuses a plain double-click — right-click → Open → Open (or
 locally by the installer, so it carries no quarantine flag and double-clicks cleanly.
 
 `decon` runs on the Apple GPU here (torch MPS, pulled in by the decon extra on Apple
-Silicon); an Intel Mac gets the CPU path. Until the petakit pin moves past its
-cupy-cuda12x hard requirement (see pyproject), the decon install still fails on a Mac.
+Silicon); an Intel Mac gets the CPU path.
 
 ## Linux (x86_64) — `SquidXplorer-Setup-x86_64.AppImage`
 

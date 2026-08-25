@@ -174,11 +174,10 @@ only: <why>` (everything else, Intel Macs included; petakit's numpy path). decon
 checked on every machine. torch is Apple-only ON PURPOSE: `_decon_gpu` never runs on a CPU
 torch device, the PyPI Linux wheel drags the CUDA runtime (gigabytes) and the Windows one is
 CPU-only, so elsewhere it would be weight that changes no pixel. What is NOT done: CUDA torch
-wheels (index-specific, download.pytorch.org) are installed by nothing here, NVIDIA is CuPy's;
-and the petakit pin (64de19b) still hard-requires cupy-cuda12x, so `.[decon]` still fails to
-RESOLVE on a Mac until petakit `cupy-optional` (97b06b0, `petakit[cuda12]`) is pushed and the
-SHA bumped (an unpushed SHA is a 404 tarball). `build-installer.yml` still skips the decon
-install on macOS for the same reason.
+wheels (index-specific, download.pytorch.org) are installed by nothing here, NVIDIA is CuPy's.
+The petakit pin is main 97b06b0 (cupy is `petakit[cuda12]`, optional), verified as a 200
+tarball and a `pip download`; `build-installer.yml` proves the decon install on all three
+runners, macOS included.
 
 **ONE table** (`_engine._OPERATORS`, 2026-08-05). `add_operator` and `add_region_operator` are two
 registrars over one record, sharing one validator (`_engine._declare`); `add_region_operator`

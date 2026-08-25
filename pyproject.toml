@@ -187,14 +187,13 @@ decon = [
     # petakit's dependency to declare, and adding it here would be this file guessing at another
     # package's requirements.
     #
-    # THE PIN BELOW STILL HARD-REQUIRES cupy-cuda12x, so `pip install ".[decon]"` fails on macOS
-    # and on any machine without CUDA 12 (measured 2026-08-05, the resolver error is
-    #     ERROR: Could not find a version that satisfies the requirement cupy-cuda12x (from petakit)
-    # and pip resolves a whole command atomically, so `.[stitch,decon]` loses tilefusion too).
-    # petakit commit 97b06b0 (branch cupy-optional, 2026-08-25) moves cupy into its own
-    # `petakit[cuda12]` extra; bump this SHA to it once that branch is pushed, an unpushed SHA is
-    # a 404 tarball and would break every install. The CUDA payload then rides `decon-cuda`.
-    "petakit @ https://github.com/maragall/deconvolution/archive/64de19bca7133e9107d182ba4aff10e2ca856888.tar.gz",
+    # PINNED TO petakit main 97b06b0 (2026-08-25): cupy-cuda12x is petakit's OPTIONAL `cuda12`
+    # extra there, not a core dependency, so this resolves on macOS and on any machine without
+    # CUDA 12. Until that commit `pip install ".[decon]"` failed everywhere but a CUDA rig
+    # (measured 2026-08-05: "Could not find a version that satisfies the requirement
+    # cupy-cuda12x (from petakit)", and pip resolves a whole command atomically, so
+    # `.[stitch,decon]` lost tilefusion too). The CUDA payload rides `decon-cuda` below.
+    "petakit @ https://github.com/maragall/deconvolution/archive/97b06b025d556c35c0414acfe4870832a8948917.tar.gz",
     # torch is the Apple GPU backend (squidxplorer/_decon_gpu.py runs the RL update on MPS). It
     # was declared NOWHERE until 2026-08-25 and worked in the dev env by accident, so a customer
     # Mac always ran petakit's CPU path (measured: 3 min 05 s for 3 iterations on a
