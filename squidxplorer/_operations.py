@@ -41,12 +41,8 @@ _OPERATIONS = (
               "acquisition whose coordinates.csv carries the registered positions.",
               "_build_register_tab"),
     Operation("decon", "Deconvolution (Richardson-Lucy)",
-              "The volume solve: true 3-D Richardson-Lucy over each FOV's whole z-stack against "
-              "a vectorial PSF computed from this acquisition's own optics (NA, emission "
-              "wavelength, pixel size, z-step) -- not an assumed Gaussian. Every plane comes "
-              "back; an n_z=1 acquisition gets the 2-D in-focus solve as the degenerate case. "
-              "RL is semi-convergent, so the iteration count is chosen by eye against a turbo "
-              "x-z / y-z view rather than defaulted.",
+              "3-D Richardson-Lucy per FOV, vectorial PSF from this acquisition's own optics. "
+              "Pick the iteration count by eye with the sweep.",
               "_build_decon_tab"),
     Operation("illumination", "Illumination profile (for stitching)",
               "Load a stored per-channel illumination profile (.npy) or estimate one live from "

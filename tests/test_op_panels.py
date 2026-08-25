@@ -363,140 +363,47 @@ def test_the_decon_panel_shutdown_joins_a_running_worker(qapp):
     assert p._worker is None                 # the worker was reaped, not orphaned
 
 
-def test_the_result_view_renders_the_turbo_composite_at_the_composite_s_own_size(qapp):
-    """Pane 3 renders the picture ``squidxplorer._decon_qc`` produced; it builds none of its own."""
-    pytest.importorskip("matplotlib")
-    from squidxplorer._decon_qc import qc_composite
-
-    volume = np.zeros((5, 40, 40), dtype=np.float32)
-    volume[2, 20, 20] = 1000.0
-    composite = qc_composite(volume, (2, 20, 20), gap=2)
+def test_the_result_view_carries_no_turbo_picture(qapp):
+    """The turbo composite panes are GONE (Julio, 2026-08-25: "The turbo colormap preview
+    makes no sense. remove it") — the preview is the in-view data layer under the channel's
+    own colormap. The stepper, caption and metric survive them."""
     view = DeconQCResultView("A1/0/c0")
-    view.show_iteration(3, composite, 0.31, "improving", "still tightening")
-    img = view.image_label.pixmap().toImage()
-    assert (img.width(), img.height()) == (composite.shape[1], composite.shape[0])
-    assert "3" in view.caption_label.text()
-
-
-def _click(qapp, view, row, col):
-    """A real mouse press at composite pixel (row, col), through ``mousePressEvent`` so the
-    pixmap's centring offset inside the label is exercised, not assumed."""
-    from qtpy.QtCore import QPoint
-    from qtpy.QtTest import QTest
-
-    label = view.image_label
-    pm = label.pixmap()
-    dx = max((label.width() - pm.width()) // 2, 0)
-    dy = max((label.height() - pm.height()) // 2, 0)
-    QTest.mouseClick(label, Qt.LeftButton, Qt.NoModifier, QPoint(dx + col, dy + row))
-    qapp.processEvents()
-
-
-def _qc_view(qapp, volume, centre, view_half=None):
-    """A result view showing one iteration of *volume*, laid out and clickable."""
-    from squidxplorer._decon_qc import qc_composite
-
-    view = DeconQCResultView("A1/0/c0")
-    view.show_iteration(3, qc_composite(volume, centre, view_half=view_half), 0.31,
-                        "improving", "still tightening",
-                        volume=volume, centre=centre, view_half=view_half)
-    view.resize(400, 400)
-    view.show()
-    qapp.processEvents()
-    return view
-
-
-def test_clicking_the_picture_moves_the_crosshairs_and_re_cuts_the_strips(qapp):
-    """A click re-sections the SAME volume through the clicked point; ``qc_composite`` already
-    takes ``centre``, so no RL run happens here."""
-    pytest.importorskip("matplotlib")
-    volume = np.zeros((5, 40, 40), dtype=np.float32)
-    volume[2, 20, 20] = 1000.0            # what the run centred on
-    volume[2, 10, 10] = 700.0             # a second structure, off both current sections
-    view = _qc_view(qapp, volume, (2, 20, 20))
-    before = view._rgb.copy()
-
-    _click(qapp, view, row=10, col=10)    # inside the x-y panel
-
-    assert view._centre == (2, 10, 10), "the crosshairs did not move to the clicked voxel"
-    assert not np.array_equal(view._rgb, before), (
-        "the crosshairs moved but the strips were not re-cut — the picture is stale")
-    assert "z=2" in view.crosshair_label.text() and "y=10" in view.crosshair_label.text()
-    # The halo/core number was measured where the RUN put the crosshairs, so once they move by
-    # hand the picture and the number are about different points and the view has to say so.
-    assert "moved by hand" in view.crosshair_label.text()
-    assert view.history == [(3, pytest.approx(0.31))], "a click is not another iteration"
+    assert not hasattr(view, "image_label"), "the turbo picture pane is back"
+    assert not hasattr(view, "crosshair_label"), "the crosshair chrome is back"
+    import squidxplorer._decon_qc as decon_qc
+    import squidxplorer._op_panels as op_panels
+    assert not hasattr(decon_qc, "turbo_rgb"), "_decon_qc still ships the turbo mapper"
+    assert not hasattr(decon_qc, "qc_composite"), "_decon_qc still ships the composite"
+    assert "turbo_rgb" not in open(op_panels.__file__).read()
+    view.show_iteration(3, 0.31, "improving", "still tightening")
+    assert "ITERATION 3 of 3" in view.caption_label.text()
     view.close()
 
 
-def test_clicking_a_separator_band_moves_nothing(qapp):
-    """A gap pixel points at no section; snapping to the nearest one would move the crosshairs
-    somewhere the user did not click."""
-    pytest.importorskip("matplotlib")
-    volume = np.zeros((5, 40, 40), dtype=np.float32)
-    volume[2, 20, 20] = 1000.0
-    view = _qc_view(qapp, volume, (2, 20, 20))
-    before = view._rgb.copy()
-
-    _click(qapp, view, row=41, col=10)    # the horizontal separator (gap=2 at rows 40..41)
-
-    assert view._centre == (2, 20, 20)
-    assert np.array_equal(view._rgb, before)
-    view.close()
-
-
-def test_a_view_shown_without_its_volume_is_simply_not_clickable(qapp):
-    """The three-argument show_iteration must not raise on a click: there is nothing to re-slice."""
-    pytest.importorskip("matplotlib")
-    from squidxplorer._decon_qc import qc_composite
-
-    volume = np.zeros((5, 40, 40), dtype=np.float32)
-    volume[2, 20, 20] = 1000.0
-    view = DeconQCResultView("A1/0/c0")
-    view.show_iteration(3, qc_composite(volume, (2, 20, 20)), 0.31, "improving", "")
-    view.resize(400, 400)
-    view.show()
-    qapp.processEvents()
-    before = view._rgb.copy()
-
-    _click(qapp, view, row=10, col=10)
-
-    assert view._centre is None
-    assert np.array_equal(view._rgb, before)
-    view.close()
-
-
-def test_the_worker_hands_the_volume_through_so_the_click_has_something_to_re_slice(qapp):
-    """The RL volume must survive the worker — emitting the composite alone would leave nothing
-    to cut a different section out of. Pinned via ``frame.volume``/``centre``/``view_half``."""
-    pytest.importorskip("matplotlib")
-    from squidxplorer._decon_qc import qc_composite
+def test_the_worker_hands_the_volume_through_for_the_data_preview(qapp):
+    """The RL volume must survive the worker — it IS the preview the view renders."""
     from squidxplorer._op_panels import QCFrame
 
     volume = np.zeros((5, 40, 40), dtype=np.float32)
     volume[2, 20, 20] = 1000.0
     panel = DeconQCPanel(_Host())
     panel._view = DeconQCResultView("A1/0/c0")
-    frame = QCFrame(qc_composite(volume, (2, 20, 20), view_half=8), volume, (2, 20, 20), 8)
+    frame = QCFrame(volume, (2, 20, 20), 8)
 
     panel._on_done(3, frame, 0.31)
 
-    assert panel._view._volume is not None, "the view got a picture but no volume to re-slice"
-    assert panel._view._centre == (2, 20, 20)
-    assert panel._view._view_half == 8
+    rec = panel._view.capture(3)
+    assert rec is not None and rec["volume"] is not None, (
+        "the view got a caption but no volume to preview")
+    assert rec["centre"] == (2, 20, 20)
+    assert rec["view_half"] == 8
     panel._view.close()
 
 
 def test_the_result_view_keeps_every_iteration_so_they_can_be_compared(qapp):
-    pytest.importorskip("matplotlib")
-    from squidxplorer._decon_qc import qc_composite
-
-    volume = np.zeros((5, 20, 20), dtype=np.float32)
-    volume[2, 10, 10] = 1000.0
-    c = qc_composite(volume, (2, 10, 10), gap=2)
     view = DeconQCResultView("A1/0/c0")
-    view.show_iteration(2, c, 0.40, "first", "")
-    view.show_iteration(3, c, 0.31, "improving", "")
+    view.show_iteration(2, 0.40, "first", "")
+    view.show_iteration(3, 0.31, "improving", "")
     assert [k for k, _ in view.history] == [2, 3]
 
 
@@ -805,9 +712,10 @@ def test_an_operator_with_no_parameters_still_builds_and_says_so(qapp):
 # =======================================================================================
 # THE QC SWEEP STEPPER + the session optics row (2026-08-24)
 # =======================================================================================
-# Julio: "When I do decon, I would like to see the turbo colormap result with the xz, yz
-# as I click iteration by iteration." The sweep captures every iteration of ONE solve; the
-# view steps them; 'use k iterations' writes k into the run's ONE iterations parameter.
+# Julio (2026-08-24): step "iteration by iteration"; (2026-08-25): "The turbo colormap
+# preview makes no sense. remove it." The sweep captures every iteration of ONE solve; the
+# view steps them; 'use k iterations' writes k into the run's ONE iterations parameter; the
+# preview is the in-view data layer under the channel's own colormap.
 
 @pytest.fixture()
 def clean_decon_session():
@@ -821,29 +729,26 @@ def clean_decon_session():
 
 def _sweep_into(view, ks=(1, 2, 3)):
     """Feed *view* one distinct captured iteration per k, the way the worker's done signal does."""
-    from squidxplorer._decon_qc import qc_composite
-
     volumes = {}
     for k in ks:
         volume = np.zeros((5, 20, 20), dtype=np.float32)
         volume[2, 10, 10] = 100.0 * k               # genuinely different pixels per iteration
         volumes[k] = volume
-        view.show_iteration(k, qc_composite(volume, (2, 10, 10)), 0.5 - 0.1 * k,
+        view.show_iteration(k, 0.5 - 0.1 * k,
                             "improving", "still tightening", volume=volume,
                             centre=(2, 10, 10), delta=None if k == 1 else float(k))
     return volumes
 
 
 def test_the_view_steps_iteration_by_iteration_without_a_re_solve(qapp, clean_decon_session):
-    pytest.importorskip("matplotlib")
     view = DeconQCResultView("A1/0/c0")
     volumes = _sweep_into(view)
 
     assert "ITERATION 3 of 3" in view.caption_label.text()
     view.prev_btn.click()
     assert "ITERATION 2 of 3" in view.caption_label.text()
-    assert np.array_equal(view._volume, volumes[2]), (
-        "stepping back did not swap the click-resection volume with the picture")
+    assert np.array_equal(view.capture(view._shown_k)["volume"], volumes[2]), (
+        "stepping back did not land on iteration 2's captured volume")
     view.iter_slider.setValue(1)
     assert "ITERATION 1 of 3" in view.caption_label.text()
     view.next_btn.click()
@@ -855,7 +760,6 @@ def test_the_view_steps_iteration_by_iteration_without_a_re_solve(qapp, clean_de
 def test_the_per_step_change_is_shown_beside_the_ratio(qapp, clean_decon_session):
     """mean |Δ| vs the previous iteration is the honest 'is it still moving' number; the first
     iteration has no previous and must not invent one."""
-    pytest.importorskip("matplotlib")
     view = DeconQCResultView("A1/0/c0")
     _sweep_into(view, ks=(1, 2))
     assert "mean |Δ| vs k-1: 2" in view.caption_label.text()
@@ -867,7 +771,6 @@ def test_the_per_step_change_is_shown_beside_the_ratio(qapp, clean_decon_session
 def test_use_k_iterations_writes_the_displayed_count_into_the_run(qapp, clean_decon_session):
     """THE point of the preview: the displayed k lands in the panel's run-iterations control,
     which is what kwargs() -> operator_kwargs_for feeds every decon run. One source of truth."""
-    pytest.importorskip("matplotlib")
     from squidxplorer._decon import DEFAULT_ITERATIONS
 
     panel = DeconQCPanel(_Host())
@@ -1065,18 +968,16 @@ def _preview_rig(channels=("c0",)):
 def test_the_displayed_iteration_lands_in_a_view_at_its_stage_position(qapp,
                                                                        clean_decon_session):
     """Item 1: the sweep is judged on ACTUAL data at real size — the displayed capture lands
-    as a real turbo layer in a view showing that region, placed at the crop's own stage
-    footprint, and stepping the slider swaps the SAME layer's pixels (no re-solve)."""
-    pytest.importorskip("matplotlib")
-    from squidxplorer._decon_qc import qc_composite
-
+    as a real DATA layer (the channel's own colormap, never turbo) in a view showing that
+    region, placed at the crop's own stage footprint, and stepping the slider swaps the SAME
+    layer's pixels (no re-solve)."""
     panel, mosaic, _view = _preview_rig()
     panel._sweep_at = ("A1", 0, "c0")
     panel._view = DeconQCResultView("A1/0/c0")
     panel._view.iterationDisplayed.connect(panel._push_view_preview)
 
     vol1 = np.zeros((2, 16, 16), np.float32); vol1[1, 8, 8] = 100.0
-    panel._view.show_iteration(1, qc_composite(vol1, (1, 8, 8)), 0.5, "first", "v",
+    panel._view.show_iteration(1, 0.5, "first", "v",
                                volume=vol1, centre=(1, 8, 8), fov_origin=(6, 4))
 
     layer = mosaic.find(DeconQCPanel.PREVIEW_OP, "c0")
@@ -1086,10 +987,11 @@ def test_the_displayed_iteration_lands_in_a_view_at_its_stage_position(qapp,
     assert tuple(float(v) for v in layer.translate[-2:]) == (206.0, 104.0)
     assert tuple(float(v) for v in layer.scale) == (1.5, 1.0, 1.0), (
         "the crop is not placed at the acquisition's own pitch and z step")
-    assert getattr(layer.colormap, "name", None) == "turbo"
+    assert getattr(layer.colormap, "name", "") != "turbo", (
+        "the preview layer still renders in turbo; it must wear the channel's own colormap")
 
     vol2 = np.zeros((2, 16, 16), np.float32); vol2[1, 8, 8] = 300.0
-    panel._view.show_iteration(2, qc_composite(vol2, (1, 8, 8)), 0.4, "improving", "v",
+    panel._view.show_iteration(2, 0.4, "improving", "v",
                                volume=vol2, centre=(1, 8, 8), fov_origin=(6, 4), delta=1.0)
     assert mosaic.find(DeconQCPanel.PREVIEW_OP, "c0") is layer, (
         "stepping created a second layer instead of updating the preview")
@@ -1102,8 +1004,6 @@ def test_the_displayed_iteration_lands_in_a_view_at_its_stage_position(qapp,
 
 def test_run_wires_the_stepper_to_the_view_preview(qapp, clean_decon_session, monkeypatch):
     """The production wiring: run() itself connects iterationDisplayed to the preview push."""
-    pytest.importorskip("matplotlib")
-    from squidxplorer._decon_qc import qc_composite
     from squidxplorer._op_panels import _DeconQCWorker
 
     monkeypatch.setattr(_DeconQCWorker, "start", lambda self: None)
@@ -1111,7 +1011,7 @@ def test_run_wires_the_stepper_to_the_view_preview(qapp, clean_decon_session, mo
     panel.run()
     try:
         vol = np.zeros((2, 16, 16), np.float32); vol[1, 8, 8] = 50.0
-        panel._view.show_iteration(1, qc_composite(vol, (1, 8, 8)), 0.5, "first", "v",
+        panel._view.show_iteration(1, 0.5, "first", "v",
                                    volume=vol, centre=(1, 8, 8), fov_origin=(0, 0))
         assert mosaic.find(DeconQCPanel.PREVIEW_OP, "c0") is not None, (
             "run() did not wire the stepper to the in-view data preview")
@@ -1122,15 +1022,12 @@ def test_run_wires_the_stepper_to_the_view_preview(qapp, clean_decon_session, mo
 def test_a_sweep_with_no_view_over_the_region_still_shows_in_the_panel(qapp,
                                                                        clean_decon_session):
     """No view over the region: the push is a quiet no-op, never an error — the panel's own
-    composite is still the preview."""
-    pytest.importorskip("matplotlib")
-    from squidxplorer._decon_qc import qc_composite
-
+    caption and metric still describe the sweep."""
     panel = DeconQCPanel(_Host())                  # host has no _viewer_manager at all
     panel._sweep_at = ("A1", 0, "c0")
     panel._view = DeconQCResultView("A1/0/c0")
     vol = np.zeros((2, 16, 16), np.float32)
-    panel._view.show_iteration(1, qc_composite(vol, (1, 8, 8)), 0.5, "first", "v",
+    panel._view.show_iteration(1, 0.5, "first", "v",
                                volume=vol, centre=(1, 8, 8), fov_origin=(0, 0))
     panel._push_view_preview(1)                    # must not raise
     panel._view.close()

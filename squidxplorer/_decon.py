@@ -402,8 +402,8 @@ def decon_op(
 # iteration count at all; the QC tool existed to choose one and had nowhere to put the answer.
 _ITERATIONS_PARAM = Param(
     "iterations", DEFAULT_ITERATIONS,
-    "Richardson-Lucy iterations. RL is semi-convergent, so pick the count by eye in the decon "
-    "panel's turbo x-z / y-z sweep; its 'use k iterations' button writes the choice here.")
+    "Richardson-Lucy iterations. Pick the count by eye with the decon sweep; 'use k "
+    "iterations' writes the choice here.")
 
 add_operator("decon", decon_op, consumes=frozenset({"z"}), params=(_ITERATIONS_PARAM,),
              requires=("petakit",), extra="decon")

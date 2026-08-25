@@ -5,7 +5,7 @@ Every other operator's panel is built from its ``params`` declaration by
 parameter form cannot: :class:`StitcherPanel` converts a percentage to a fraction, greys out
 knobs that do nothing with registration off, and refuses a labels operator before the run
 starts; :class:`DeconQCPanel` runs a semi-convergence SWEEP (one RL solve capturing every
-iteration) and shows the turbo x-z / y-z stepper INLINE, so the whole choose-the-iteration
+iteration) and shows the iteration stepper INLINE, so the whole choose-the-iteration
 loop lives wherever the panel is hosted — since 2026-08-24 that is the views window's
 operator dock, never the plate window. ``_viewer._activate_operator`` prefers a hand-written
 panel and falls back to the generic one.
@@ -19,7 +19,6 @@ from typing import NamedTuple, Optional
 
 import numpy as np
 from qtpy.QtCore import Qt, QThread, Signal
-from qtpy.QtGui import QImage, QPixmap
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -465,14 +464,14 @@ class StitcherPanel(_Panel):
 
 
 class QCFrame(NamedTuple):
-    """One captured QC iteration, as the panel receives it. The volume travels with the
-    composite because the picture is clickable: re-sectioning is qc_composite again on this
-    same array. ``delta`` defaults so the older four-field construction still stands."""
+    """One captured QC iteration, as the panel receives it. The volume is the preview: it
+    lands in a view as a real data layer under the channel's own colormap (the turbo
+    composite panes were removed, Julio 2026-08-25: "The turbo colormap preview makes no
+    sense. remove it")."""
 
-    composite: object          # (H, W) float, what qc_composite returned at `centre`
-    volume: object             # (Z, Y, X) the deconvolved crop the sections were cut from
+    volume: object             # (Z, Y, X) the deconvolved crop
     centre: tuple              # (z, y, x) in `volume`: the brightest structure RL was judged at
-    view_half: object          # the lateral half-width the composite was cut to, or None
+    view_half: object          # the lateral half-width a section view would cut to, or None
     delta: object = None       # mean |delta| against the previous iteration's volume, or None
     fov_origin: object = None  # (y0, x0) of the crop inside its FOV frame, in FOV pixels
 
@@ -504,7 +503,6 @@ class _DeconQCWorker(QThread):
                 crop_around,
                 halo_core_ratio,
                 load_stack,
-                qc_composite,
                 qc_window_um,
             )
 
@@ -538,41 +536,24 @@ class _DeconQCWorker(QThread):
                 delta = float(np.mean(np.abs(volume - previous)))
                 previous = volume
                 self.done.emit(int(k),
-                               QCFrame(qc_composite(volume, centre, view_half=view_half),
-                                       volume, centre_t, view_half, delta, origin),
+                               QCFrame(volume, centre_t, view_half, delta, origin),
                                float(ratio))
             self.sweep_done.emit(len(snaps))
         except Exception as exc:                  # reported as a sentence, never swallowed
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
-class _ClickableImage(QLabel):
-    """A QLabel showing an unscaled pixmap; reports clicks in pixmap pixels, compensating
-    for the centring offset a scroll area introduces."""
-
-    clicked = Signal(int, int)             # (row, col) in the pixmap's own pixels
-
-    def mousePressEvent(self, event):      # noqa: N802 (Qt's spelling)
-        pm = self.pixmap()
-        if pm is not None and not pm.isNull():
-            pos = event.pos()
-            dx = max((self.width() - pm.width()) // 2, 0)
-            dy = max((self.height() - pm.height()) // 2, 0)
-            col, row = pos.x() - dx, pos.y() - dy
-            if 0 <= col < pm.width() and 0 <= row < pm.height():
-                self.clicked.emit(int(row), int(col))
-        super().mousePressEvent(event)
-
-
 class DeconQCResultView(QWidget):
-    """The deconvolved 2-D image in turbo with the x-z and y-z strips attached. Renders what
-    :func:`squidxplorer._decon_qc.qc_composite` / ``turbo_rgb`` produced. Clicking the image
-    re-sections the same in-memory volume through the clicked point; no RL run happens.
+    """The iteration stepper over the sweep's captures. The PICTURE is the in-view data
+    preview: each displayed capture lands in a view as a real layer under the channel's own
+    colormap (the turbo composite panes were removed, Julio 2026-08-25: "The turbo colormap
+    preview makes no sense. remove it"; the x-z / y-z strips went with them — they could not
+    stand without the turbo rendering and its legend).
 
     Every shown iteration is KEPT (Julio, 2026-08-24: "as I click iteration by iteration") so
-    the stepper below the picture is a repaint of a cached capture, never a re-solve; the
-    "use k iterations" button emits :attr:`useIterations` with the DISPLAYED count — the
-    whole preview exists so the user can decide how many iterations the real run gets."""
+    stepping is a repaint of a cached capture, never a re-solve; the "use k iterations"
+    button emits :attr:`useIterations` with the DISPLAYED count — the whole preview exists
+    so the user can decide how many iterations the real run gets."""
 
     useIterations = Signal(int)            # the displayed k, adopted as the run's iterations
     iterationDisplayed = Signal(int)       # a capture was (re)painted: the data preview follows
@@ -584,24 +565,12 @@ class DeconQCResultView(QWidget):
         #: k -> the record show_iteration stored; the stepper repaints from these.
         self._records: dict = {}
         self._shown_k = None
-        # The volume behind the current picture, kept so a click can re-section it.
-        self._volume = None
-        self._centre = None
-        self._view_half = None
-        self._gap = 2
         v = QVBoxLayout(self)
         v.setContentsMargins(14, 12, 14, 12)
         v.setSpacing(8)
         t = QLabel(f"Deconvolution QC · {subject}")
         t.setStyleSheet("font-size:15px;font-weight:800;")
         v.addWidget(t)
-        legend = QLabel("x-y with the y-z strip to its right and the x-z strip below, all "
-                        "TURBO on one shared scale. Turbo has a steep ramp through the low "
-                        "intensities where a halo lives; on a grey ramp the halo is the part "
-                        "of the image the eye is worst at.")
-        legend.setWordWrap(True)
-        legend.setStyleSheet(_SUB)
-        v.addWidget(legend)
 
         self.caption_label = QLabel("")
         self.caption_label.setWordWrap(True)
@@ -612,25 +581,6 @@ class DeconQCResultView(QWidget):
         self.verdict_label.setWordWrap(True)
         self.verdict_label.setStyleSheet("color:#d29922;font-size:11px;")
         v.addWidget(self.verdict_label)
-
-        self.crosshair_label = QLabel("")
-        self.crosshair_label.setWordWrap(True)
-        self.crosshair_label.setStyleSheet(_SUB)
-        v.addWidget(self.crosshair_label)
-
-        self.image_label = _ClickableImage()
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setCursor(Qt.CrossCursor)
-        self.image_label.setToolTip(
-            "Click anywhere in the x-y plane, the x-z strip or the y-z strip to move the "
-            "crosshairs there. The sections are re-cut from the same deconvolved volume; "
-            "nothing is re-run.")
-        self.image_label.clicked.connect(self._on_image_clicked)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
-        scroll.setWidget(self.image_label)
-        v.addWidget(scroll, 1)
 
         self.trail_label = QLabel("")
         self.trail_label.setWordWrap(True)
@@ -673,18 +623,17 @@ class DeconQCResultView(QWidget):
         self.use_btn.clicked.connect(self._on_use)
         v.addWidget(self.use_btn)
 
-    def show_iteration(self, iterations: int, composite, ratio: float,
+    def show_iteration(self, iterations: int, ratio: float,
                        kind: str, verdict: str, volume=None, centre=None,
-                       view_half=None, gap: int = 2, delta=None, fov_origin=None) -> None:
-        """Display one iteration's composite and remember it, so the loop can be compared and
-        the stepper can revisit it. Passing volume/centre/view_half makes the picture
-        clickable; omitting them leaves it static (the older three-argument call shape)."""
+                       view_half=None, delta=None, fov_origin=None) -> None:
+        """Record one iteration's capture and display it, so the loop can be compared and
+        the stepper can revisit it. The volume is what the in-view data preview renders."""
         k = int(iterations)
         self._records[k] = {
-            "composite": composite, "ratio": float(ratio), "verdict": verdict,
+            "ratio": float(ratio), "verdict": verdict,
             "volume": None if volume is None else np.asarray(volume),
             "centre": None if centre is None else tuple(int(v) for v in centre),
-            "view_half": view_half, "gap": int(gap), "delta": delta,
+            "view_half": view_half, "delta": delta,
             "fov_origin": None if fov_origin is None else tuple(int(v) for v in fov_origin),
         }
         self.history.append((k, float(ratio)))
@@ -700,16 +649,11 @@ class DeconQCResultView(QWidget):
 
     # -- stepping -----------------------------------------------------------------------------
     def _display(self, k: int) -> None:
-        """Repaint the captured iteration *k*: picture, clickability and captions together."""
+        """Show the captured iteration *k*: caption, adoption button, and the preview push."""
         rec = self._records.get(int(k))
         if rec is None:
             return
         self._shown_k = int(k)
-        self._volume = rec["volume"]
-        self._centre = rec["centre"]
-        self._view_half = rec["view_half"]
-        self._gap = rec["gap"]
-        self._paint(rec["composite"])
         top = max(self._records)
         self.caption_label.setText(
             f"ITERATION {k} of {top}  ·  halo/core {rec['ratio']:.3f}"
@@ -719,7 +663,6 @@ class DeconQCResultView(QWidget):
         self.iter_slider.blockSignals(True)
         self.iter_slider.setValue(int(k))
         self.iter_slider.blockSignals(False)
-        self._sync_crosshair_label()
         self.iterationDisplayed.emit(int(k))
 
     def capture(self, k: int) -> Optional[dict]:
@@ -745,53 +688,14 @@ class DeconQCResultView(QWidget):
         if self._shown_k is not None:
             self.useIterations.emit(int(self._shown_k))
 
-    def _paint(self, composite) -> None:
-        """The only place a pixmap is set, so the first paint and every crosshair move agree."""
-        from squidxplorer._decon_qc import turbo_rgb
-
-        rgb = np.ascontiguousarray(turbo_rgb(composite))
-        h, w, _ = rgb.shape
-        image = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
-        self.image_label.setPixmap(QPixmap.fromImage(image))
-        self.image_label.setMinimumSize(w, h)
-        self._rgb = rgb                       # keep the buffer alive alongside the pixmap
-
-    def _on_image_clicked(self, row: int, col: int) -> None:
-        """Move the crosshairs to the clicked voxel and re-cut the three sections there (a
-        re-slice of the in-memory volume, no RL run)."""
-        if self._volume is None or self._centre is None:
-            return
-        from squidxplorer._decon_qc import composite_centre_at, qc_composite
-
-        centre = composite_centre_at(self._volume.shape, self._centre, row, col,
-                                     view_half=self._view_half, gap=self._gap)
-        if centre is None or centre == self._centre:
-            return
-        self._centre = centre
-        self._paint(qc_composite(self._volume, centre, view_half=self._view_half,
-                                 gap=self._gap))
-        self._sync_crosshair_label(moved=True)
-
-    def _sync_crosshair_label(self, moved: bool = False) -> None:
-        if self._centre is None:
-            self.crosshair_label.setText(
-                "" if self._volume is None else "crosshairs: unknown")
-            return
-        z, y, x = self._centre
-        where = f"crosshairs at z={z}, y={y}, x={x}"
-        self.crosshair_label.setText(
-            where + ("  ·  moved by hand; the halo/core number above was measured at the "
-                     "structure the run picked, not here." if moved else
-                     "  ·  the brightest structure the run found. Click the picture to "
-                     "section somewhere else."))
-
 
 class DeconQCPanel(_Panel):
     """Sweep the iterations once, step through the captures, and ADOPT the count that looks right.
 
     The preview exists so the user can DECIDE how many iterations the real run gets (Julio,
-    2026-08-24): one solve captures every iteration, the inline view steps them in turbo with
-    the x-z / y-z strips, and 'use k iterations' writes k into the run's own parameter."""
+    2026-08-24): one solve captures every iteration, the inline stepper revisits them (the
+    in-view data preview is the picture), and 'use k iterations' writes k into the run's own
+    parameter."""
 
     def __init__(self, host):
         super().__init__(
@@ -906,7 +810,7 @@ class DeconQCPanel(_Panel):
             "Selects a BACKEND, not an algorithm - the RL update is identical either way.")
         self.v.addWidget(self.cpu_cb)
 
-        self.run_btn = QPushButton("Deconvolve and show the turbo x-z / y-z sweep")
+        self.run_btn = QPushButton("Run the iteration sweep")
         self.run_btn.setCursor(Qt.PointingHandCursor)
         self.run_btn.clicked.connect(self.run)
         self.v.addWidget(self.run_btn)
@@ -1087,7 +991,7 @@ class DeconQCPanel(_Panel):
         # The verdict needs this iteration included; show_iteration is what appends it.
         history = list(self._view.history) + [(int(iterations), float(ratio))]
         kind, verdict = halo_verdict(history)
-        self._view.show_iteration(iterations, frame.composite, ratio, kind, verdict,
+        self._view.show_iteration(iterations, ratio, kind, verdict,
                                   volume=frame.volume, centre=frame.centre,
                                   view_half=frame.view_half,
                                   delta=getattr(frame, "delta", None),
@@ -1135,6 +1039,7 @@ class DeconQCPanel(_Panel):
             return
         try:
             from squidxplorer._mosaic_source import mosaic_fov_bboxes_um
+            from squidxplorer._napari_pane import _colormap_for
 
             box = mosaic_fov_bboxes_um(meta, region).get(int(fov))
             if box is None:
@@ -1145,9 +1050,11 @@ class DeconQCPanel(_Panel):
             h, w = int(volume.shape[-2]), int(volume.shape[-1])
             bbox = (fx0 + x0 * float(px), fy0 + y0 * float(px),
                     fx0 + (x0 + w) * float(px), fy0 + (y0 + h) * float(px))
+            # The channel's OWN colormap: the preview is a normal data layer, judged like data
+            # (Julio, 2026-08-25: "The turbo colormap preview makes no sense. remove it").
             mosaic.add_result("intensity", self.PREVIEW_OP, channel, volume,
                               bbox_um=bbox, z_scale_um=meta.get("dz_um") or None,
-                              colormap="turbo")
+                              colormap=_colormap_for(channel, meta.get("channels")))
         except Exception as exc:               # noqa: BLE001 - the preview is a nicety, SAID
             self.say(f"the sweep's data preview could not reach the view: "
                      f"{type(exc).__name__}: {exc}")
