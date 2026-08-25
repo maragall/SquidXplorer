@@ -1242,7 +1242,10 @@ class RegionViewer(QMainWindow):
             log.info("view %s running %s on %s with %s", self.window_id, key,
                      (regions if isinstance(regions, dict) else list(regions)), kwargs)
             self._run_operator(key, regions=regions, save=save, requester=self,
-                               operator_kwargs=kwargs)
+                               operator_kwargs=kwargs,
+                               # A depth-keeping preview must show THE PLANE THIS VIEW IS ON
+                               # (Julio, 2026-08-25), so the run carries the view's own z.
+                               z_level=self._z_slider_index())
             mode = "saving" if save else "previewing"
             self._echo(f"{mode} {self._op_combo.currentText()} on {self._view_label(regions)} "
                        f"[{self._render_mode.upper()}] · {self._params_summary(key)}.")
