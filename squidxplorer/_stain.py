@@ -199,7 +199,7 @@ def attach_stain_luts(root, channels: list, rgb_bases: set) -> None:
 _RATIO_MAX = 4.0
 #: PNG green at/below this is unwritten mosaic area, not tissue: ratio stays neutral there.
 _CHROMA_G_FLOOR = 2.0
-#: Per-FOV ratio windows kept in memory (each ~1.3 MB at 2 um over a 1900 px frame).
+#: Per-FOV ratio windows kept in memory (each ~2.6 MB at 2 um over a 1900 px frame).
 _CHROMA_CACHE_MAX = 32
 
 
@@ -229,6 +229,102 @@ def _luminance_weight(png_g: np.ndarray, plane: np.ndarray) -> np.ndarray:
     if not np.isfinite(gain) or gain <= 0:
         return np.ones_like(png_g, dtype=np.float32)
     return np.clip(png_g / np.maximum(coarse * gain, 1e-6), 0.0, 1.0).astype(np.float32)
+
+
+def _box3(a: np.ndarray) -> np.ndarray:
+    """3x3 box sum with edge replication (numpy only)."""
+    p = np.pad(a, 1, mode="edge")
+    return (p[:-2, :-2] + p[:-2, 1:-1] + p[:-2, 2:]
+            + p[1:-1, :-2] + p[1:-1, 1:-1] + p[1:-1, 2:]
+            + p[2:, :-2] + p[2:, 1:-1] + p[2:, 2:])
+
+
+#: Fill growth cap in pixels; at 2 um that is ~0.5 mm, far beyond any real overlap band.
+_FILL_MAX_STEPS = 256
+
+
+def _extend_valid(values: list, valid: np.ndarray, targets: np.ndarray) -> tuple:
+    """Extend *valid* pixels' values across *targets*: iterative 3x3 neighborhood-mean growth
+    (nearest-valid in spirit, inherently smooth) plus one 3x3 box smoothing over the filled
+    pixels. Chroma is low-frequency, so a band a few dozen pixels wide fills faithfully.
+
+    Returns ``(filled_values, reached)``: copies of *values* where reached targets carry the
+    extended values, valid pixels keep their exact measured values, and targets the growth
+    never reached (no valid source, or past the cap) keep their originals.
+    """
+    filled = valid.copy()
+    acc = [np.where(valid, v, 0.0).astype(np.float32) for v in values]
+    remaining = targets & ~filled
+    for _ in range(_FILL_MAX_STEPS):
+        if not remaining.any():
+            break
+        cnt = _box3(filled.astype(np.float32))
+        grow = remaining & (cnt > 0)
+        if not grow.any():
+            break
+        for a in acc:
+            s = _box3(a)
+            a[grow] = s[grow] / cnt[grow]
+        filled |= grow
+        remaining &= ~grow
+    reached = targets & filled & ~valid
+    if reached.any():
+        n = np.maximum(_box3(filled.astype(np.float32)), 1e-6)
+        smooth = [_box3(a) / n for a in acc]
+        for a, s in zip(acc, smooth):
+            a[reached] = s[reached]
+    out = []
+    for v, a in zip(values, acc):
+        r = np.asarray(v, dtype=np.float32).copy()
+        r[reached] = a[reached]
+        out.append(r)
+    return out, reached
+
+
+def _acquisition_order_positions(png_path: Path) -> Optional[list]:
+    """``[(region, x_um, y_um)]`` in coordinates.csv row order (the blit order), or None.
+
+    The overview PNG is written tile over tile as the run acquires, so the csv's row order IS
+    the overwrite order. The executed record beside the PNG's timepoint folder is preferred;
+    the root (planned) csv is the fallback. Repeated positions (one row per z or per t) keep
+    their first occurrence: a re-blit of the same footprint changes no ownership. Anything
+    unreadable returns None: ownership then simply never engages.
+    """
+    if png_path.parent.name != "mosaic_view":
+        return None
+    t_dir = png_path.parent.parent
+    for csv_path in (t_dir / "coordinates.csv", t_dir.parent / "coordinates.csv"):
+        if csv_path.is_file():
+            break
+    else:
+        return None
+    import csv
+    import io
+
+    from squidxplorer.reader import _coord_columns, _parse_mm_pair
+
+    try:
+        rows = csv.DictReader(io.StringIO(csv_path.read_text()))
+        x_col, y_col = _coord_columns(rows.fieldnames)
+        out: list = []
+        seen: set = set()
+        for line_no, row in enumerate(rows, start=2):
+            region = (row.get("region") or "").strip()
+            if not region:
+                continue
+            pair = _parse_mm_pair((row.get(x_col) or "").strip(),
+                                  (row.get(y_col) or "").strip(), region, line_no)
+            if pair is None:
+                continue
+            key = (region, round(pair[0], 6), round(pair[1], 6))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((region, pair[0] * 1000.0, pair[1] * 1000.0))
+    except Exception:                              # noqa: BLE001 - no order record, no ownership
+        _log.debug("chroma ownership: %s is unreadable; ratios stay damped only.", csv_path)
+        return None
+    return out or None
 
 
 def _upsample_bilinear(a: np.ndarray, shape: tuple) -> np.ndarray:
@@ -292,6 +388,18 @@ class ChromaSource:
     ``resolution_um``, and a FOV's stage position is its CENTER — verified by template matching
     on the real 20x trichrome set (corr 0.87-0.89 at exactly zero offset centered; 0.01-0.06
     with the corner convention). Uncovered or unwritten (near-black) PNG area is neutral 1.0.
+
+    Ownership: the overview is written tile over tile in acquisition order
+    (later-overwrites-earlier), so in an FOV's overlap band the PNG holds the NEIGHBOR frame's
+    pixels (measured: FOV 72's right band correlates 0.894 with neighbor 73's frame vs 0.515
+    with its own). Where the neighbor's rendering is MISALIGNED, the luminance damping can
+    only pull the foreign ratio toward NEUTRAL — an under-colored band, the customer's
+    second-round complaint. Ownership decides what mistrust FALLS BACK TO: on unowned pixels
+    the fallback is the frame's own owned hue extended across the band (:func:`_extend_valid`),
+    itself damped against the extended own luminance. Where the PNG's luminance AGREES with
+    the plane the measured ratio still stands in full — on the well aligned ground-truth set
+    the band's measured hue is the same tissue seen through the neighbor's frame, and
+    replacing it wholesale measured WORSE (window corr 0.977 -> 0.775).
     """
 
     def __init__(self, png_path, top_left_mm_yx, resolution_um) -> None:
@@ -300,8 +408,10 @@ class ChromaSource:
         self._res_um = float(resolution_um)
         self._png: Optional[np.ndarray] = None
         self._size: Optional[tuple] = None
-        #: (region, fov) -> (3, h, w) float32 [R/G, B/G, PNG G] window; bounded LRU.
+        #: (region, fov) -> (6, h, w) float32 measured+fallback chroma window; bounded LRU.
         self._windows: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
+        #: Lazily parsed blit-order positions; False = not read yet, None = no record.
+        self._blit_order: object = False
 
     @property
     def png_path(self) -> Path:
@@ -335,6 +445,47 @@ class ChromaSource:
         c0 = int(round((x_um - self._top_mm[1] * 1000.0) / self._res_um - w / 2.0))
         return r0, c0, h, w
 
+    def _positions(self) -> Optional[list]:
+        """The acquisition-order ``(region, x_um, y_um)`` list, parsed once; None without one."""
+        if self._blit_order is False:
+            self._blit_order = _acquisition_order_positions(self._png_path)
+        return self._blit_order  # type: ignore[return-value]
+
+    def _ownership_mask(self, region: str, x_um: float, y_um: float, frame_shape: tuple,
+                        pixel_size_um: float) -> np.ndarray:
+        """(h, w) bool over the FOV's PNG window: True where the overview holds THIS frame.
+
+        Squid blits the overview tile over tile in acquisition order, so a window pixel is
+        owned by the LAST FOV whose footprint covers it: everything under a LATER footprint is
+        the neighbor frame's pixels, not this one's. Without a blit-order record (or when this
+        FOV cannot be located in it) everything reads as owned, the damped-only behavior.
+        """
+        r0, c0, h, w = self._window_box(x_um, y_um, frame_shape, pixel_size_um)
+        owned = np.ones((h, w), dtype=bool)
+        positions = self._positions()
+        if not positions:
+            return owned
+        # Locate this FOV's own row by stage position (the reader's position came from the
+        # same csv family); a mismatch beyond half a frame is "not found", never a guess.
+        best, best_d = None, max(frame_shape) * pixel_size_um / 2.0
+        for i, (reg, px, py) in enumerate(positions):
+            if reg != str(region):
+                continue
+            d = max(abs(px - x_um), abs(py - y_um))
+            if d < best_d:
+                best, best_d = i, d
+        if best is None:
+            _log.debug("chroma ownership: no coordinates row matches %s at (%.1f, %.1f) um; "
+                       "ratios stay damped only.", region, x_um, y_um)
+            return owned
+        for _reg, px, py in positions[best + 1:]:
+            rr, cc, hh, ww = self._window_box(px, py, frame_shape, pixel_size_um)
+            ra, rb = max(rr - r0, 0), min(rr + hh - r0, h)
+            ca, cb = max(cc - c0, 0), min(cc + ww - c0, w)
+            if ra < rb and ca < cb:
+                owned[ra:rb, ca:cb] = False
+        return owned
+
     def coverage(self, fov_centers_um: dict, frame_shape: tuple, pixel_size_um: float) -> tuple:
         """``(outside, partial, total)`` FOV counts against the PNG's bounds (geometry only)."""
         rows, cols = self._png_size()
@@ -349,11 +500,18 @@ class ChromaSource:
 
     def _ratios(self, region: str, fov: int, x_um: float, y_um: float, frame_shape: tuple,
                 pixel_size_um: float) -> np.ndarray:
-        """The FOV's (3, h, w) float32 [R/G, B/G, PNG G] window at PNG resolution, cached (LRU).
+        """The FOV's (6, h, w) float32 chroma window at PNG resolution, cached (LRU).
 
-        Row 2 is the PNG's own green — the luminance each ratio was measured at, what
-        :func:`_luminance_weight` weighs the ratio's trust by. Zero outside coverage: an
-        uncovered cell's ratio is neutral 1.0 and its weight is moot.
+        Rows 0..2 are the MEASURED [R/G, B/G, PNG G]: row 2 is the luminance each ratio was
+        measured at, what :func:`_luminance_weight` weighs the ratio's trust by. Zero outside
+        coverage: an uncovered cell's ratio is neutral 1.0 and its weight is moot.
+
+        Rows 3..5 are the FALLBACK [R/G, B/G, G]: neutral 1.0 (with row 5 = row 2) on pixels
+        the overview still holds from this frame (see :meth:`_ownership_mask`), and the OWNED
+        ratios extended across the unowned overlap band elsewhere — with the owned luminance
+        extended alongside, so the fallback is weighed against this frame's OWN luminance,
+        never the neighbor's. A neutral fallback makes the display formula reduce exactly to
+        the plain damping, so owned pixels are untouched by construction.
         """
         key = (str(region), int(fov))
         cached = self._windows.get(key)
@@ -361,8 +519,9 @@ class ChromaSource:
             self._windows.move_to_end(key)
             return cached
         r0, c0, h, w = self._window_box(x_um, y_um, frame_shape, pixel_size_um)
-        out = np.ones((3, h, w), dtype=np.float32)
+        out = np.ones((6, h, w), dtype=np.float32)
         out[2] = 0.0
+        out[5] = 0.0
         rows, cols = self._png_size()
         ra, rb = max(r0, 0), min(r0 + h, rows)
         ca, cb = max(c0, 0), min(c0 + w, cols)
@@ -371,10 +530,35 @@ class ChromaSource:
             g = crop[..., 1]
             usable = g > _CHROMA_G_FLOOR           # near-black PNG is unwritten, not tissue
             with np.errstate(divide="ignore", invalid="ignore"):
-                for i, comp in enumerate((0, 2)):
-                    ratio = np.where(usable, crop[..., comp] / np.maximum(g, 1.0), 1.0)
-                    out[i, ra - r0:rb - r0, ca - c0:cb - c0] = np.clip(ratio, 0.0, _RATIO_MAX)
+                ratio_r = np.clip(np.where(usable, crop[..., 0] / np.maximum(g, 1.0), 1.0),
+                                  0.0, _RATIO_MAX)
+                ratio_b = np.clip(np.where(usable, crop[..., 2] / np.maximum(g, 1.0), 1.0),
+                                  0.0, _RATIO_MAX)
+            fb_r = np.ones_like(ratio_r)
+            fb_b = np.ones_like(ratio_b)
+            fb_g = g.astype(np.float32).copy()
+            owned = self._ownership_mask(str(region), x_um, y_um, frame_shape, pixel_size_um)
+            own_c = owned[ra - r0:rb - r0, ca - c0:cb - c0]
+            valid = usable & own_c
+            targets = ~own_c
+            if targets.any() and valid.any():
+                (ext_r, ext_b, ext_g), reached = _extend_valid(
+                    [ratio_r, ratio_b, g], valid, targets)
+                fb_r[reached] = ext_r[reached]
+                fb_b[reached] = ext_b[reached]
+                fb_g[reached] = ext_g[reached]
+                _log.info(
+                    "chroma for %s fov %s (overview %s): %.0f%% of the window is held by "
+                    "later FOVs' pixels; its mistrust fallback is this frame's own owned "
+                    "hue on the %.0f%% reached by the fill.",
+                    region, fov, self._png_path.name, 100.0 * targets.mean(),
+                    100.0 * reached.mean())
+            out[0, ra - r0:rb - r0, ca - c0:cb - c0] = ratio_r
+            out[1, ra - r0:rb - r0, ca - c0:cb - c0] = ratio_b
             out[2, ra - r0:rb - r0, ca - c0:cb - c0] = g
+            out[3, ra - r0:rb - r0, ca - c0:cb - c0] = fb_r
+            out[4, ra - r0:rb - r0, ca - c0:cb - c0] = fb_b
+            out[5, ra - r0:rb - r0, ca - c0:cb - c0] = fb_g
         if len(self._windows) >= _CHROMA_CACHE_MAX:
             self._windows.popitem(last=False)
         self._windows[key] = out
@@ -385,15 +569,21 @@ class ChromaSource:
         """One chroma component of a color-recorded-gray plane, in the plane's own dtype.
 
         Component 1 (G) is the file's own pixels untouched; 0 (R) and 2 (B) scale them by the
-        upsampled local ratio, damped toward neutral where the PNG's luminance disagrees with
-        the plane's own (see :func:`_luminance_weight` — the overlap-band hot-magenta fix).
+        upsampled local ratio, damped where the PNG's luminance disagrees with the plane's
+        own (see :func:`_luminance_weight` — the overlap-band hot-magenta fix). What mistrust
+        falls back to is the fallback rows of :meth:`_ratios`: neutral on owned pixels, the
+        frame's own extended hue on the unowned overlap band — itself damped against the
+        extended own luminance, so a bright lumen pixel under a tissue fallback still cannot
+        glow. Where the fallback is neutral the formula reduces exactly to the plain damping.
         The result is clipped to the dtype's range and cast back.
         """
         if component == 1:
             return plane
         ratios = self._ratios(region, fov, x_um, y_um, plane.shape, pixel_size_um)
-        weight = _luminance_weight(ratios[2], plane)
-        damped = 1.0 + (ratios[0 if component == 0 else 1] - 1.0) * weight
+        trust = _luminance_weight(ratios[2], plane)
+        fb_trust = _luminance_weight(ratios[5], plane)
+        fallback = 1.0 + (ratios[3 if component == 0 else 4] - 1.0) * fb_trust
+        damped = fallback + (ratios[0 if component == 0 else 1] - fallback) * trust
         ratio = _upsample_bilinear(damped, plane.shape)
         out = plane.astype(np.float32) * ratio
         if plane.dtype.kind in "iu":
