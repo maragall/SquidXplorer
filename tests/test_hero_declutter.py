@@ -293,7 +293,7 @@ def test_native_chrome_is_minimized(qapp):
     win.addDockWidget(Qt.LeftDockWidgetArea, dock)
     controls = QWidget()
     form = QFormLayout(controls)
-    keep_label, keep_field = QLabel("opacity:"), QSlider()
+    keep_label, keep_field = QLabel("contrast limits:"), QSlider()
     form.addRow(keep_label, keep_field)
     folded = {}
     for text in NATIVE_HIDDEN_ROWS:
@@ -318,6 +318,36 @@ def test_native_chrome_is_minimized(qapp):
         "a kept layer-controls row was hidden too"
     )
     assert hidden, "nothing was reported hidden; the inventory must be named"
+    assert form.verticalSpacing() <= 2, "the form still spends vertical spacing between rows"
+
+
+def test_the_layer_controls_diet_keeps_at_most_the_three_touched_rows(qapp):
+    """Julio, live 2026-08-25: "Layer controls, too much height." The resting blade shows
+    ONLY what a life-science user touches: contrast limits, auto-contrast, colormap. The
+    pin is a row-count budget over napari 0.6.6's real image-controls labels, never a
+    pixel number."""
+    from qtpy.QtWidgets import QComboBox, QFormLayout, QLabel, QWidget
+
+    from squidxplorer._napari_pane import hide_native_rows
+
+    napari_image_rows = (            # the probe's inventory of QtImageControls, 2026-08-25
+        "opacity:", "blending:", "contrast limits:", "auto-contrast:", "gamma:",
+        "colormap:", "projection mode:", "interpolation:", "depiction:",
+    )
+    controls = QWidget()
+    form = QFormLayout(controls)
+    rows = {}
+    for text in napari_image_rows:
+        lab, fld = QLabel(text), QComboBox()
+        form.addRow(lab, fld)
+        rows[text] = lab
+    hide_native_rows(controls)
+    controls.show()
+    qapp.processEvents()
+    visible = sorted(t for t, lab in rows.items() if lab.isVisibleTo(controls))
+    assert visible == ["auto-contrast:", "colormap:", "contrast limits:"], (
+        f"the resting blade must keep ONLY contrast limits, auto-contrast and colormap; "
+        f"it shows {visible}")
 
 
 # --- decon is just decon: the preview scope follows the tab ---------------------------------
@@ -442,6 +472,64 @@ def test_no_gui_string_says_2d_or_3d_decon():
     assert not offenders, (
         "user-facing strings must say just 'decon'; the 2D/3D words are how we view it:\n"
         + "\n".join(offenders))
+
+
+# --- the banner strip is retired: every say IS a log line -----------------------------------
+# Julio (2026-08-25): "I don't like the red strip that appears above the window when I run
+# an operator. That should appear in the logger."
+
+
+def test_the_banner_strip_is_gone_and_say_is_a_log_line(qapp, caplog):
+    import inspect
+
+    import squidxplorer._napari_pane as NP
+
+    assert "_banner" not in inspect.getsource(NP), "the banner strip is back"
+    pane = NP.model_pane_class()()
+    with caplog.at_level(logging.INFO, logger="squid.xplorer"):
+        pane.say("could not dock the view controls")
+    assert pane.readout.text() == "could not dock the view controls"
+    assert pane.said[-1] == "could not dock the view controls"
+    rec = caplog.records[-1]
+    assert rec.levelno == logging.WARNING, "a refusal-shaped say must land at WARNING"
+    assert "could not dock" in rec.getMessage()
+
+
+def test_a_view_say_logs_classified_with_its_address(qapp, napari_pane_stub, squid_dataset,
+                                                     caplog):
+    root, _ = squid_dataset
+    win, views = _open_view(qapp, root)
+    try:
+        v = views[0]
+        with caplog.at_level(logging.INFO, logger="squid.xplorer"):
+            v._say("could not start decon: no reader.")
+        rec = caplog.records[-1]
+        assert rec.levelno == logging.WARNING
+        assert "could not start decon: no reader." in rec.getMessage()
+        assert v._pane.said[-1] == "could not start decon: no reader.", (
+            "the recording seam went hungry")
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_the_collapsed_log_band_shows_the_latest_entry(qapp):
+    from squidxplorer._logpane import LogBus
+    from squidxplorer._logpanel import LogPanel
+
+    bus = LogBus()
+    panel = LogPanel(bus, None, start_collapsed=True)
+    logger = logging.getLogger("squid.xplorer.test_band")
+    rec = logger.makeRecord("squid.xplorer.test_band", logging.WARNING, __file__, 1,
+                            "stitch refused: no positions", (), None)
+    bus.emit_record(rec)
+    for _ in range(5):
+        QApplication.processEvents()
+    assert "stitch refused: no positions" in panel._activity_lbl.text(), (
+        "a collapsed log band must show the latest entry so a refusal is noticed "
+        "without expanding")
+    panel.set_collapsed(False)
+    assert panel._activity_lbl.text() in ("idle", ""), (
+        "expanded, the header goes back to the activity sentence; the body has the lines")
 
 
 # --- the log diet ---------------------------------------------------------------------------

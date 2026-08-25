@@ -137,12 +137,15 @@ def _say_max_3d_texture(value: int, *, measured: bool) -> int:
 
 
 #: Layer-controls rows the app does not need on screen (hero declutter, team feedback
-#: 2026-08-25: "minimize most of the Napari-Native tools"). Matched against the form's own
-#: label text, lowercased. Each is a rendering choice the app sets itself (blending), a z
-#: policy the app's own slider and operators own (projection mode), or a knob no user of
-#: this app has ever needed (interpolation). Contrast, gamma, colormap and opacity stay:
-#: they are the IDENTITY_PROPS napari's controls legitimately expose.
-NATIVE_HIDDEN_ROWS = ("blending:", "projection mode:", "interpolation:")
+#: 2026-08-25: "minimize most of the Napari-Native tools"; Julio, live: "Layer controls,
+#: too much height"). Matched against the form's own label text, lowercased. What a
+#: life-science user touches stays: contrast limits, auto-contrast, colormap. Everything
+#: else goes: rendering choices the app sets itself (blending, opacity), z policy the
+#: app's own slider and operators own (projection mode, depiction), and knobs no user of
+#: this app has needed (interpolation, gamma). gamma and opacity stay IDENTITY_PROPS:
+#: the model still mirrors them; only their napari rows are gone.
+NATIVE_HIDDEN_ROWS = ("blending:", "projection mode:", "interpolation:",
+                      "gamma:", "opacity:", "depiction:")
 
 
 def hide_native_rows(controls_widget) -> "list[str]":
@@ -156,6 +159,11 @@ def hide_native_rows(controls_widget) -> "list[str]":
     lay = controls_widget.layout() if controls_widget is not None else None
     if not isinstance(lay, QFormLayout):
         return []
+    # Roughly HALF the resting height comes from chrome, not rows (Julio, live
+    # 2026-08-25): squeeze the form's own vertical spacing and margins too.
+    lay.setVerticalSpacing(2)
+    m = lay.contentsMargins()
+    lay.setContentsMargins(m.left(), 2, m.right(), 2)
     hidden = []
     for i in range(lay.rowCount()):
         item = lay.itemAt(i, QFormLayout.LabelRole)
@@ -240,14 +248,16 @@ class MosaicPane(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        self._banner = QLabel("")
-        self._banner.setAlignment(Qt.AlignCenter)
-        self._banner.setWordWrap(True)
-        self._banner.setStyleSheet(
-            "background:#5a2d2d;color:#ffd7d7;padding:6px 10px;font-size:12px;"
-        )
-        self._banner.hide()
-        lay.addWidget(self._banner)
+        # NO BANNER STRIP (Julio, 2026-08-25: "I don't like the red strip that appears
+        # above the window when I run an operator. That should appear in the logger.").
+        # `say` routes through this readout: refusal-shaped text at WARNING, status at
+        # INFO, `.text()` the seam tools/gates and tests assert on. The collapsed log
+        # band's own latest-line display is what keeps a refusal noticed.
+        from squidxplorer._logpane import StatusReadout, get_logger
+
+        self.readout = StatusReadout(get_logger("view"))
+        #: Recording seam (tests and gates assert on it); never a pixel.
+        self.said: "list[str]" = []
 
         try:
             from squidxplorer._napari_view import build_pane
@@ -553,12 +563,12 @@ class MosaicPane(QWidget):
         self._on_settle = callback
 
     def say(self, text: str) -> None:
-        """Show a message to the user. Never log-and-continue."""
-        if not text:
-            self._banner.hide()
-            return
-        self._banner.setText(text)
-        self._banner.show()
+        """Tell the user via the LOGGER (the banner strip is retired, 2026-08-25); the
+        collapsed log band shows the latest line so this is still seen without expanding."""
+        if text:
+            self.said.append(str(text))
+            del self.said[:-500]                 # a seam, not a history
+        self.readout.setText(text)
 
     @property
     def ok(self) -> bool:
@@ -687,11 +697,16 @@ def model_pane_class():
 
         def __init__(self):
             super().__init__()
+            from squidxplorer._logpane import StatusReadout, get_logger
+
             self._viewer = ViewerModel()
             # The QtViewer half: without it, async slices compute and never land.
             self._async_apply = attach_async_slice_apply(self._viewer)
             self.mosaic = MosaicLayers(self._viewer)
             self.said = []
+            # The same seam the real pane has: say() IS a log line (banner retired
+            # 2026-08-25), and .readout.text() is what harnesses assert on.
+            self.readout = StatusReadout(get_logger("view"))
             self.shutdowns = 0
             self._on_settle = None
 
@@ -702,6 +717,7 @@ def model_pane_class():
 
         def say(self, text):
             self.said.append(text)
+            self.readout.setText(text)
 
         def shutdown(self):
             """COUNTS, rather than no-ops. The real ``MosaicPane.shutdown`` is what closes the

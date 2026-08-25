@@ -67,7 +67,7 @@ from squidxplorer._montage import _hex_to_rgb01, channel_tint01
 from squidxplorer._output import incomplete_reason, parse_well_id
 from squidxplorer._activity import ActivityLog
 from squidxplorer._address import Extent
-from squidxplorer._logpane import LogBus, ViewLog
+from squidxplorer._logpane import LogBus, StatusReadout, ViewLog
 from squidxplorer._logpanel import LogPanel
 from squidxplorer._plate import PlateBuildError, build_plate
 from squidxplorer._plate_shape import PlateShapeError
@@ -161,41 +161,9 @@ _BAND_DEFAULT_PX = 365
 _BAND_MAX_PX = 520
 
 
-class _LogReadout:
-    """The plate's one reply channel — a LOG LINE, not a widget (2026-08-19).
-
-    Julio: "log messages that show around the GUI and not in the log" is the complaint. The
-    status strip is gone; every ``setText`` that painted it lands in the console instead, so
-    the ~60 call sites (and the tools/tests that read ``.text()``) keep their one-line call.
-    Refusal-shaped sentences go out at WARNING, status at INFO; a repeat of the current text
-    is dropped so idempotent writers do not spam the console.
-    """
-
-    #: A message carrying one of these reads as a refusal or a failure.
-    _WARN_MARKS = (
-        "fail", "could not", "cannot", "error", "not an .hcs", "no plate",
-        "already processing", "empty selection", "open an acquisition", "open a view",
-        "pick wells first", "not in the current region order", "nowhere to put",
-        "no region is open", "no acquisition open", "stranded",
-    )
-
-    def __init__(self, logger) -> None:
-        self._log = logger
-        self._text = ""
-
-    def setText(self, text) -> None:                     # noqa: N802 - keeps the QLabel spelling
-        text = str(text or "")
-        if text == self._text:
-            return
-        self._text = text
-        if not text:
-            return
-        low = text.lower()
-        level = logging.WARNING if any(m in low for m in self._WARN_MARKS) else logging.INFO
-        self._log.log(level, "%s", text)
-
-    def text(self) -> str:
-        return self._text
+# The plate's one reply channel is a LOG LINE, not a widget (2026-08-19), and the same
+# mechanism retired the view banner on 2026-08-25 - the class moved to its Qt-free home.
+_LogReadout = StatusReadout
 
 #: Operator-over-Log split inside the band's right column (starting position).
 _RIGHT_COL_SIZES = [215, 165]

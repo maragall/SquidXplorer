@@ -1486,10 +1486,8 @@ class RegionViewer(QMainWindow):
                                # (Julio, 2026-08-25), so the run carries the view's own z.
                                z_level=self._z_slider_index(),
                                preview_z_level=preview_z)
-            mode = "saving" if save else "previewing"
-            where = ("the plate scope" if regions is None else self._view_label(list(regions)))
-            self._echo(f"{mode} {self._op_combo.currentText()} on {where} "
-                       f"· {self._params_summary(key)}.")
+            # No echo: the log.info line above is the structured twin, and the banner
+            # strip that showed the echo is retired (2026-08-25).
         except Exception as exc:                          # noqa: BLE001 - named to the window
             self._say(f"could not start {self._op_combo.currentText()}: {exc}")
 
@@ -1520,9 +1518,11 @@ class RegionViewer(QMainWindow):
     def operator_done(self, action: str, seconds: float) -> None:
         """Emit the console's ``done`` line, closing the started/done pair."""
         self.log.done(str(action), float(seconds), address=self._closing_address())
-        line = f"{action} finished in {float(seconds):.1f} s."
+        # The done line's console twin is log.done above; the artifact hint had ONLY the
+        # retired banner, so it goes to the log itself (nothing said may be lost).
         hint = self._preview_artifact_hint(str(action))
-        self._echo(f"{line} {hint}" if hint else line)
+        if hint:
+            self._say(hint)
         self._op_action = self._op_address = None
         self._hide_progress()
 
@@ -1550,7 +1550,6 @@ class RegionViewer(QMainWindow):
     def operator_failed(self, action: str, reason: str) -> None:
         """The failure outcome: an action that starts and then says nothing looks like one still running."""
         self.log.failed(str(action), str(reason), address=self._closing_address())
-        self._echo(f"{action} failed: {reason}")
         self._op_action = self._op_address = None
         self._hide_progress()
 
@@ -2433,14 +2432,19 @@ class RegionViewer(QMainWindow):
         return self.log.at(self.address())
 
     def _say(self, text: str) -> None:
-        if text:
-            self.view_log().info("%s", text)
-        self._echo(text)
+        """Tell the user via the LOGGER, refusal-shaped text at WARNING (the in-window
+        banner strip is retired - Julio, 2026-08-25: "That should appear in the logger");
+        the collapsed log band shows the latest line. The pane's ``said`` list stays fed:
+        it is the recording seam tests and gates assert on, never a pixel."""
+        if not text:
+            return
+        from squidxplorer._logpane import status_level
 
-    def _echo(self, text: str) -> None:
-        """The in-window status line only, for events the console already carries a structured line for."""
-        if self._pane is not None and getattr(self._pane, "ok", False):
-            self._pane.say(text)
+        self.view_log().log(status_level(text), "%s", text)
+        said = getattr(self._pane, "said", None)
+        if said is not None:
+            said.append(str(text))
+            del said[:-500]
 
     def set_active(self, active: bool) -> None:
         """Halt draw/refresh on windows the user is not touching."""

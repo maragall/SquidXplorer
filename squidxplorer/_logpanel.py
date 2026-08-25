@@ -218,6 +218,10 @@ class LogPanel(QWidget):
         colour = color_for(level_name)
         safe = (line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
         self._view.appendHtml(f'<span style="color:{colour};white-space:pre;">{safe}</span>')
+        # The banner strips are retired (2026-08-25): while COLLAPSED, this band's one line
+        # is the latest entry, so a refusal is still noticed without expanding.
+        self._latest_line = str(line)
+        self._refresh_header_line()
         up = str(level_name).upper()
         if up in self._counts:
             self._counts[up] += 1
@@ -238,9 +242,23 @@ class LogPanel(QWidget):
                          f'{"s" if warn != 1 else ""}</span>')
         self._tally_lbl.setText("  ·  ".join(parts))
 
+    #: The last log line shown (console-formatted), for the collapsed band's one line.
+    _latest_line = ""
+
     def _on_activity(self, log: ActivityLog) -> None:
-        sentence = log.sentence()
-        self._activity_lbl.setText(sentence or "idle")
+        self._activity_sentence = log.sentence() or ""
+        self._refresh_header_line()
+
+    _activity_sentence = ""
+
+    def _refresh_header_line(self) -> None:
+        """The header's middle label: the LATEST log line while collapsed (the band is the
+        only visible log surface then), the activity sentence while expanded (the body
+        already scrolls the lines)."""
+        if self._collapsed and self._latest_line:
+            self._activity_lbl.setText(self._latest_line)
+        else:
+            self._activity_lbl.setText(self._activity_sentence or "idle")
 
     @property
     def collapsed(self) -> bool:
@@ -300,6 +318,7 @@ class LogPanel(QWidget):
             self.setMaximumHeight(self._expanded_cap or 16777215)
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._sync_toggle_text()
+        self._refresh_header_line()
         if changed:
             self.collapsedChanged.emit(self._collapsed)
 
