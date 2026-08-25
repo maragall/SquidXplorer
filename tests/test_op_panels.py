@@ -33,12 +33,17 @@ class _Host:
 
     def __init__(self):
         self.said = []
+        #: Every launch a panel asked for: building or reading a panel must leave it empty.
+        self.calls = []
         self._meta = {"channels": [{"name": "405"}, {"name": "488"}],
                       "frame_shape": (64, 64), "n_z": 3}
         self._reader = object()
 
     def say(self, text):
         self.said.append(text)
+
+    def run_operator(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
 
 
 # --- the shelf: pages and the sweep are GONE WHOLE ------------------------------------------
