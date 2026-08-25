@@ -102,7 +102,9 @@ def ingest(win, path: str) -> None:
     # acquisition with no usable stage positions keeps the montage and nothing else changes.
     if win._overview.set_tile_source(reader, meta):
         g = win._overview._ladder.geometry
-        log.info("deep zoom armed: %d rungs, %.3f-%.1f um/px, %d tiles at fit",
+        # Mechanics, not a fact a user acts on (log diet, 2026-08-25); the not-armed arm
+        # below stays INFO because it states a limitation of THIS acquisition.
+        log.debug("deep zoom armed: %d rungs, %.3f-%.1f um/px, %d tiles at fit",
                  len(g), g.levels[0].scale_um_per_px, g.levels[-1].scale_um_per_px,
                  g.worst_case_tiles)
     else:

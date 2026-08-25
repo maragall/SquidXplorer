@@ -546,7 +546,7 @@ class BrickedVolume:
     def _note_first_pixels(self) -> None:
         if self._t_first is None and self._t_open is not None:
             self._t_first = time.perf_counter() - self._t_open
-            log.info("3D bricks: first pixels in %.0f ms", self._t_first * 1000)
+            log.debug("3D bricks: first pixels in %.0f ms", self._t_first * 1000)
 
     def _on_idle(self, epoch: int) -> None:
         # The heal is paid HERE, not inside the removal event: re-adding layers while the
@@ -559,7 +559,7 @@ class BrickedVolume:
         if self._t_settled is None and self._t_open is not None and epoch == self._epoch \
                 and self._layers:
             self._t_settled = time.perf_counter() - self._t_open
-            log.info("3D bricks: fully resolved in %.0f ms - %d layer(s), stride %d, %.0f MB "
-                     "resident", self._t_settled * 1000, len(self._layers), self._step,
-                     self.resident_bytes / 1e6)
+            log.debug("3D bricks: fully resolved in %.0f ms - %d layer(s), stride %d, %.0f MB "
+                      "resident", self._t_settled * 1000, len(self._layers), self._step,
+                      self.resident_bytes / 1e6)
 

@@ -332,8 +332,11 @@ class measure_run:
 
     def __enter__(self) -> RunRecorder:
         if self._announce:
-            self._log.info("%s: starting - %s", self._recorder.operator,
-                           self._recorder.target or "no target named")
+            # DEBUG: the GUI's ViewLog.started line and the CLI's own "running ..." echo are
+            # the user-facing announcements; this engine-side twin was a duplicate (log
+            # diet, 2026-08-25). The done/outcome line below stays INFO: it is measured.
+            self._log.debug("%s: starting - %s", self._recorder.operator,
+                            self._recorder.target or "no target named")
         self._sampler.start()
         # perf_counter, not time.time: immune to backwards NTP clock steps.
         self._t0 = time.perf_counter()

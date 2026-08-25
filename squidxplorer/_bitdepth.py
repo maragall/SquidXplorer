@@ -197,7 +197,9 @@ class DatasetDepth:
                 return False
             old, self._ceiling = self._ceiling, new
             callbacks = list(self._callbacks)
-        _log.info("contrast slider now (0, %.0f): this dataset reaches %.0f.", new, v)
+        # An automatic adjustment the sliders already show; it can fire several times as
+        # frames decode (log diet, 2026-08-25).
+        _log.debug("contrast slider now (0, %.0f): this dataset reaches %.0f.", new, v)
         for cb in callbacks:
             try:
                 cb(0.0, new)

@@ -377,7 +377,9 @@ class PlateCellCache:
             except OSError as exc:                # noqa: PERF203 - one failure must not stop the rest
                 log.info("could not prune the stale cache generation %s: %s", entry.path, exc)
         if gone:
-            log.info("pruned %d stale plate cache generation(s) under %s", gone, parent)
+            # Housekeeping narration (log diet, 2026-08-25); the could-not-prune line above
+            # stays INFO because it names a problem.
+            log.debug("pruned %d stale plate cache generation(s) under %s", gone, parent)
         return gone
 
     def path_for(self, region: str) -> Path:

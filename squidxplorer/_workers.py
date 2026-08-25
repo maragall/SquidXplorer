@@ -633,8 +633,8 @@ class _PreviewWorker(QThread):
             self.tileReady.emit(ri, ci, region, np.asarray(hit).astype(self._dtype), hit.box)
             self.cache_hits += 1
         self.cache_reads = len(by_region) - self.cache_hits
-        log.info("plate preview at t=%d: %d of %d wells served from the cell cache (%s)",
-                 self._t, self.cache_hits, len(by_region), self._cache)
+        log.debug("plate preview at t=%d: %d of %d wells served from the cell cache (%s)",
+                  self._t, self.cache_hits, len(by_region), self._cache)
         return remaining
 
     def _seed_from_well_images(self, plan: list) -> list:
@@ -672,8 +672,8 @@ class _PreviewWorker(QThread):
                 self._cache.put(region, tile, box)
             self.well_image_hits += 1
         if self.well_image_hits:
-            log.info("plate preview at t=%d: %d well(s) seeded from mosaic_view/wells, "
-                     "skipping their FOV walk.", self._t, self.well_image_hits)
+            log.debug("plate preview at t=%d: %d well(s) seeded from mosaic_view/wells, "
+                      "skipping their FOV walk.", self._t, self.well_image_hits)
         return remaining
 
     def _backfill_well_images(self) -> None:

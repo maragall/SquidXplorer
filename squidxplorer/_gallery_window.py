@@ -340,7 +340,7 @@ class GalleryWindow(QMainWindow):
             self._say("Nothing in scope - select some wells on the plate, or open an acquisition.")
             return
         self._started_at = time.perf_counter()
-        log.info("gallery: %s", self._scope.describe(self._meta))
+        log.debug("gallery: %s", self._scope.describe(self._meta))
         self._worker = GalleryWorker(self._reader, self._meta, self._scope, parent=self)
         self._worker.cellReady.connect(self._on_cell)
         self._worker.problem.connect(self._on_problem)
@@ -361,7 +361,7 @@ class GalleryWindow(QMainWindow):
     def _on_cell(self, cell: GalleryCell) -> None:
         if self._first_paint_ms is None:
             self._first_paint_ms = (time.perf_counter() - self._started_at) * 1000.0
-            log.info("gallery first paint: %.0f ms (%s/%s, %dx%d, step %g)",
+            log.debug("gallery first paint: %.0f ms (%s/%s, %dx%d, step %g)",
                      self._first_paint_ms, cell.region, cell.channel,
                      cell.shape[0], cell.shape[1], cell.step)
         self._cells[(cell.region, cell.channel)] = cell
@@ -391,7 +391,10 @@ class GalleryWindow(QMainWindow):
         if holes:
             note += f" {holes} FOV(s) could not be read and are black holes in their own places."
         self._say(f"{made} cell(s); {first}{self._scope.describe(self._meta)}.{note}")
-        log.info("gallery complete: %d cell(s), %s%s", made, first, self._scope.describe(self._meta))
+        # The gallery on screen is the outcome; `_say` above already tells the user. The
+        # black-hole count stays in the said sentence (a limitation is stated).
+        log.debug("gallery complete: %d cell(s), %s%s", made, first,
+                  self._scope.describe(self._meta))
 
     # -- rendering (arrays already in RAM; nothing here reads) ----------------------------------
 
