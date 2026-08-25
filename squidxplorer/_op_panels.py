@@ -361,25 +361,9 @@ class StitcherPanel(_Panel):
             box_row.addStretch(1)
             self.v.addLayout(box_row)
 
-        self.run_btn = QPushButton("Run stitcher iteration")
-        self.run_btn.setCursor(Qt.PointingHandCursor)
-        self.run_btn.setToolTip(
-            "Register and fuse the selected scope and show the result. Nothing is written "
-            "to disk and the acquisition is never modified.")
-        self.run_btn.clicked.connect(self._run)
-        self.v.addWidget(self.run_btn)
-
-        self.save_cb = QCheckBox("Also write the fused mosaics to disk (OME-Zarr)")
-        self.save_cb.setToolTip(
-            "Off by default: tuning a registration/fusion run should cost compute, not disk. "
-            "The settings above travel to the saved run too.")
-        self.v.addWidget(self.save_cb)
-
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 0)
-        self.progress.setMaximumHeight(6)
-        self.progress.setVisible(False)
-        self.v.addWidget(self.progress)
+        # NO run button and NO save checkbox here (one flow, Julio 2026-08-25): the view's
+        # operators row launches every run — Preview (window scope) and Run on plate (the one
+        # save). This panel is the PARAMETERS; `kwargs()` is how they reach a run.
         self.v.addWidget(self.status)
         self.v.addStretch(1)
 
@@ -395,7 +379,6 @@ class StitcherPanel(_Panel):
 
     def _check_z_operator(self, name: str) -> None:
         why = None if name == KEEP_EVERY_PLANE else stitch_refusal(name)
-        self.run_btn.setEnabled(why is None)
         self.say("" if why is None else why)
         self.z_note.setText(self._z_line(name))
 
@@ -444,23 +427,11 @@ class StitcherPanel(_Panel):
             tile_px=min(frame) if all(frame) else None,
         )
 
-    def _run(self) -> None:
-        chosen = self.z_operator_combo.currentText()
-        why = None if chosen == KEEP_EVERY_PLANE else stitch_refusal(chosen)
-        if why is not None:
-            self.say(why)
-            return
-        try:
-            kwargs = self.kwargs()
-        except ValueError as exc:                 # a refused setting -> say it, run nothing
-            self.say(str(exc))
-            return
-        # The label is the combo's spelling of z_operator=None: every acquired plane, unchanged.
-        kwargs["z_operator"] = None if chosen == KEEP_EVERY_PLANE else chosen
-        self.say("")
-        # regions=None means UNSCOPED, resolved against the run selector's live selection.
-        self.host.run_operator("stitch", regions=None,
-                               save=self.save_cb.isChecked(), operator_kwargs=kwargs)
+
+def z_operator_choice(text: str):
+    """The z-handling combo's text as ``stitch_region``'s ``z_operator`` value: the
+    keep-every-plane label spells ``None`` (every acquired plane, fused unchanged)."""
+    return None if str(text) == KEEP_EVERY_PLANE else str(text)
 
 
 class QCFrame(NamedTuple):

@@ -854,58 +854,72 @@ NEUTRALISED_WHY = {
 #: Excluded from the sweep and instead PROVEN by prove_inputs_reach_the_run, which checks the
 #: value actually arrives at the call.
 DEFERRED_INPUTS = {
-    ("view", "QComboBox"): "the operator picker — read by 'Run'",
-    ("view", "save"): "preview vs persist — read by 'Run'",
+    ("view", "QComboBox"): "the operator picker — read by 'Preview' / 'Run on plate'",
 }
 
 
 def prove_inputs_reach_the_run(view, detail, app):
-    """Set the operator picker and ``save`` box, click Run, and read the arguments that actually
-    arrived at ``PlateWindow.run_operator`` — "the widget changed" is not proof the value did.
-
-    Returns rows for both controls; a run that never reaches the call gives them "no outcome".
+    """Set the operator picker, click Preview and then Run on plate, and read the arguments
+    that actually arrived at ``PlateWindow.run_operator`` — "the widget changed" is not proof
+    the value did. One flow (2026-08-25): Preview must arrive ``save=False`` with the view's
+    regions; Run on plate must arrive ``save=True`` with ``regions=None``.
     """
-    from qtpy.QtWidgets import QCheckBox, QComboBox, QPushButton
+    from qtpy.QtWidgets import QComboBox, QPushButton
 
     combo = next((c for c in view.findChildren(QComboBox) if not _third_party(c)), None)
-    save = next((c for c in view.findChildren(QCheckBox) if c.text() == "save"), None)
-    run = next((b for b in view.findChildren(QPushButton) if b.text() == "Run"), None)
-    if combo is None or save is None or run is None:
+    preview = next((b for b in view.findChildren(QPushButton) if b.text() == "Preview"), None)
+    on_plate = next((b for b in view.findChildren(QPushButton)
+                     if b.text() == "Run on plate"), None)
+    if combo is None or preview is None or on_plate is None:
         return [("view", "Run inputs", "-", "no outcome",
-                 "the operator picker, the save box or Run is missing from this window")]
+                 "the operator picker, Preview or Run on plate is missing from this window")]
 
     # Set to a value different from the default, so a handler that ignores it and passes a
     # default cannot accidentally agree with what was set.
     want_index = 1 if combo.count() > 1 else 0
     combo.setCurrentIndex(want_index)
     want_key = combo.currentData()
-    save.setChecked(not save.isChecked())
-    want_save = save.isChecked()
 
-    n = len(detail)
-    run.click()
-    app.processEvents()
-    calls = [d for d in detail[n:] if d[0] == "PlateWindow.run_operator"]
-    if not calls:
-        return [("view", combo.currentText()[:30], "QComboBox", "no outcome",
-                 "clicking Run did not reach PlateWindow.run_operator at all"),
-                ("view", "save", "QCheckBox", "no outcome",
-                 "clicking Run did not reach PlateWindow.run_operator at all")]
-    _name, args, kwargs = calls[-1]
-    # The stub replaced a CLASS attribute, so it's called unbound: args[0] is the PlateWindow.
-    pos = args[1:]
-    got_key = kwargs.get("key", pos[0] if pos else None)
-    got_save = kwargs.get("save")
+    def _last_call(clicker):
+        n = len(detail)
+        clicker.click()
+        app.processEvents()
+        calls = [d for d in detail[n:] if d[0] == "PlateWindow.run_operator"]
+        if not calls:
+            return None, None
+        _name, args, kwargs = calls[-1]
+        # The stub replaced a CLASS attribute, so it's called unbound: args[0] is the window.
+        pos = args[1:]
+        return kwargs.get("key", pos[0] if pos else None), kwargs
+
     rows = []
-    rows.append(("view", combo.currentText()[:30], "QComboBox",
-                 "reaches" if got_key == want_key else "no outcome",
-                 f"the picked operator arrived as run_operator(key={got_key!r})"
-                 if got_key == want_key else
-                 f"picked {want_key!r}, the run was asked for {got_key!r}"))
-    rows.append(("view", "save", "QCheckBox",
-                 "reaches" if got_save == want_save else "no outcome",
-                 f"arrived as run_operator(save={got_save!r})" if got_save == want_save else
-                 f"ticked save={want_save!r}, the run was asked for save={got_save!r}"))
+    got_key, kw = _last_call(preview)
+    if kw is None:
+        rows.append(("view", "Preview", "QPushButton", "no outcome",
+                     "clicking Preview did not reach PlateWindow.run_operator at all"))
+    else:
+        ok = got_key == want_key and kw.get("save") is False and kw.get("regions") is not None
+        rows.append(("view", combo.currentText()[:30], "QComboBox",
+                     "reaches" if got_key == want_key else "no outcome",
+                     f"the picked operator arrived as run_operator(key={got_key!r})"
+                     if got_key == want_key else
+                     f"picked {want_key!r}, the run was asked for {got_key!r}"))
+        rows.append(("view", "Preview", "QPushButton",
+                     "reaches" if ok else "no outcome",
+                     f"arrived as run_operator(save={kw.get('save')!r}, window scope)" if ok
+                     else f"Preview arrived as save={kw.get('save')!r}, "
+                          f"regions={kw.get('regions')!r}"))
+    got_key2, kw2 = _last_call(on_plate)
+    if kw2 is None:
+        rows.append(("view", "Run on plate", "QPushButton", "no outcome",
+                     "clicking Run on plate did not reach PlateWindow.run_operator at all"))
+    else:
+        ok2 = kw2.get("save") is True and kw2.get("regions") is None
+        rows.append(("view", "Run on plate", "QPushButton",
+                     "reaches" if ok2 else "no outcome",
+                     "arrived as run_operator(save=True, plate scope)" if ok2 else
+                     f"Run on plate arrived as save={kw2.get('save')!r}, "
+                     f"regions={kw2.get('regions')!r}"))
     return rows
 
 

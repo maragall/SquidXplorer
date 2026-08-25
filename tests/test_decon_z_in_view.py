@@ -116,8 +116,8 @@ def test_the_view_run_carries_its_z_and_the_dims_stay_put(qapp, napari_pane_stub
         viewer.dims.current_step = (2,) + tuple(viewer.dims.current_step)[1:]
         assert win._z_slider_index() == 2, "the scene has no z slider to test against"
 
-        win._run_view_operator()
-        assert calls, "the Run chip did not reach run_operator"
+        win._preview_view_operator()
+        assert calls, "the Preview chip did not reach run_operator"
         _key, kw = calls[-1]
         assert kw.get("z_level") == 2, (
             f"the run was launched with z_level={kw.get('z_level')!r}; the view is on z=2")

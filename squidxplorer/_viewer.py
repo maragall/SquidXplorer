@@ -1648,17 +1648,23 @@ class PlateWindow(QMainWindow):
             return {}
         try:
             kwargs = dict(reader() or {})
-        except Exception as exc:                 # noqa: BLE001 - a refused setting, NAMED
+        except ValueError:
+            # A REFUSED SETTING (the panel's own sentence, e.g. a feather wider than the
+            # tile). Propagate: swallowing it here ran the operator with the DEFAULTS while
+            # every control on screen said otherwise.
+            raise
+        except Exception as exc:                 # noqa: BLE001 - an unreadable panel, NAMED
             log.warning("%s panel could not report its parameters: %s: %s",
                         key, type(exc).__name__, exc)
             return {}
         # The stitcher's z handling lives on its own combo rather than in `kwargs()` (which is
-        # `stitch_region`'s keyword set), and `StitcherPanel._run` adds it on the way out. It is a
-        # PARAMETER of the run either way, so it is added here too -- otherwise the window's Run
-        # silently reverted the one control this round of feedback was about.
+        # `stitch_region`'s keyword set). It is a PARAMETER of the run, so it is added here;
+        # the keep-every-plane label spells z_operator=None (`z_operator_choice`).
         combo = getattr(panel, "z_operator_combo", None)
         if combo is not None and "z_operator" not in kwargs:
-            kwargs["z_operator"] = combo.currentText()
+            from squidxplorer._op_panels import z_operator_choice
+
+            kwargs["z_operator"] = z_operator_choice(combo.currentText())
         return kwargs
 
     def operator_params_text(self, key: str) -> str:
@@ -1673,7 +1679,10 @@ class PlateWindow(QMainWindow):
         printed text and the run come to disagree, which is the thing being fixed. The window asks
         when it repaints, so the answer cannot be stale.
         """
-        kwargs = self.operator_kwargs_for(key)
+        try:
+            kwargs = self.operator_kwargs_for(key)
+        except ValueError as exc:                # a refused setting: the summary IS the refusal
+            return str(exc)
         if not kwargs:
             return "defaults"
         parts = []
@@ -1831,7 +1840,12 @@ class PlateWindow(QMainWindow):
         return w, v
 
     def _build_mip_tab(self) -> QWidget:
-        return self._build_run_tab(_OPERATIONS_BY_KEY["mip"])
+        # One flow (2026-08-25): the old run tab (destination picker, Run-on combo, subset
+        # preview spinner, save checkbox) is gone — the view's operators row launches every
+        # run. mip declares no params, so its panel is the generic declaration form.
+        from squidxplorer._param_panel import GenericOperatorPanel
+
+        return GenericOperatorPanel(self, "mip")
 
     def _build_stitch_tab(self) -> QWidget:
         """maragall/stitcher's control surface, in pane 1 (IMA-decon-stitch-ui).
@@ -2008,106 +2022,6 @@ class PlateWindow(QMainWindow):
         note.setStyleSheet("color:#8b98ad;font-size:11px;")
         v.addWidget(note)
         v.addStretch(1)
-        return w
-
-    def _build_run_tab(self, op) -> QWidget:
-        """Generic plane-operator tab (MIP, …): pick a destination, run over the whole plate → a
-        navigable OME-Zarr plate. ONE builder for every z-reduction operator — a new one needs no new
-        tab code. Per-tab state lives in a closure (no per-operator instance attrs)."""
-        w, v = self._op_tab_shell(op.label, op.blurb + " Pick a destination with room - output can be large.")
-        state = {"dir": None}
-        dir_lbl = QLabel("(no folder chosen)"); dir_lbl.setWordWrap(True)
-        dir_lbl.setStyleSheet("color:#8b98ad;font-size:12px;")
-        run = QPushButton("Run"); run.setStyleSheet(_BTN_QSS); run.setEnabled(False)
-
-        # RUN ON — the target the operator iterates over (Julio: the per-tool "run on" choice, not a
-        # master-pane one). The decentralized model adds OPEN VIEWS: run the operator over the
-        # regions currently held by the independent windows, not just the plate selection.
-        TARGET_PLATE, TARGET_SELECTION, TARGET_OPEN = "Whole plate", "Selected wells", "Open views"
-        run_row = QHBoxLayout(); run_row.setSpacing(6)
-        _rl = QLabel("Run on"); _rl.setStyleSheet("color:#8b98ad;font-size:12px;")
-        target = QComboBox(); target.setStyleSheet(_COMBO_QSS)
-        target.addItems([TARGET_SELECTION, TARGET_OPEN, TARGET_PLATE])
-        target.setToolTip(
-            "What the operator iterates over.\n"
-            f"{TARGET_SELECTION} - the wells picked on the plate (all if none).\n"
-            f"{TARGET_OPEN} - every region held by the open viewer windows. Picking it prints the "
-            "exact window list, and each window's regions, to the log console.\n"
-            f"{TARGET_PLATE} - every region of the acquisition.")
-        run_row.addWidget(_rl); run_row.addWidget(target, 1)
-
-        # PRINT THE TARGET WHEN IT IS CHOSEN, not only when Run is pressed. "Open views" is the one
-        # target whose meaning is invisible from the combo: the other two name a surface the user is
-        # looking at, this one names a set of windows scattered across the desktop, deduplicated.
-        target.currentTextChanged.connect(
-            lambda choice: (self._print_open_views_target(f"Run {op.label}")
-                            if choice == TARGET_OPEN else None))
-
-        def pick():
-            d = QFileDialog.getExistingDirectory(self, f"Save {op.label} plate to folder")
-            if not d:
-                return
-            state["dir"] = d
-            ok, est_gb, _ = self._check_disk(Path(d) / f"{self._acq_name}.hcs")
-            dir_lbl.setText(f"{d}\n~{est_gb:.0f} GB needed" + ("" if ok else "  (not enough free space)"))
-            run.setEnabled(True)
-
-        pick_btn = QPushButton("Choose output folder…"); pick_btn.setStyleSheet(_BTN_QSS)
-        pick_btn.clicked.connect(pick)
-
-        def do_run():
-            choice = target.currentText()
-            if choice == TARGET_PLATE:
-                regions = None                       # None = whole dataset (run_operator's contract)
-            elif choice == TARGET_OPEN:
-                # Prints the block again at launch, deliberately: the log is the record of what was
-                # run, and the state may have moved since the target was picked (a window closed).
-                regions = self._print_open_views_target(f"Run {op.label}")
-                if not regions:
-                    return
-            else:                                    # selected wells (all if none selected)
-                regions = self._selected_regions or None
-            self.run_operator(op.key, out_parent=state["dir"], regions=regions)
-
-        v.addWidget(_hline())
-        run.clicked.connect(do_run)
-        v.addLayout(run_row)
-        v.addWidget(pick_btn); v.addWidget(dir_lbl); v.addWidget(run)
-
-        # PREVIEW on a subset — test the operator on the first N wells without committing the whole
-        # plate's compute + disk. Default: don't save (compute + push to the viewer only).
-        v.addWidget(_hline())
-        prev_lbl = QLabel("Preview (subset)")
-        prev_lbl.setStyleSheet("color:#57606a;font-size:10px;font-weight:800;letter-spacing:1.5px;padding-top:6px;")
-        v.addWidget(prev_lbl)
-        n_wells = max(1, len(self._order))
-        row = QHBoxLayout(); row.setSpacing(6)
-        row.addWidget(QLabel("First"))
-        spin = QSpinBox(); spin.setRange(1, n_wells); spin.setValue(min(4, n_wells))
-        spin.setStyleSheet(_COMBO_QSS)
-        row.addWidget(spin); row.addWidget(QLabel("wells")); row.addStretch(1)
-        v.addLayout(row)
-        save_cb = QCheckBox("Save previews to disk"); save_cb.setStyleSheet(_CHECK_QSS)
-        v.addWidget(save_cb)
-        prev = QPushButton("Preview"); prev.setStyleSheet(_BTN_QSS); prev.setEnabled(False)
-
-        def do_preview():
-            save = save_cb.isChecked()
-            dest = None
-            if save:
-                dest = state["dir"] or QFileDialog.getExistingDirectory(self, f"Save {op.label} preview to folder")
-                if not dest:
-                    return
-            # "first N wells" is just one way to build a region list, so the prefix policy lives
-            # here (in the UI that owns the spinner) rather than as a second subset parameter.
-            self.run_operator(op.key, out_parent=dest, regions=self._order[:spin.value()], save=save)
-
-        prev.clicked.connect(do_preview)
-        v.addWidget(prev)
-        v.addStretch(1)
-        # both run buttons enable once an acquisition is open (the tab is only reachable then, but be safe)
-        for b in (run, prev):
-            b.setEnabled(self._reader is not None)
         return w
 
     def _build_layers_tab(self) -> QWidget:
@@ -3531,35 +3445,6 @@ class PlateWindow(QMainWindow):
             if v is not None:
                 entries.append((v.regions, _view_hue(v.window_id, focused=(v.window_id == focused))))
         self._overview.set_view_hues(entries)
-
-    def _print_open_views_target(self, action: str) -> "Optional[list]":
-        """Say WHICH windows an "Open views" run is aimed at, and return what it resolved to.
-
-        Julio, 2026-08-03: "it has to print which windows and subsets thereof are selected." The
-        selector only names the RULE — "Open views" — and the rule is not the answer: which windows
-        are open, what each holds, and how the overlap between them collapses are three facts a user
-        cannot infer from three words in a combo box.
-
-        Called when the user PICKS the target AND again when they press Run. Printing only at launch
-        would be printing it after the decision, and a plate-scale run is minutes of compute.
-
-        The block goes to the log console via this window's ``ViewLog`` — the existing addressed
-        channel, which is monospace, scrollable and copyable, and already interleaves every stream.
-        Only the headline goes to the status line, which is one line high.
-
-        Returns ``None`` when nothing would run, having said why.
-        """
-        views = self._open_view_targets()
-        block = _run_scope.describe_view_target(views, action=action)
-        if block is None:
-            self._readout.setText(
-                f"Run on open views: {len(views)} open window(s) hold no regions between them - "
-                f"nothing to run." if views else
-                "Run on open views: no windows are open - open some first.")
-            return None
-        self.log.info("%s", block)
-        self._readout.setText(block.splitlines()[0])
-        return _run_scope.distinct_view_regions(views)
 
     def _open_view_targets(self) -> list:
         """Every open window as a View — the target set BEFORE it is flattened to regions.

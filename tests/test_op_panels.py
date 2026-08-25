@@ -235,27 +235,20 @@ def test_the_panel_does_not_carry_its_own_scope(qapp):
     assert not hasattr(p, "scope_combo")
 
 
-def test_the_run_leaves_scope_unresolved_so_the_run_selector_owns_it(qapp):
-    """regions=None is UNSCOPED, not "the whole plate": run_operator resolves it against the
-    LIVE selection, since a panel built once and cached would otherwise capture a stale one."""
+def test_the_stitcher_panel_is_parameters_only(qapp):
+    """One flow (Julio, 2026-08-25): the panel carries NO run button and NO save checkbox -
+    the view's operators row (Preview / Run on plate) launches every run and reads this
+    panel through kwargs()."""
     host = _Host()
     p = StitcherPanel(host)
-    p.run_btn.click()
-    assert host.calls[0][1]["regions"] is None
-
-
-def test_the_stitcher_run_button_launches_the_operator_with_the_panel_s_kwargs(qapp):
-    host = _Host()
-    p = StitcherPanel(host)
+    assert not hasattr(p, "run_btn"), "the panel's own run button is back"
+    assert not hasattr(p, "save_cb"), "the panel's save checkbox is back"
     p.register_cb.setChecked(False)
     p.blend_spin.setValue(64)
-    p.run_btn.click()
-    assert len(host.calls) == 1
-    key, kw = host.calls[0]
-    assert key == "stitch"
-    assert kw["operator_kwargs"]["register"] is False
-    assert kw["operator_kwargs"]["blend_px"] == 64
-    assert kw["save"] is False                       # tuning a fusion run is a preview
+    kw = p.kwargs()
+    assert kw["register"] is False
+    assert kw["blend_px"] == 64
+    assert host.calls == [], "building/reading the panel must launch nothing"
 
 
 def test_turning_registration_off_disables_the_registration_only_controls(qapp):
@@ -270,53 +263,38 @@ def test_turning_registration_off_disables_the_registration_only_controls(qapp):
     assert p.rel_spin.isEnabled()
 
 
-def test_a_labels_z_operator_disables_the_run_button_and_says_why(qapp, blob_operator):
+def test_a_labels_z_operator_says_why_before_any_run(qapp, blob_operator):
+    """A labels z-operator cannot be fused; the panel SAYS so the moment it is chosen (the
+    launch-time guard is stitch_region's own refusal)."""
     host = _Host()
     p = StitcherPanel(host)
     p.z_operator_combo.setCurrentText(blob_operator)
-    assert not p.run_btn.isEnabled()
     assert host.said and "label" in host.said[-1].lower()
     p.z_operator_combo.setCurrentText("mip")
-    assert p.run_btn.isEnabled()
+    assert host.said[-1] == ""                  # the refusal clears with a legal choice
 
 
-def test_an_intensity_z_operator_leaves_the_run_button_enabled(qapp):
-    """The button follows the ENGINE, not a guard the engine outgrew."""
+def test_an_intensity_z_operator_raises_no_refusal(qapp):
+    """The refusal follows the ENGINE, not a guard the engine outgrew."""
     host = _Host()
     p = StitcherPanel(host)
     p.z_operator_combo.setCurrentText("decon")
-    assert p.run_btn.isEnabled()
+    assert host.said[-1] == ""
 
 
 def test_keep_every_plane_is_offered_and_spells_z_operator_none(qapp):
     """The shelved `keepz` identity's replacement: the combo's label maps to z_operator=None —
-    every acquired plane fused unchanged — and never reaches the registry as a name."""
-    from squidxplorer._op_panels import KEEP_EVERY_PLANE
+    every acquired plane fused unchanged — and never reaches the registry as a name.
+    `z_operator_choice` is the one mapping, read by the plate's `operator_kwargs_for`."""
+    from squidxplorer._op_panels import KEEP_EVERY_PLANE, z_operator_choice
 
     host = _Host()
     p = StitcherPanel(host)
     labels = [p.z_operator_combo.itemText(i) for i in range(p.z_operator_combo.count())]
     assert KEEP_EVERY_PLANE in labels
     assert "keepz" not in labels
-    p.z_operator_combo.setCurrentText(KEEP_EVERY_PLANE)
-    assert p.run_btn.isEnabled(), host.said
-    p._run()
-    (key, kw), = host.calls
-    assert key == "stitch"
-    assert kw["operator_kwargs"]["z_operator"] is None
-
-
-def test_the_run_handler_itself_refuses_labels_not_just_the_disabled_button(qapp,
-                                                                            blob_operator):
-    """Exercises the SECOND defence: clicking a disabled button never enters the handler, so
-    the guard inside ``_run`` must refuse independently of the button's enabled state."""
-    host = _Host()
-    p = StitcherPanel(host)
-    p.z_operator_combo.setCurrentText(blob_operator)
-    p.run_btn.setEnabled(True)                  # simulate reaching _run some other way
-    p._run()
-    assert host.calls == [], "the run must not start"
-    assert "label" in host.said[-1].lower()
+    assert z_operator_choice(KEEP_EVERY_PLANE) is None
+    assert z_operator_choice("mip") == "mip"
 
 
 def test_the_decon_panel_starts_at_the_qc_start_iteration_count(qapp):
@@ -475,11 +453,9 @@ def test_the_distortion_checkbox_is_greyed_out_with_registration_off(qapp):
 
 
 def test_the_panel_s_distortion_choice_travels_to_the_operator(qapp):
-    host = _Host()
-    p = StitcherPanel(host)
+    p = StitcherPanel(_Host())
     p.distortion_cb.setChecked(True)
-    p.run_btn.click()
-    assert host.calls[0][1]["operator_kwargs"]["correct_distortion"] is True
+    assert p.kwargs()["correct_distortion"] is True
 
 
 def test_the_timepoint_spin_is_hidden_on_a_single_timepoint_acquisition(qapp):
@@ -659,19 +635,15 @@ def test_a_value_read_back_keeps_the_declared_type(qapp, blob_operator):
     assert isinstance(kwargs["split_touching"], bool)
 
 
-def test_the_widget_s_value_travels_to_run_operator_through_operator_kwargs(qapp,
-                                                                            blob_operator):
-    """The SAME argument StitcherPanel uses, so this is an already-tested path."""
-    host = _Host()
-    p = GenericOperatorPanel(host, blob_operator)
+def test_the_widget_s_value_is_what_kwargs_hands_the_run(qapp, blob_operator):
+    """The operators row reads this panel through ``kwargs()`` (`operator_kwargs_for`), so
+    the widget's value IS what a run gets."""
+    p = GenericOperatorPanel(_Host(), blob_operator)
     p.widgets["min_area_px"].setValue(400)
     p.widgets["split_touching"].setChecked(False)
-    p.run_btn.click()
-    key, kw = host.calls[0]
-    assert key == blob_operator
-    assert kw["operator_kwargs"]["min_area_px"] == 400
-    assert kw["operator_kwargs"]["split_touching"] is False
-    assert kw["save"] is False
+    kw = p.kwargs()
+    assert kw["min_area_px"] == 400
+    assert kw["split_touching"] is False
 
 
 def test_every_kwarg_the_panel_emits_is_a_parameter_the_operator_accepts(qapp,
@@ -679,26 +651,20 @@ def test_every_kwarg_the_panel_emits_is_a_parameter_the_operator_accepts(qapp,
     """The panel's output must survive ``Operator.bind``, which refuses an unknown name loud."""
     from squidxplorer import bind_operator
 
-    host = _Host()
-    p = GenericOperatorPanel(host, blob_operator)
-    p.widgets["min_area_px"].setValue(80)
-    p.run_btn.click()
-    bind_operator(blob_operator, host.calls[0][1]["operator_kwargs"])   # raises if wrong
-
-
-def test_a_plane_op_is_offered_preview_only_and_the_choice_comes_off_consumes(qapp,
-                                                                               blob_operator):
-    """A plane-op keeps z at full depth, so there is no plate to save. Read off ``consumes``,
-    never the name."""
     p = GenericOperatorPanel(_Host(), blob_operator)
-    assert p._can_save is False
-    assert p.save_btn is None                # not built at all, not built-and-hidden
+    p.widgets["min_area_px"].setValue(80)
+    bind_operator(blob_operator, p.kwargs())   # raises if wrong
 
 
-def test_a_z_reducer_is_offered_the_save_run(qapp):
-    p = GenericOperatorPanel(_Host(), "mip")
-    assert p._can_save is True
-    assert p.save_btn is not None and p.save_btn.parent() is not None
+def test_the_generic_panel_carries_no_run_buttons(qapp, blob_operator):
+    """One flow (Julio, 2026-08-25): parameters only. Preview and Run on plate live in the
+    view's operators row; the old per-panel preview spinner and save button are gone."""
+    from qtpy.QtWidgets import QPushButton
+
+    p = GenericOperatorPanel(_Host(), blob_operator)
+    assert not hasattr(p, "run_btn") and not hasattr(p, "save_btn")
+    assert not hasattr(p, "wells_spin")
+    assert [b.text() for b in p.findChildren(QPushButton)] == []
 
 
 def test_an_operator_with_no_parameters_still_builds_and_says_so(qapp):

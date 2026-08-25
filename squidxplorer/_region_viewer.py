@@ -738,12 +738,18 @@ class RegionViewer(QMainWindow):
             "away. Says so when the window is showing raw pixels, which have none.",
             self._show_operator_controls)
         opr.addWidget(self._btn_controls)
-        opr.addWidget(self._chip("Run", "Run the selected operator on THIS view's regions.",
-                                 self._run_view_operator))
-        self._save_chk = QCheckBox("save")
-        self._save_chk.setToolTip(self._SAVE_TIP_PLATE)   # re-derived per operator; see below
-        self._save_chk.setStyleSheet("QCheckBox{color:#c9d1d9;font-size:11px;}")
-        opr.addWidget(self._save_chk)
+        # ONE FLOW, fewer buttons (Julio, 2026-08-25): "They can preview on the window...
+        # After they preview, they can say run on plate, and then it will save to disk.
+        # No body runs on whole plate to preview." Preview is window-scoped and writes
+        # nothing; Run on plate is THE save path (and the bulk path - the cards died with
+        # the right-edge dock). The save checkbox is gone.
+        self._btn_preview = self._chip(
+            "Preview", "Preview the selected operator on THIS view's regions; nothing is "
+            "written to disk.", self._preview_view_operator)
+        opr.addWidget(self._btn_preview)
+        self._btn_run_plate = self._chip(
+            "Run on plate", self._RUN_PLATE_TIP, self._run_plate_operator)
+        opr.addWidget(self._btn_run_plate)
         ov.addLayout(opr)
         self._controls_note = QLabel("")
         self._controls_note.setStyleSheet("color:#8b949e;font-size:11px;border:none;")
@@ -790,6 +796,8 @@ class RegionViewer(QMainWindow):
             return {}
         try:
             return dict(reader(str(key)) or {})
+        except ValueError:
+            raise                                # a REFUSED setting: the launch says it and stops
         except Exception as exc:                 # noqa: BLE001 - named, never a silent default
             log.warning("view %s could not read %s's parameters from the plate: %s: %s",
                         self.window_id, key, type(exc).__name__, exc)
@@ -911,17 +919,17 @@ class RegionViewer(QMainWindow):
             return
         self._refresh_controls_note()            # the note repeats what the run now gets
 
-    _SAVE_TIP_PLATE = ("Off = preview only (nothing written to disk). On = persist the "
-                       "operator result as an OME-Zarr.")
+    _RUN_PLATE_TIP = ("Run the selected operator over the plate selection (or the whole "
+                      "plate) and save the result to disk - the one save path.")
 
     def _refresh_save_tooltip(self, key) -> None:
-        """The save box says WHAT a save writes: a copy-saving operator's artifact is
-        stitched_<folder>, not an OME-Zarr — implying the wrong artifact is how a register
+        """The Run-on-plate chip says WHAT a save writes: a copy-saving operator's artifact
+        is stitched_<folder>, not an OME-Zarr — implying the wrong artifact is how a register
         preview read as "doesn't do anything"."""
-        chk = getattr(self, "_save_chk", None)
-        if chk is None:
+        btn = getattr(self, "_btn_run_plate", None)
+        if btn is None:
             return
-        tip = self._SAVE_TIP_PLATE
+        tip = self._RUN_PLATE_TIP
         try:
             from squidxplorer._engine import operator_saves_copy
             from squidxplorer._operations import operator_name
@@ -929,12 +937,11 @@ class RegionViewer(QMainWindow):
             if key and operator_saves_copy(operator_name(str(key))):
                 src = getattr(self._reader, "source_id", None)
                 acq = Path(str(src)).name if src else "<folder>"
-                tip = ("Off = preview only (nothing written to disk). On = write "
-                       f"stitched_{acq} beside the acquisition (hardlinked copy with "
-                       "registered coordinates).")
+                tip = (f"Run over the plate selection and write stitched_{acq} beside the "
+                       "acquisition (hardlinked copy with registered coordinates).")
         except Exception:                            # noqa: BLE001 - a tooltip, never a crash
             pass
-        chk.setToolTip(tip)
+        btn.setToolTip(tip)
 
     def _window_operators(self) -> list:
         """THE OPERATORS FOR THIS WINDOW: every processing layer it holds, raw excluded."""
@@ -1220,8 +1227,24 @@ class RegionViewer(QMainWindow):
         except Exception:                                 # noqa: BLE001 - a readout, never fatal
             return
 
-    def _run_view_operator(self) -> None:
-        """Run the operator picked in this window's dropdown on THIS view's regions, via the real engine."""
+    def _preview_view_operator(self) -> None:
+        """PREVIEW: the selected operator on THIS view's regions; nothing is written."""
+        self._launch_operator(save=False, regions=self._run_scope())
+
+    def _run_plate_operator(self) -> None:
+        """RUN ON PLATE: the one SAVE path - the plate selection (or the whole plate), to disk.
+
+        This is also the bulk path (the right-edge dock's cards are retired): with an
+        acquisition SET loaded and the plate's bulk box ticked, the save goes over every
+        member, which needs the run launched without a requester (`run_over_set`'s contract).
+        """
+        plate = self._plate()
+        bulk = bool(getattr(plate, "_acq_set", None)) and bool(
+            getattr(getattr(plate, "_bulk_all_box", None), "isChecked", lambda: False)())
+        self._launch_operator(save=True, regions=None, requester=None if bulk else self)
+
+    def _launch_operator(self, *, save: bool, regions, requester="self") -> None:
+        """The one launch: Preview and Run on plate differ only in scope and `save`."""
         if self._run_operator is None:
             self._say("the operator engine isn't connected to this window.")
             return
@@ -1229,25 +1252,31 @@ class RegionViewer(QMainWindow):
         if not key:
             self._say("no operator selected.")
             return
-        regions = self._run_scope()
-        save = bool(self._save_chk.isChecked()) if getattr(self, "_save_chk", None) is not None else False
-        kwargs = dict(self._plate_operator_kwargs(key))
+        try:
+            kwargs = dict(self._plate_operator_kwargs(key))
+        except ValueError as exc:                # a refused panel setting: SAY it, run nothing
+            self._say(str(exc))
+            return
         kwargs.update(self._z_kwargs_for_mode(key, kwargs))
         # Whether THIS run leaves a disk artifact: the save box, or a copy-saving operator's own
         # `copy` kwarg riding through from its panel. Read by `operator_done`, which must say
         # how to GET the artifact when a copy-saving preview run left none (Julio, 2026-08-19:
         # "Registering the wells doesn't do anything").
         self._op_run_wrote = bool(save or (kwargs or {}).get("copy"))
+        if requester == "self":
+            requester = self
         try:
             log.info("view %s running %s on %s with %s", self.window_id, key,
-                     (regions if isinstance(regions, dict) else list(regions)), kwargs)
-            self._run_operator(key, regions=regions, save=save, requester=self,
+                     ("the plate scope" if regions is None else
+                      (regions if isinstance(regions, dict) else list(regions))), kwargs)
+            self._run_operator(key, regions=regions, save=save, requester=requester,
                                operator_kwargs=kwargs,
                                # A depth-keeping preview must show THE PLANE THIS VIEW IS ON
                                # (Julio, 2026-08-25), so the run carries the view's own z.
                                z_level=self._z_slider_index())
             mode = "saving" if save else "previewing"
-            self._echo(f"{mode} {self._op_combo.currentText()} on {self._view_label(regions)} "
+            where = ("the plate scope" if regions is None else self._view_label(list(regions)))
+            self._echo(f"{mode} {self._op_combo.currentText()} on {where} "
                        f"[{self._render_mode.upper()}] · {self._params_summary(key)}.")
         except Exception as exc:                          # noqa: BLE001 - named to the window
             self._say(f"could not start {self._op_combo.currentText()}: {exc}")
@@ -1273,7 +1302,7 @@ class RegionViewer(QMainWindow):
         bar.setFormat(report.sentence())
         bar.show()
 
-    #: Whether the run this window last asked for leaves a disk artifact; see _run_view_operator.
+    #: Whether the run this window last asked for leaves a disk artifact; see _launch_operator.
     _op_run_wrote = False
 
     def operator_done(self, action: str, seconds: float) -> None:
