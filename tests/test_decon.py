@@ -397,9 +397,11 @@ def test_channel_labels_from_squidxplorers_own_reader_parse_into_a_wavelength():
 _PER_CHANNEL_CHANNELS = ["Fluorescence 488 nm Ex", "Fluorescence 638 nm Ex"]
 
 
-def _two_channel_acquisition(root, nz: int = 2, frame: int = 64):
-    """A tiny 10x/NA-0.3 acquisition whose two channels have DIFFERENT emission wavelengths."""
+def _two_channel_acquisition(root, nz: int = 2, frame: int = 64, channels=None):
+    """A tiny 10x/NA-0.3 acquisition whose two channels have DIFFERENT emission wavelengths
+    (or whatever *channels* names: a broadband channel states no wavelength at all)."""
     tifffile = pytest.importorskip("tifffile")
+    channels = list(_PER_CHANNEL_CHANNELS if channels is None else channels)
     (root / "ome_tiff").mkdir(parents=True)
     (root / "acquisition parameters.json").write_text(json.dumps({
         "Nz": nz, "Nt": 1, "dz(um)": 1.5,
@@ -410,18 +412,21 @@ def _two_channel_acquisition(root, nz: int = 2, frame: int = 64):
         "objective:\n  pixel_size_um: 0.752\n  magnification: 10.0\n  sensor_pixel_size_um: 7.52\n"
         "sample:\n  wellplate_format: glass slide\n"
         f"z_stack:\n  nz: {nz}\n  delta_z_mm: 0.0015\n"
-        "time_series:\n  nt: 1\n")
+        "time_series:\n  nt: 1\n"
+        # A display colour per channel, as a real acquisition's YAML carries: the reader
+        # refuses a channel it cannot colour, and a broadband LED channel has no
+        # wavelength to fall back on.
+        "channels:\n" + "".join(f"- name: {c}\n  display_color: '#FFFFFF'\n" for c in channels))
 
     rng = np.random.default_rng(0)
-    data = np.zeros((1, nz, len(_PER_CHANNEL_CHANNELS), frame, frame), np.uint16) + 200
+    data = np.zeros((1, nz, len(channels), frame, frame), np.uint16) + 200
     for z in range(nz):
-        for c in range(len(_PER_CHANNEL_CHANNELS)):
+        for c in range(len(channels)):
             ys = rng.integers(8, frame - 8, 12)
             xs = rng.integers(8, frame - 8, 12)
             data[0, z, c, ys, xs] = 9000 + 500 * c
     tifffile.imwrite(root / "ome_tiff" / "manual0_0000.ome.tiff", data,
-                     metadata={"axes": "TZCYX",
-                               "Channel": {"Name": list(_PER_CHANNEL_CHANNELS)}})
+                     metadata={"axes": "TZCYX", "Channel": {"Name": channels}})
     return root
 
 
@@ -711,3 +716,80 @@ def test_the_volume_solve_moves_light_back_to_its_own_plane():
     assert axial_ratio(restored) > 3.0 * axial_ratio(blurred), (
         f"axial energy did not return to its plane: truth {axial_ratio(truth):.2f}, "
         f"blurred {axial_ratio(blurred):.2f}, restored {axial_ratio(restored):.2f}")
+
+
+# --------------------------------------------------------------------------------------
+# A broadband channel is COPIED THROUGH unchanged; the rest deconvolve (Julio, 2026-08-25).
+# Measured on G7_2026-08-20 (BF_LED_matrix_full + two fluorescence channels, nz 15): decon
+# failed the WHOLE run, because project_well binds every channel up front and the LED
+# channel states no excitation wavelength. The per-channel refusal is right (a guessed PSF
+# is a fabricated result); the granularity was wrong. Ruling: "copy BF through unchanged
+# with a named log line".
+# --------------------------------------------------------------------------------------
+
+import logging as _logging
+
+
+class _LogSpy(_logging.Handler):
+    def __init__(self):
+        super().__init__(level=_logging.DEBUG)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+def _stack_of(reader, channel):
+    return np.stack([reader.read("manual0", 0, channel, z, 0)
+                     for z in reader.metadata["z_levels"]])
+
+
+def test_a_broadband_channel_is_copied_through_unchanged_and_named_once(tmp_path):
+    root = _two_channel_acquisition(tmp_path / "acq",
+                                    channels=["BF LED matrix full", "Fluorescence 488 nm Ex"])
+    reader = open_reader(root)
+    names = [c["name"] for c in reader.metadata["channels"]]
+    assert names == ["BF_LED_matrix_full", "Fluorescence_488_nm_Ex"]
+    spy = _LogSpy()
+    _logging.getLogger("squid.xplorer").addHandler(spy)
+    try:
+        out = project_well(reader, "manual0", 0,
+                           reduce=_resolve_operator("decon").fn, consumes=Z_REDUCER)
+        # A second field of the same acquisition: the fact is stated ONCE, not per FOV.
+        project_well(reader, "manual0", 0,
+                     reduce=_resolve_operator("decon").fn, consumes=Z_REDUCER)
+    finally:
+        _logging.getLogger("squid.xplorer").removeHandler(spy)
+    nz = reader.metadata["n_z"]
+    assert out.shape == (1, 2, nz, 64, 64), "the output must stay the size of the input"
+    assert out.dtype == np.dtype(reader.metadata["dtype"])
+    assert np.array_equal(out[0, 0], _stack_of(reader, "BF_LED_matrix_full")), (
+        "the broadband channel was not copied through bit-identical")
+    assert not np.array_equal(out[0, 1], _stack_of(reader, "Fluorescence_488_nm_Ex")), (
+        "the fluorescence channel was not deconvolved")
+    named = [r for r in spy.records if "BF_LED_matrix_full" in r.getMessage()]
+    assert len(named) == 1, (
+        f"expected exactly one named line, got {len(named)}:\n"
+        + "\n".join(r.getMessage() for r in named))
+    msg = named[0].getMessage()
+    assert named[0].levelno == _logging.INFO, "a limitation line stays INFO under the log diet"
+    for phrase in ("no emission wavelength", "copied unchanged", "not deconvolved"):
+        assert phrase in msg, f"{phrase!r} missing from {msg!r}"
+
+
+def test_a_set_with_no_modelable_channel_is_still_a_named_refusal(tmp_path):
+    root = _two_channel_acquisition(tmp_path / "acq",
+                                    channels=["BF LED matrix full", "DF LED matrix"])
+    reader = open_reader(root)
+    with pytest.raises(ValueError, match="BF_LED_matrix_full") as info:
+        project_well(reader, "manual0", 0,
+                     reduce=_resolve_operator("decon").fn, consumes=Z_REDUCER)
+    assert "DF_LED_matrix" in str(info.value)
+    assert "unchanged" in str(info.value), "the refusal must say what would have happened"
+
+
+def test_only_the_no_emission_line_case_copies_through():
+    """A fluorescence channel whose optics cannot be READ (here: no acquisition path) is
+    still the named refusal, never a silent copy."""
+    with pytest.raises(ValueError, match="Fluorescence_488_nm_Ex"):
+        _resolve_operator("decon").fn.for_channel(None, "Fluorescence_488_nm_Ex")

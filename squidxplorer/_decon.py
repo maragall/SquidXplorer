@@ -24,7 +24,10 @@ from squidxplorer import _decon_gpu
 from squidxplorer._acquisition import load_acquisition_metadata, load_objective_na
 from squidxplorer._channels import excitation_nm
 from squidxplorer._engine import Param, add_operator
+from squidxplorer._logpane import get_logger
 from squidxplorer.projection import cast_like
+
+log = get_logger("decon")
 
 # RL is semi-convergent; the working point on this instrument, not a textbook default.
 DEFAULT_ITERATIONS: int = 3
@@ -53,11 +56,19 @@ def _petakit():
     return petakit
 
 
+class NoEmissionLine(ValueError):
+    """A channel that states no excitation wavelength has no emission line to form a PSF
+    at (brightfield, darkfield LEDs). The ONE refusal decon answers PER CHANNEL, by copying
+    that channel through unchanged instead of failing the run (Julio, 2026-08-25); every
+    other optics failure stays the run's refusal."""
+
+
 def emission_um_for(channel) -> float:
-    """The emission wavelength (um) a PSF is formed at, for one channel; raises for broadband channels."""
+    """The emission wavelength (um) a PSF is formed at, for one channel; raises
+    :class:`NoEmissionLine` for broadband channels."""
     excitation = excitation_nm(channel)
     if excitation is None:
-        raise ValueError(
+        raise NoEmissionLine(
             f"channel {str(channel)!r} states no excitation wavelength, so it has no emission "
             "line and no PSF can be derived from it. Broadband channels (brightfield, "
             "darkfield) are the usual case."
@@ -338,6 +349,11 @@ def optics_for_channel(path, channel: str) -> OpticsParams:
         )
     try:
         optics = _acquisition_optics(str(path), str(channel))
+    except NoEmissionLine as exc:
+        # Keeps its TYPE through the wrap: decon's per-channel bind absorbs exactly this
+        # one, and nothing else, into a copy-through.
+        raise NoEmissionLine(
+            f"cannot derive the PSF for channel {channel!r} of {path}: {exc}") from exc
     except Exception as exc:
         raise ValueError(
             f"cannot derive the PSF for channel {channel!r} of {path}: "
@@ -412,6 +428,44 @@ def rig_profile_notes(path) -> "list[str]":
     return notes
 
 
+#: (acquisition path, channel) pairs whose copy-through has been said this process:
+#: project_well binds per FOV, and the fact is stated ONCE per acquisition, not per field.
+_COPIED_THROUGH_SAID: "set[tuple[str, str]]" = set()
+
+
+def _copy_through(channel: str, why: str) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
+    """The identity over a z-stack in decon's own shape (z-consuming, depth-keeping), for
+    ONE channel decon cannot model: same planes, same dtype, every plane, so the output
+    stays the size of the input. ``copies_through`` carries the reason, which is what
+    ``project_well`` reads to refuse a run in which EVERY channel would be copied."""
+    def _copy(planes: Iterable[np.ndarray]) -> np.ndarray:
+        return np.stack([np.asarray(p) for p in planes])
+
+    _copy.__name__ = f"decon(copied through: {channel})"
+    _copy.consumes = frozenset({"z"})
+    _copy.keeps_depth = True
+    _copy.copies_through = why
+    return _copy
+
+
+def _decon_for_channel(path, channel: str, iterations: int):
+    """decon's per-channel bind: the volume solve at this channel's own optics, or, for a
+    channel with NO emission line, a copy-through named ONCE in the log (Julio, 2026-08-25:
+    "copy BF through unchanged with a named log line"; measured on G7_2026-08-20, whose
+    BF_LED_matrix_full failed the whole run for its two fluorescence channels). Driven by
+    the channel's declared optics, never its name. Only that refusal is absorbed: unreadable
+    optics, a missing path or an impossible NA stay the run's refusal."""
+    try:
+        optics = optics_for_channel(path, channel)
+    except NoEmissionLine:
+        key = (str(path), str(channel))
+        if key not in _COPIED_THROUGH_SAID:
+            _COPIED_THROUGH_SAID.add(key)
+            log.info("%s: no emission wavelength, copied unchanged, not deconvolved", channel)
+        return _copy_through(str(channel), "no emission wavelength")
+    return decon_op(optics, iterations)
+
+
 def decon_op(
     optics: Optional[OpticsParams] = None,
     iterations: int = DEFAULT_ITERATIONS,
@@ -432,8 +486,7 @@ def decon_op(
     _decon.consumes = frozenset({"z"})
     _decon.keeps_depth = True
     if optics is None:
-        _decon.for_channel = lambda path, channel: decon_op(
-            optics_for_channel(path, channel), iterations)
+        _decon.for_channel = lambda path, channel: _decon_for_channel(path, channel, iterations)
     return _decon
 
 

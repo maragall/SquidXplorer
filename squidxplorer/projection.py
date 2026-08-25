@@ -190,6 +190,22 @@ def bind_channel(reduce, path: Optional[str], channel: str):
     return bound
 
 
+def _refuse_all_copied_through(reduce, per_channel: dict) -> None:
+    """A per-channel specialisation may declare ``copies_through`` (its reason, a string)
+    when it hands THAT channel back unchanged - decon does for a channel with no emission
+    line (Julio, 2026-08-25: "copy BF through unchanged with a named log line"). A run in
+    which EVERY channel would be copied has nothing to compute and is refused by name
+    rather than written as a copy of its input. Declaration-driven: no operator name here."""
+    reasons = {c: getattr(op, "copies_through", None) for c, op in per_channel.items()}
+    if reasons and all(reasons.values()):
+        detail = "; ".join(f"{c}: {why}" for c, why in reasons.items())
+        raise ValueError(
+            f"{getattr(reduce, '__name__', reduce)!r} would copy every channel through "
+            f"unchanged ({detail}): nothing to compute, so the run is refused rather than "
+            "written as a copy of its input."
+        )
+
+
 def project(planes: Iterable[np.ndarray]) -> np.ndarray:
     """Maximum-intensity project an iterable of planes into one plane, streaming and dtype-preserving."""
     it = iter(planes)
@@ -282,6 +298,7 @@ def project_well(
     # One specialisation per channel for operators declaring `for_channel`.
     path = acquisition_path(reader) if hasattr(reduce, "for_channel") else None
     per_channel = {c: bind_channel(reduce, path, c) for c in channels}
+    _refuse_all_copied_through(reduce, per_channel)
     for t_i, t_src in enumerate(timepoints):
         for c_i, channel in enumerate(channels):
             op = per_channel[channel]
