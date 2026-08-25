@@ -1036,7 +1036,6 @@ class PlateWindow(QMainWindow):
             want.height() - (frame.height() - client.height()),
         )
 
-
     def _ui_scale(self) -> float:
         """How much bigger the window is than the shape the type was written for."""
         from squidxplorer._fontscale import ui_scale
