@@ -22,7 +22,7 @@ class OperatorRun:
 
     def __init__(self, *, key: str, layer_key: str, label: Optional[str],
                  action: Optional[str], dest: str, address: Any, requester: Any,
-                 is_partial: bool, t0: float):
+                 is_partial: bool, t0: float, scope: Optional[dict] = None):
         self.key = key
         self.layer_key = layer_key    # the plate layer this run's tiles stream into
         self.label = label            # the bare action label reported to the requester
@@ -35,6 +35,9 @@ class OperatorRun:
         self.began = time.monotonic()
         self.error: Optional[str] = None
         self.accs: dict = {}          # region id -> RegionResultAccumulator, still filling
+        #: The run's `{region: [fov, ...]}` when it is scoped to fields (an ROI preview), else
+        #: None: what each region's accumulator OWES (Julio, 2026-08-25, sub-FOV decon).
+        self.scope: Optional[dict] = dict(scope) if scope else None
 
     def settle_stranded(self, deliver: Callable[[str, Any], None]) -> list:
         """The run has ended: resolve every region whose result was still being accumulated.

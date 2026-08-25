@@ -20,13 +20,24 @@ class RegionResultAccumulator:
     """
 
     def __init__(self, op: str, region: str, meta: Mapping, channels: Sequence[str],
-                 *, region_operator: bool = False) -> None:
+                 *, region_operator: bool = False,
+                 fovs: "Sequence[int] | None" = None) -> None:
         self.op = str(op)
         self.region = str(region)
-        self._meta = meta
         self.channels = tuple(str(c) for c in channels)
         self._region_operator = bool(region_operator)
         self._planes: dict[int, np.ndarray] = {}
+        # THE RUN'S OWN SCOPE (Julio, 2026-08-25, "Can't run decon sub FOV?"): an ROI preview
+        # runs `{region: [fov, ...]}` and owes exactly those fields. The books used to owe every
+        # FOV of the region off the metadata, so a scoped run was refused as "1 of 9 FOV(s)"
+        # and reported as fields that could not be read, which was false. The scoped list
+        # replaces the region's in the meta this accumulator places and measures with, so the
+        # fuser and the bbox are the raw mosaic's own code over the run's own fields.
+        if fovs is not None and not region_operator:
+            per_region = dict(meta.get("fovs_per_region") or {})
+            per_region[str(region)] = [int(f) for f in fovs]
+            meta = {**dict(meta), "fovs_per_region": per_region}
+        self._meta = meta
         if region_operator:
             self._expected: list[int] = []
         else:
@@ -50,8 +61,8 @@ class RegionResultAccumulator:
                 f"({list(self.channels)}); refusing to guess which is which")
         if not self._region_operator and int(fov) not in self._expected:
             raise ValueError(
-                f"{self.op!r}: FOV {fov} is not in region {self.region!r} "
-                f"(it has {len(self._expected)} FOV(s)); refusing to place it at the origin")
+                f"{self.op!r}: FOV {fov} is not in this run's scope of region {self.region!r} "
+                f"({len(self._expected)} FOV(s)); refusing to place it at the origin")
         self._planes[int(fov)] = arr
 
     def complete(self) -> bool:

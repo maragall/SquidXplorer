@@ -96,6 +96,25 @@ def test_an_incomplete_region_refuses_to_produce_a_result():
         acc.result()
 
 
+def test_a_scoped_run_owes_only_its_fovs_and_lands_their_own_footprint():
+    """Julio, 2026-08-25, "Can't run decon sub FOV?": an ROI preview computed 1 of 9 fields
+    (correct) and was then refused as '1 of 9 FOV(s) have results' because the BOOKS still
+    owed the whole region. The accumulator owes exactly the run's scoped FOV set."""
+    from squidxplorer._mosaic_source import mosaic_fov_bboxes_um
+
+    meta = _meta()
+    acc = RegionResultAccumulator("demo", "A1", meta, CHANNELS, fovs=[1])
+    assert not acc.complete()
+    acc.add(1, np.full((2, 8, 8), 22, np.uint16))
+    assert acc.complete(), "a scoped run is whole once its own fields are in"
+    res = acc.result()
+    assert res.plane(CHANNELS[0]).shape == (8, 8), "the scoped result is the scoped FOVs' mosaic"
+    assert res.extent.bbox_um == mosaic_fov_bboxes_um(meta, "A1")[1].bbox(), (
+        "the scoped result must sit on its own FOVs' footprint, not the region's")
+    with pytest.raises(ValueError, match="0"):
+        acc.add(0, np.zeros((2, 8, 8), np.uint16))   # outside the scope: refused by name
+
+
 def test_a_channel_count_mismatch_is_named_not_broadcast():
     acc = RegionResultAccumulator("demo", "A1", _meta(), CHANNELS)
     with pytest.raises(ValueError, match="channel"):

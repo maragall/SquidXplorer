@@ -58,8 +58,11 @@ def roi_shapes_layer(win, create: bool = False):
                 edge_color="name", edge_color_cycle=list(ROI_COLORS),
             )
             layer.current_properties = {"name": np.array(["R1"], dtype=object)}
+            # Through the WINDOW's hook when it has one: the view refreshes its ROI chip
+            # there (draw -> go-to arrow, 2026-08-25); a bare window gets the module's.
             layer.events.data.connect(
-                lambda e=None, ly=layer: on_roi_data(win, ly))
+                lambda e=None, ly=layer: (getattr(win, "_on_roi_data", None)
+                                          or (lambda l: on_roi_data(win, l)))(ly))
         except Exception:                            # noqa: BLE001 - fall back to a plain layer
             layer = v.add_shapes(name="ROIs", edge_color="#58a6ff",
                                  face_color="transparent")

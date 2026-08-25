@@ -145,7 +145,13 @@ def _say_max_3d_texture(value: int, *, measured: bool) -> int:
 #: this app has needed (interpolation, gamma). gamma and opacity stay IDENTITY_PROPS:
 #: the model still mirrors them; only their napari rows are gone.
 NATIVE_HIDDEN_ROWS = ("blending:", "projection mode:", "interpolation:",
-                      "gamma:", "opacity:", "depiction:")
+                      "gamma:", "opacity:", "depiction:",
+                      # A Shapes layer's styling: the ROI rectangle's look is the app's, not
+                      # the user's (Julio, 2026-08-25, "realstate not being allocated").
+                      "edge width:", "edge color:", "face color:", "display text:")
+
+#: The row that marks a SHAPES form; with it, the shape-tool button grid is chrome too.
+_SHAPES_SIGNATURE_ROW = "edge width:"
 
 
 def hide_native_rows(controls_widget) -> "list[str]":
@@ -165,10 +171,12 @@ def hide_native_rows(controls_widget) -> "list[str]":
     m = lay.contentsMargins()
     lay.setContentsMargins(m.left(), 2, m.right(), 2)
     hidden = []
+    is_shapes = False
     for i in range(lay.rowCount()):
         item = lay.itemAt(i, QFormLayout.LabelRole)
         label = item.widget() if item is not None else None
         text = str(label.text()).strip().lower() if hasattr(label, "text") else ""
+        is_shapes = is_shapes or text == _SHAPES_SIGNATURE_ROW
         if text not in NATIVE_HIDDEN_ROWS:
             continue
         try:
@@ -179,7 +187,64 @@ def hide_native_rows(controls_widget) -> "list[str]":
             if field is not None and field.widget() is not None:
                 field.widget().hide()
         hidden.append(text)
+    grid = getattr(controls_widget, "button_grid", None)
+    if is_shapes and grid is not None:
+        # The shape-tool row (select / add rectangle / ...): the app sets the layer's mode
+        # itself, so the grid is chrome on a Shapes form. An Image form keeps its own.
+        for j in range(grid.count()):
+            w = grid.itemAt(j).widget() if grid.itemAt(j) is not None else None
+            if w is not None:
+                w.hide()
+        hidden.append("shape tools")
     return hidden
+
+
+def fit_controls_container(container) -> None:
+    """Cap napari's layer-controls container at its CURRENT page's need. The container is
+    a QStackedWidget whose hint is its TALLEST page (an Image form, 289 px measured), so a
+    Shapes page - or a dieted Image page - sat over a blank band."""
+    current = container.currentWidget() if hasattr(container, "currentWidget") else None
+    if current is None:
+        return
+    lay = current.layout()
+    if lay is not None:
+        lay.activate()
+    container.setMaximumHeight(max(1, int(current.sizeHint().height())))
+
+
+def hoist_left_dock(qt_window, dock) -> None:
+    """Put *dock* FIRST in the left column by re-adding every other left dock below it.
+
+    Qt appends docks, so "insert above" is spelled remove-and-re-add. Visibility is kept per
+    dock: napari's flat layer list is hidden on purpose (`_hide_flat_layer_list`) and a
+    re-add must not resurrect it.
+    """
+    from qtpy.QtWidgets import QDockWidget
+
+    others = [(d, d.isVisibleTo(qt_window))
+              for d in qt_window.findChildren(QDockWidget)
+              if d is not dock and qt_window.dockWidgetArea(d) == Qt.LeftDockWidgetArea]
+    for d, _ in others:
+        qt_window.removeDockWidget(d)
+    for d, was_visible in others:
+        qt_window.addDockWidget(Qt.LeftDockWidgetArea, d)
+        d.setVisible(was_visible)
+
+
+def append_left_dock(qt_window, widget, *, name: str):
+    """Dock *widget* LAST in the left column (Qt appends), title slimmed to nothing and kept
+    slim. The plate view + log slots ride this (Julio, 2026-08-25: under the layer controls
+    and the layer toggles, not above)."""
+    from qtpy.QtWidgets import QDockWidget
+
+    dock = QDockWidget(name, qt_window)
+    dock.setObjectName(name)
+    dock.setWidget(widget)
+    dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+    qt_window.addDockWidget(Qt.LeftDockWidgetArea, dock)
+    slim_dock_title(dock)
+    dock.visibilityChanged.connect(lambda vis, d=dock: keep_dock_slim(d) if vis else None)
+    return dock
 
 
 def slim_dock_title(dock) -> None:
@@ -452,6 +517,11 @@ class MosaicPane(QWidget):
                     "layer-controls diet cannot follow new layers (%s).", exc)
         self._controls_container = container
         self.native_chrome_hidden = minimize_native_chrome(qt_window, widgets)
+        if container is not None:
+            try:
+                fit_controls_container(container)
+            except Exception:                    # noqa: BLE001 - cosmetic, never fatal
+                pass
         # Slim titles must STAY slim: napari re-installs its title bar on every
         # visibilityChanged(True); connected here (after napari's own handler) so ours
         # runs last in the same emission.
@@ -474,8 +544,23 @@ class MosaicPane(QWidget):
             return
         try:
             hide_native_rows(container.widget(int(index)))
+            fit_controls_container(container)
         except Exception:                        # noqa: BLE001 - cosmetic, never fatal
             pass
+
+    def dock_plate_slots(self, widget: QWidget) -> bool:
+        """Dock the plate view + log host LAST in napari's left column, under the layer
+        controls and the layer list. False sends the caller to the window body."""
+        if self._viewer is None or self._native_window is None or not self.show_docks:
+            return False
+        try:
+            self.plate_slots_dock = append_left_dock(self._native_window, widget,
+                                                     name="plate · log")
+        except Exception as exc:                 # noqa: BLE001 - the caller has a fallback
+            self.say(f"the plate and log slots could not be docked ({type(exc).__name__}: "
+                     f"{exc}); they are in the window body instead.")
+            return False
+        return True
 
     def dock_view_controls(self, widget: QWidget) -> bool:
         """Dock *widget* (the window's "2D / 3D · ROI" chip block) at the TOP of napari's left
@@ -512,23 +597,7 @@ class MosaicPane(QWidget):
         return True
 
     def _hoist_left_dock(self, dock) -> None:
-        """Put *dock* FIRST in the left column by re-adding every other left dock below it.
-
-        Qt appends docks, so "insert above" is spelled remove-and-re-add. Visibility is kept per
-        dock: napari's flat layer list is hidden on purpose (`_hide_flat_layer_list`) and a
-        re-add must not resurrect it.
-        """
-        from qtpy.QtWidgets import QDockWidget
-
-        qt_window = self._native_window
-        others = [(d, d.isVisibleTo(qt_window))
-                  for d in qt_window.findChildren(QDockWidget)
-                  if d is not dock and qt_window.dockWidgetArea(d) == Qt.LeftDockWidgetArea]
-        for d, _ in others:
-            qt_window.removeDockWidget(d)
-        for d, was_visible in others:
-            qt_window.addDockWidget(Qt.LeftDockWidgetArea, d)
-            d.setVisible(was_visible)
+        hoist_left_dock(self._native_window, dock)
 
     def _install_camera_settle(self) -> None:
         assert self.mosaic is not None

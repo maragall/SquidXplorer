@@ -2937,7 +2937,8 @@ class PlateWindow(QMainWindow):
             requester=requester,
             # Is this run only PART of each well? A mapping means explicit fields (see `_on_tile`).
             is_partial=isinstance(regions, dict),
-            t0=t0)
+            t0=t0,
+            scope=regions if isinstance(regions, dict) else None)
         self._tell_requester(requester, "operator_started", label)
         self.log.started(self._run.action, address=self._run.address)
         self._run_readout(f"● {label} · {scope}{dest} …")
@@ -3150,6 +3151,8 @@ class PlateWindow(QMainWindow):
                 # in no registry, so asking with it accumulated a stitch as if it were a per-FOV
                 # operator. `operator_name` strips the namespace; see `operator_layer_key`.
                 region_operator=is_region_operator(operator_name(op)),
+                # A scoped run ({region: [fov, ...]}) owes ONLY its own fields (2026-08-25).
+                fovs=(run.scope or {}).get(str(region)),
             )
             accs[str(region)] = acc
         try:

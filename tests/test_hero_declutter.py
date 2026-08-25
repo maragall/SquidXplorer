@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
 import pytest
 from qtpy.QtWidgets import QApplication
 
@@ -747,3 +748,239 @@ def test_the_plate_window_shows_again_once_the_last_view_closes(qapp, napari_pan
         assert win.isVisible(), "with no view left the plate window must be the surface"
     finally:
         shutdown_plate_window(qapp, win)
+
+
+# --- ruling l: the ROI chip becomes "go to ROI" once a box is drawn ---------------------------
+# Julio, 2026-08-25: "When I click ROI and draw window, then the ROI button temporarily changes
+# to the go to roi arrow so that I don't have to open the controls to go to the ROI."
+
+
+def _rect_inside(meta, region):
+    from squidxplorer._mosaic_source import mosaic_bbox_um
+
+    x0, y0, x1, y1 = mosaic_bbox_um(meta, region)
+    ya, yb = y0 + (y1 - y0) * 0.3, y0 + (y1 - y0) * 0.6
+    xa, xb = x0 + (x1 - x0) * 0.3, x0 + (x1 - x0) * 0.6
+    return np.array([[ya, xa], [ya, xb], [yb, xb], [yb, xa]])
+
+
+def test_the_roi_chip_turns_into_go_to_roi_once_a_box_is_drawn(qapp, napari_pane_stub,
+                                                              squid_dataset):
+    root, _ = squid_dataset
+    win, (v,) = _open_view(qapp, root)
+    mgr = win._viewer_manager
+    try:
+        assert v._btn_roi.text() == "▭ ROI"
+        v._btn_roi.click()                               # start drawing
+        layer = v._roi_layer
+        assert layer is not None, "the ROI chip did not start an ROI layer"
+        rect = _rect_inside(win._meta, v.current_region())
+        layer.data = [rect]                              # the user finished the rectangle
+        qapp.processEvents()
+        assert v._btn_roi.text() == "→ ROI", "the chip did not turn into the go-to-ROI arrow"
+        assert len(v._btn_roi.toolTip().split(". ")) == 1, "the arrow's tooltip is one sentence"
+        n_before = len(mgr.windows)
+        v._btn_roi.click()                               # the arrow opens the ROI child
+        _drain_until(qapp, lambda: len(mgr.windows) == n_before + 1, timeout=10)
+        assert len(mgr.windows) == n_before + 1, "clicking the arrow did not open the ROI child"
+        assert v._btn_roi.text() == "▭ ROI", "a used ROI must hand the chip back to drawing"
+        layer.data = [rect, rect + 2.0]                  # a SECOND box is drawn
+        qapp.processEvents()
+        assert v._btn_roi.text() == "→ ROI", "a new box must offer the arrow again"
+        v._clear_rois()
+        qapp.processEvents()
+        assert v._btn_roi.text() == "▭ ROI", "clearing the ROIs must hand the chip back"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+# --- ruling n: a scoped preview lands a layer for its own fields ------------------------------
+
+
+def test_a_scoped_preview_lands_a_layer_and_an_unscoped_one_still_refuses_holes(
+        qapp, napari_pane_stub, squid_dataset, monkeypatch):
+    from squidxplorer._mosaic_source import mosaic_fov_bboxes_um
+    from squidxplorer._run import OperatorRun
+
+    root, _ = squid_dataset
+    win, (v,) = _open_view(qapp, root)
+    try:
+        region = v.current_region()
+        fovs = list(win._meta["fovs_per_region"][region])
+        assert len(fovs) >= 2, "the fixture must have a multi-FOV region"
+        delivered = []
+        monkeypatch.setattr(win, "_deliver_operator_result",
+                            lambda op, res: delivered.append((op, res)))
+        win._active_op_key = "mip"
+        planes = np.ones((len(win._meta["channels"]),) + tuple(win._meta["frame_shape"]),
+                         np.uint16)
+
+        def _run(scope):
+            return OperatorRun(key="mip", layer_key="mip", label="mip", action="mip", dest="",
+                               address=None, requester=None, is_partial=scope is not None,
+                               t0=0.0, scope=scope)
+
+        win._run = _run({region: [fovs[0]]})     # the ROI preview: one field of N
+        win._on_result(region, fovs[0], planes)
+        assert len(delivered) == 1, "a scoped preview must land its layer at 1 of N"
+        assert delivered[0][1].extent.bbox_um == mosaic_fov_bboxes_um(
+            win._meta, region)[fovs[0]].bbox(), "the layer must sit on the scoped field"
+
+        win._run = _run(None)                    # the unscoped run: still whole or nothing
+        win._on_result(region, fovs[0], planes)
+        assert len(delivered) == 1, "an unscoped run at 1 of N must still refuse holes"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+# --- ruling m: the plate view and the log go UNDER the layer controls and the layer list ------
+# Julio, 2026-08-25: "The plate view and the logger should be under the contrast adjustment
+# stuff and the layer toggle, not above."
+
+
+def test_the_plate_and_log_dock_is_appended_under_the_layer_docks(qapp):
+    from qtpy.QtCore import Qt
+    from qtpy.QtWidgets import QDockWidget, QLabel, QMainWindow
+
+    from squidxplorer._napari_pane import append_left_dock, hoist_left_dock
+
+    win = QMainWindow()
+    win.resize(400, 900)
+    controls = QDockWidget("layer controls", win)
+    controls.setWidget(QLabel("contrast"))
+    layers = QDockWidget("layer list", win)
+    layers.setWidget(QLabel("raw: 561"))
+    win.addDockWidget(Qt.LeftDockWidgetArea, controls)
+    win.addDockWidget(Qt.LeftDockWidgetArea, layers)
+    chips = QDockWidget("2D / 3D · ROI", win)
+    chips.setWidget(QLabel("[3D][ROI]"))
+    win.addDockWidget(Qt.LeftDockWidgetArea, chips)
+    hoist_left_dock(win, chips)
+    slots = append_left_dock(win, QLabel("plate · log"), name="plate · log")
+    win.show()
+    qapp.processEvents()
+    left = [d for d in win.findChildren(QDockWidget)
+            if win.dockWidgetArea(d) == Qt.LeftDockWidgetArea]
+    order = [d.windowTitle() for d in sorted(left, key=lambda d: d.geometry().top())]
+    assert order == ["2D / 3D · ROI", "layer controls", "layer list", "plate · log"], order
+    tb = slots.titleBarWidget()
+    assert tb is not None and tb.maximumHeight() == 0, "the slot dock spends a title bar"
+
+
+def test_the_plate_log_slot_lives_outside_the_chips_column(qapp, napari_pane_stub,
+                                                           squid_dataset):
+    root, _ = squid_dataset
+    win, (v,) = _open_view(qapp, root)
+    try:
+        host = v._plate_log_host
+        assert host.parentWidget() is not v._left_col, (
+            "the plate/log slot still sits inside the chips column, above the layer controls")
+        assert not v._left_col.isAncestorOf(host)
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+# --- ruling o: the left column's real estate ------------------------------------------------
+# Julio, 2026-08-25, screenshot: "Top left corner, realstate not being allocated efficiently."
+
+
+def test_a_progress_report_after_the_run_ended_does_not_resurrect_the_bar(qapp, napari_pane_stub,
+                                                                          squid_dataset):
+    """The bar sat at '4%' under the log after a failed ROI decon run."""
+    from squidxplorer._progress import ProgressReport
+
+    root, _ = squid_dataset
+    win, (v,) = _open_view(qapp, root)
+    try:
+        v.operator_started("decon")
+        v.operator_progress(ProgressReport(label="decon", done=1, total=27, unit="field"))
+        assert not v._op_progress.isHidden(), "a running run shows its bar"
+        v.operator_failed("decon", "1 region(s) landed no layer")
+        assert v._op_progress.isHidden(), "a failed run must take its bar down"
+        v.operator_progress(ProgressReport(label="decon", done=2, total=27, unit="field"))
+        assert v._op_progress.isHidden(), "a late report after the run ended put the bar back"
+        v.operator_started("decon")
+        v.operator_progress(ProgressReport(label="decon", done=3, total=27, unit="field"))
+        v.operator_done("decon", 1.0)
+        assert v._op_progress.isHidden(), "a finished run must take its bar down"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_the_shapes_controls_rows_and_tool_grid_are_chrome(qapp):
+    """The ROI rectangle's look is the app's, so napari's Shapes styling rows and its
+    shape-tool button grid are chrome; an Image form's tool grid stays."""
+    from qtpy.QtWidgets import QComboBox, QFormLayout, QGridLayout, QLabel, QPushButton, QWidget
+
+    from squidxplorer._napari_pane import NATIVE_HIDDEN_ROWS, hide_native_rows
+
+    shapes_rows = ("edge width:", "edge color:", "face color:", "display text:")
+    for text in shapes_rows:
+        assert text in NATIVE_HIDDEN_ROWS, f"{text!r} is not in the chrome inventory"
+
+    def _form(rows):
+        controls = QWidget()
+        form = QFormLayout(controls)
+        grid = QGridLayout()
+        buttons = [QPushButton(f"tool {i}") for i in range(3)]
+        for i, b in enumerate(buttons):
+            grid.addWidget(b, 0, i)
+        form.addRow(grid)
+        controls.button_grid = grid
+        kept = {}
+        for text in rows:
+            lab, fld = QLabel(text), QComboBox()
+            form.addRow(lab, fld)
+            kept[text] = (lab, fld)
+        controls.show()
+        qapp.processEvents()
+        return controls, buttons, kept
+
+    shapes, tools, rows = _form(("opacity:",) + shapes_rows)
+    hidden = hide_native_rows(shapes)
+    qapp.processEvents()
+    for text in shapes_rows:
+        lab, fld = rows[text]
+        assert not lab.isVisibleTo(shapes) and not fld.isVisibleTo(shapes), f"{text!r} shows"
+    assert all(not b.isVisibleTo(shapes) for b in tools), "the shape-tool grid is still showing"
+    assert "shape tools" in hidden, "the hidden grid must be named in the inventory"
+
+    image, tools, rows = _form(("opacity:", "contrast limits:", "colormap:"))
+    hide_native_rows(image)
+    qapp.processEvents()
+    assert all(b.isVisibleTo(image) for b in tools), "an Image form's tool grid was hidden"
+    for text in ("contrast limits:", "colormap:"):
+        lab, _ = rows[text]
+        assert lab.isVisibleTo(image)
+
+
+def test_the_layer_controls_container_takes_only_what_its_page_needs(qapp):
+    """napari's controls container is a QStackedWidget whose hint is the TALLEST page (an
+    Image form, 289 px measured), so a Shapes page sat over a blank area. It is fitted to
+    the CURRENT page."""
+    from qtpy.QtWidgets import QLabel, QStackedWidget, QVBoxLayout, QWidget
+
+    from squidxplorer._napari_pane import fit_controls_container
+
+    stack = QStackedWidget()
+    tall = QWidget()
+    tv = QVBoxLayout(tall)
+    for i in range(12):
+        tv.addWidget(QLabel(f"row {i}"))
+    short = QWidget()
+    sv = QVBoxLayout(short)
+    sv.addWidget(QLabel("edge width"))
+    stack.addWidget(tall)
+    stack.addWidget(short)
+    stack.setCurrentWidget(short)
+    stack.show()
+    qapp.processEvents()
+    assert stack.sizeHint().height() >= tall.sizeHint().height()
+    fit_controls_container(stack)
+    qapp.processEvents()
+    assert stack.maximumHeight() == short.sizeHint().height(), (
+        f"the container keeps {stack.maximumHeight()} px for a page needing "
+        f"{short.sizeHint().height()}")
+    stack.setCurrentWidget(tall)
+    fit_controls_container(stack)
+    assert stack.maximumHeight() == tall.sizeHint().height()

@@ -559,12 +559,20 @@ class RegionViewer(QMainWindow):
         lv.addWidget(self._operators_fold, 0)
         # ONE WINDOW (Julio, 2026-08-25): the plate view and the log are SLOTS this column can
         # host; `adopt_plate_slots` fills this layout when the manager elects this view.
-        self._plate_log_slot = QVBoxLayout()
+        # ...UNDER the layer controls and the layer list, never above (Julio, 2026-08-25:
+        # "The plate view and the logger should be under the contrast adjustment stuff and
+        # the layer toggle, not above."): a host of its own, docked LAST in the left column
+        # (`MosaicPane.dock_plate_slots`), or below the chips in the window body.
+        self._plate_log_host = QWidget()
+        self._plate_log_host.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self._plate_log_slot = QVBoxLayout(self._plate_log_host)
         self._plate_log_slot.setContentsMargins(0, 0, 0, 0)
-        lv.addLayout(self._plate_log_slot)
         dock_controls = getattr(pane, "dock_view_controls", None)
         if not (callable(dock_controls) and dock_controls(left_col)):
             lay.addWidget(left_col, 0)
+        dock_slots = getattr(pane, "dock_plate_slots", None)
+        if not (callable(dock_slots) and dock_slots(self._plate_log_host)):
+            lay.addWidget(self._plate_log_host, 0)
         # The RUN/MOVIE PROGRESS BAR stays in the window body: a run's progress must be visible
         # while the operator dock is collapsed to its grip. Hidden, it costs zero height.
         self._op_progress = QProgressBar()
@@ -703,8 +711,10 @@ class RegionViewer(QMainWindow):
         # the folded grid.
         from qtpy.QtWidgets import QGridLayout
 
-        self._btn_roi = self._chip("▭ ROI", "Draw an ROI rectangle inside the mosaic.",
-                                   self._new_roi)
+        # The chip is TWO-STATE (Julio, 2026-08-25: "the ROI button temporarily changes to
+        # the go to roi arrow so that I don't have to open the controls to go to the ROI"):
+        # draw, then, once a box exists and has not been used, open it. See _refresh_roi_chip.
+        self._btn_roi = self._chip(self._ROI_DRAW[0], self._ROI_DRAW[1], self._roi_chip_clicked)
         fold = _FoldSection("controls", header=(self._btn_3d, self._btn_roi))
         grid = QGridLayout(); grid.setSpacing(4)
         chips = [
@@ -1501,8 +1511,8 @@ class RegionViewer(QMainWindow):
     def operator_progress(self, report) -> None:
         """The run advanced. ``report`` is a :class:`~squidxplorer._progress.ProgressReport`."""
         bar = getattr(self, "_op_progress", None)
-        if bar is None:
-            return
+        if bar is None or self._op_action is None:
+            return                               # no run open: a late report shows no bar
         percent = report.percent
         if percent is None:
             self._show_progress(None, report.sentence())
@@ -2010,8 +2020,34 @@ class RegionViewer(QMainWindow):
         if slider is not None:
             slider.frame_done()
 
+    #: The ROI chip's two faces: draw a box, or go to the box just drawn.
+    _ROI_DRAW = ("▭ ROI", "Draw an ROI rectangle inside the mosaic.")
+    _ROI_GO = ("→ ROI", "Open the drawn ROI as a child view.")
+    _roi_count = 0
+    _roi_used = False
+
     def _on_roi_data(self, layer) -> None:
         _roi_tools.on_roi_data(self, layer)
+        n = len(list(getattr(layer, "data", []) or []))
+        if n > self._roi_count:
+            self._roi_used = False               # a NEW box: the arrow is offered again
+        self._roi_count = n
+        self._refresh_roi_chip()
+
+    def _refresh_roi_chip(self) -> None:
+        """The ROI chip reads as the go-to arrow while an unused box exists, else as draw."""
+        btn = getattr(self, "_btn_roi", None)
+        if btn is None or not _alive(btn):
+            return
+        text, tip = self._ROI_GO if (self._roi_count and not self._roi_used) else self._ROI_DRAW
+        btn.setText(text)
+        btn.setToolTip(tip)
+
+    def _roi_chip_clicked(self) -> None:
+        if self._roi_count and not self._roi_used:
+            self._open_roi_children()
+            return
+        self._new_roi()
 
     def _live_texture_limit(self) -> int:
         return _roi_tools.live_texture_limit(self)
@@ -2037,6 +2073,8 @@ class RegionViewer(QMainWindow):
 
     def _open_roi_children(self) -> None:
         _roi_tools.open_roi_children(self)
+        self._roi_used = True                    # used: the chip hands back to drawing
+        self._refresh_roi_chip()
 
     def _install_canvas_loupe(self, pane) -> None:
         """Give this window's canvas a shift-left-click magnifier.

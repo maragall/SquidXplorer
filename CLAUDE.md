@@ -1192,6 +1192,30 @@ operators hidden by default and summoned, never a separate window.
   available geometry (frame-fitted through `_fit_frame`, shared with
   `maybe_hide_for_one_window`), else `beside_rect` as before for a free-standing layout.
   Tests assert the window HANDLE, not `isVisible()`.
+- **The ROI chip is two-state** (Julio: "the ROI button temporarily changes to the go to roi
+  arrow"): "▭ ROI" draws; once a box exists and has not been used it reads "→ ROI" and opens
+  the ROI child (`RegionViewer._roi_chip_clicked` / `_refresh_roi_chip`, driven by the
+  Shapes layer's data event through the view's `_on_roi_data`); using or clearing hands it
+  back, a new box offers the arrow again. Top-level, never behind the controls fold.
+- **The plate slot and the log are UNDER the layer controls and the layer list** (Julio: "not
+  above"): `_plate_log_host` is its own dock appended LAST in the left column
+  (`_napari_pane.append_left_dock` via `MosaicPane.dock_plate_slots`; `hoist_left_dock` is
+  the module-level twin the chips use), or below the chips in the window body headless.
+- **A scoped run owes only its own fields** (Julio: "Can't run decon sub FOV?"; measured: an
+  ROI preview computed 1 of 9 fields and was refused as "1 of 9 FOV(s) have results", then
+  reported as fields that could not be read, which was false). `OperatorRun.scope` carries
+  the `{region: [fov, ...]}` mapping; `RegionResultAccumulator(fovs=)` places, measures and
+  completes over that list (the region's list is replaced in its own meta copy, so the fuser
+  and the bbox stay the raw mosaic's code); an unscoped run still refuses holes.
+- **Left-column real estate** (Julio's screenshot: "realstate not being allocated
+  efficiently"): a Shapes layer's styling rows (`edge width:`, `edge color:`, `face color:`,
+  `display text:`) and its shape-tool grid are chrome (`NATIVE_HIDDEN_ROWS`, the grid by the
+  form's `edge width:` signature, an Image form keeps its own grid); napari's controls
+  container is capped at its CURRENT page's need (`fit_controls_container`, on every
+  currentChanged; the QStackedWidget's hint is its tallest page, 289 px measured); a
+  progress report after the run ended shows no bar (`operator_progress` returns with no
+  `_op_action`). NOT done: the ~110 px blank band above the chips in a CHILD view cannot be
+  measured here (offscreen has no OpenGL, so no docked real pane builds); check live.
 - **Verbosity strip, measured** (labels + tooltips in a view's left column, folds summoned,
   via a scratch probe at f063f55 vs bf982a2): resting column 33 elements both before and
   after but 431 -> 207 words; with every operator's inline panel inserted once, 108 -> 64
