@@ -371,6 +371,66 @@ def optics_for_channel(path, channel: str) -> OpticsParams:
     return apply_session_optics(optics)
 
 
+def rig_profile_notes(path) -> "list[str]":
+    """Guardrail WARNINGS about a suspicious rig profile — one sentence each, never a block.
+
+    Julio (2026-08-25): "A wrong rig profile is handled by GUARDRAILS, not knobs." Three
+    cross-checks over the acquisition's own sidecars: (1) pixel_size_um against
+    sensor_pixel_size_um x binning / magnification; (2) the folder NAME's objective against
+    the recorded magnification; (3) dz against the axial PSF extent (sampling honesty).
+    Every note is advisory — the run proceeds on the record.
+    """
+    import json
+    import re
+    from pathlib import Path
+
+    notes: "list[str]" = []
+    root = Path(str(path))
+    try:
+        meta = load_acquisition_metadata(root)
+    except Exception:                              # noqa: BLE001 - unreadable refuses elsewhere
+        return notes
+    sensor = magnification = binning = None
+    try:
+        params = json.loads((root / "acquisition parameters.json").read_text())
+        objective = params.get("objective") if isinstance(params.get("objective"), dict) else {}
+        sensor = float(params.get("sensor_pixel_size_um") or 0) or None
+        magnification = float(objective.get("magnification") or 0) or None
+        binning = params.get("binning")
+    except Exception:                              # noqa: BLE001 - absent sidecar: fewer checks
+        pass
+    pixel = meta.get("pixel_size_um")
+    if pixel and sensor and magnification:
+        try:
+            factor = float(binning) if binning else 1.0
+        except (TypeError, ValueError):
+            factor = 1.0
+        expected = sensor * factor / magnification
+        if abs(expected - float(pixel)) > 0.05 * expected:
+            notes.append(
+                f"rig profile: pixel_size_um {float(pixel):.4g} disagrees with sensor "
+                f"{sensor:g} um x binning {factor:g} / magnification {magnification:g}x = "
+                f"{expected:.4g} um. The run proceeds on the recorded pixel size.")
+    if magnification:
+        m = re.search(r"(?<![0-9A-Za-z])(\d+(?:\.\d+)?)[xX](?![0-9A-Za-z])", root.name)
+        if m and abs(float(m.group(1)) - magnification) > 0.5:
+            notes.append(
+                f"rig profile: the folder name says {m.group(1)}x but the recorded objective "
+                f"is {magnification:g}x. The run proceeds on the record.")
+    dz = meta.get("dz_um")
+    na = load_objective_na(root)
+    if dz and na:
+        ni = session_ni() or 1.0
+        wavelength_um = 0.525                    # a mid-visible line; a warning needs no exactness
+        axial = 2.0 * wavelength_um * ni / (na * na)
+        if float(dz) > 2.0 * axial:
+            notes.append(
+                f"sampling: dz {float(dz):g} um is much larger than the axial PSF extent "
+                f"(~{axial:.2g} um at NA {na:g}, ni {ni:g}); the z-stack undersamples the PSF. "
+                "The run proceeds.")
+    return notes
+
+
 def decon_op(
     optics: Optional[OpticsParams] = None,
     iterations: int = DEFAULT_ITERATIONS,
@@ -402,8 +462,8 @@ def decon_op(
 # iteration count at all; the QC tool existed to choose one and had nowhere to put the answer.
 _ITERATIONS_PARAM = Param(
     "iterations", DEFAULT_ITERATIONS,
-    "Richardson-Lucy iterations. RL is semi-convergent, so pick the count by eye in the decon "
-    "panel's turbo x-z / y-z sweep; its 'use k iterations' button writes the choice here.")
+    "Richardson-Lucy iterations. Pick the count by eye with the decon sweep; 'use k "
+    "iterations' writes the choice here.")
 
 add_operator("decon", decon_op, consumes=frozenset({"z"}), params=(_ITERATIONS_PARAM,),
              requires=("petakit",), extra="decon")

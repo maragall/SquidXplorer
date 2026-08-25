@@ -36,12 +36,6 @@ TABS_DARK = (
 )
 
 #: An operator "card" in the Process pane (Cellpose-style pick-an-operation).
-CARD_QSS = (
-    "QPushButton{background:#0d1420;color:#e6edf3;border:1px solid #232b3a;border-radius:10px;"
-    "text-align:left;padding:9px 13px;font-size:13px;}"
-    "QPushButton:hover{border-color:#58a6ff;background:#111a2b;}"
-    "QPushButton:disabled{color:#57606a;border-color:#1a2130;}"
-)
 BTN_QSS = (
     "QPushButton{background:#131824;color:#e6edf3;border:1px solid #232b3a;border-radius:8px;"
     "padding:7px 12px;font-weight:700;} QPushButton:hover{border-color:#58a6ff;}"
@@ -96,58 +90,6 @@ def dark_palette() -> QPalette:
 
 
 _OPERATOR_CARD_CLS = None
-
-
-def operator_card(label: str, blurb: str):
-    """An operator card whose description elides to the card's width, full text on hover."""
-    return _operator_card_cls()(label, blurb)
-
-
-def _operator_card_cls():
-    """Build (once) the eliding card class; lazy so this module never imports QtWidgets at load."""
-    global _OPERATOR_CARD_CLS
-    if _OPERATOR_CARD_CLS is not None:
-        return _OPERATOR_CARD_CLS
-
-    from qtpy.QtCore import QEvent, Qt
-    from qtpy.QtWidgets import QPushButton, QSizePolicy
-
-    #: ``QEvent.Type.FontChange`` under Qt6/qtpy, ``QEvent.FontChange`` under PyQt5.
-    _FONT_CHANGE = getattr(getattr(QEvent, "Type", QEvent), "FontChange")
-
-    class _OperatorCard(QPushButton):
-        #: The card's horizontal chrome: CARD_QSS padding + border, with slack.
-        _CHROME_PX = 30
-
-        def __init__(self, label: str, blurb: str) -> None:
-            super().__init__()
-            self._label, self._blurb = str(label), str(blurb)
-            self.setToolTip(f"{self._label}\n{self._blurb}")
-            # Never demand the unelided width from the layout.
-            self.setMinimumWidth(0)
-            self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-            self._retext()
-
-        def _retext(self) -> None:
-            avail = self.width() - self._CHROME_PX
-            if avail <= 0:                       # not laid out yet; resizeEvent will do it
-                self.setText(f"{self._label}\n{self._blurb}")
-                return
-            fm = self.fontMetrics()
-            self.setText(f"{fm.elidedText(self._label, Qt.ElideRight, avail)}\n"
-                         f"{fm.elidedText(self._blurb, Qt.ElideRight, avail)}")
-
-        def resizeEvent(self, e):                # noqa: N802 - Qt's spelling
-            super().resizeEvent(e)
-            self._retext()
-
-        def changeEvent(self, e):                # noqa: N802 - Qt's spelling
-            super().changeEvent(e)
-            if e is not None and e.type() == _FONT_CHANGE:
-                self._retext()
-
-    _OPERATOR_CARD_CLS = _OperatorCard
-    return _OPERATOR_CARD_CLS
 
 
 def hline():

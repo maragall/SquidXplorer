@@ -235,27 +235,20 @@ def test_the_panel_does_not_carry_its_own_scope(qapp):
     assert not hasattr(p, "scope_combo")
 
 
-def test_the_run_leaves_scope_unresolved_so_the_run_selector_owns_it(qapp):
-    """regions=None is UNSCOPED, not "the whole plate": run_operator resolves it against the
-    LIVE selection, since a panel built once and cached would otherwise capture a stale one."""
+def test_the_stitcher_panel_is_parameters_only(qapp):
+    """One flow (Julio, 2026-08-25): the panel carries NO run button and NO save checkbox -
+    the view's operators row (Preview / Run on plate) launches every run and reads this
+    panel through kwargs()."""
     host = _Host()
     p = StitcherPanel(host)
-    p.run_btn.click()
-    assert host.calls[0][1]["regions"] is None
-
-
-def test_the_stitcher_run_button_launches_the_operator_with_the_panel_s_kwargs(qapp):
-    host = _Host()
-    p = StitcherPanel(host)
+    assert not hasattr(p, "run_btn"), "the panel's own run button is back"
+    assert not hasattr(p, "save_cb"), "the panel's save checkbox is back"
     p.register_cb.setChecked(False)
     p.blend_spin.setValue(64)
-    p.run_btn.click()
-    assert len(host.calls) == 1
-    key, kw = host.calls[0]
-    assert key == "stitch"
-    assert kw["operator_kwargs"]["register"] is False
-    assert kw["operator_kwargs"]["blend_px"] == 64
-    assert kw["save"] is False                       # tuning a fusion run is a preview
+    kw = p.kwargs()
+    assert kw["register"] is False
+    assert kw["blend_px"] == 64
+    assert host.calls == [], "building/reading the panel must launch nothing"
 
 
 def test_turning_registration_off_disables_the_registration_only_controls(qapp):
@@ -270,53 +263,38 @@ def test_turning_registration_off_disables_the_registration_only_controls(qapp):
     assert p.rel_spin.isEnabled()
 
 
-def test_a_labels_z_operator_disables_the_run_button_and_says_why(qapp, blob_operator):
+def test_a_labels_z_operator_says_why_before_any_run(qapp, blob_operator):
+    """A labels z-operator cannot be fused; the panel SAYS so the moment it is chosen (the
+    launch-time guard is stitch_region's own refusal)."""
     host = _Host()
     p = StitcherPanel(host)
     p.z_operator_combo.setCurrentText(blob_operator)
-    assert not p.run_btn.isEnabled()
     assert host.said and "label" in host.said[-1].lower()
     p.z_operator_combo.setCurrentText("mip")
-    assert p.run_btn.isEnabled()
+    assert host.said[-1] == ""                  # the refusal clears with a legal choice
 
 
-def test_an_intensity_z_operator_leaves_the_run_button_enabled(qapp):
-    """The button follows the ENGINE, not a guard the engine outgrew."""
+def test_an_intensity_z_operator_raises_no_refusal(qapp):
+    """The refusal follows the ENGINE, not a guard the engine outgrew."""
     host = _Host()
     p = StitcherPanel(host)
     p.z_operator_combo.setCurrentText("decon")
-    assert p.run_btn.isEnabled()
+    assert host.said[-1] == ""
 
 
 def test_keep_every_plane_is_offered_and_spells_z_operator_none(qapp):
     """The shelved `keepz` identity's replacement: the combo's label maps to z_operator=None —
-    every acquired plane fused unchanged — and never reaches the registry as a name."""
-    from squidxplorer._op_panels import KEEP_EVERY_PLANE
+    every acquired plane fused unchanged — and never reaches the registry as a name.
+    `z_operator_choice` is the one mapping, read by the plate's `operator_kwargs_for`."""
+    from squidxplorer._op_panels import KEEP_EVERY_PLANE, z_operator_choice
 
     host = _Host()
     p = StitcherPanel(host)
     labels = [p.z_operator_combo.itemText(i) for i in range(p.z_operator_combo.count())]
     assert KEEP_EVERY_PLANE in labels
     assert "keepz" not in labels
-    p.z_operator_combo.setCurrentText(KEEP_EVERY_PLANE)
-    assert p.run_btn.isEnabled(), host.said
-    p._run()
-    (key, kw), = host.calls
-    assert key == "stitch"
-    assert kw["operator_kwargs"]["z_operator"] is None
-
-
-def test_the_run_handler_itself_refuses_labels_not_just_the_disabled_button(qapp,
-                                                                            blob_operator):
-    """Exercises the SECOND defence: clicking a disabled button never enters the handler, so
-    the guard inside ``_run`` must refuse independently of the button's enabled state."""
-    host = _Host()
-    p = StitcherPanel(host)
-    p.z_operator_combo.setCurrentText(blob_operator)
-    p.run_btn.setEnabled(True)                  # simulate reaching _run some other way
-    p._run()
-    assert host.calls == [], "the run must not start"
-    assert "label" in host.said[-1].lower()
+    assert z_operator_choice(KEEP_EVERY_PLANE) is None
+    assert z_operator_choice("mip") == "mip"
 
 
 def test_the_decon_panel_starts_at_the_qc_start_iteration_count(qapp):
@@ -363,140 +341,47 @@ def test_the_decon_panel_shutdown_joins_a_running_worker(qapp):
     assert p._worker is None                 # the worker was reaped, not orphaned
 
 
-def test_the_result_view_renders_the_turbo_composite_at_the_composite_s_own_size(qapp):
-    """Pane 3 renders the picture ``squidxplorer._decon_qc`` produced; it builds none of its own."""
-    pytest.importorskip("matplotlib")
-    from squidxplorer._decon_qc import qc_composite
-
-    volume = np.zeros((5, 40, 40), dtype=np.float32)
-    volume[2, 20, 20] = 1000.0
-    composite = qc_composite(volume, (2, 20, 20), gap=2)
+def test_the_result_view_carries_no_turbo_picture(qapp):
+    """The turbo composite panes are GONE (Julio, 2026-08-25: "The turbo colormap preview
+    makes no sense. remove it") — the preview is the in-view data layer under the channel's
+    own colormap. The stepper, caption and metric survive them."""
     view = DeconQCResultView("A1/0/c0")
-    view.show_iteration(3, composite, 0.31, "improving", "still tightening")
-    img = view.image_label.pixmap().toImage()
-    assert (img.width(), img.height()) == (composite.shape[1], composite.shape[0])
-    assert "3" in view.caption_label.text()
-
-
-def _click(qapp, view, row, col):
-    """A real mouse press at composite pixel (row, col), through ``mousePressEvent`` so the
-    pixmap's centring offset inside the label is exercised, not assumed."""
-    from qtpy.QtCore import QPoint
-    from qtpy.QtTest import QTest
-
-    label = view.image_label
-    pm = label.pixmap()
-    dx = max((label.width() - pm.width()) // 2, 0)
-    dy = max((label.height() - pm.height()) // 2, 0)
-    QTest.mouseClick(label, Qt.LeftButton, Qt.NoModifier, QPoint(dx + col, dy + row))
-    qapp.processEvents()
-
-
-def _qc_view(qapp, volume, centre, view_half=None):
-    """A result view showing one iteration of *volume*, laid out and clickable."""
-    from squidxplorer._decon_qc import qc_composite
-
-    view = DeconQCResultView("A1/0/c0")
-    view.show_iteration(3, qc_composite(volume, centre, view_half=view_half), 0.31,
-                        "improving", "still tightening",
-                        volume=volume, centre=centre, view_half=view_half)
-    view.resize(400, 400)
-    view.show()
-    qapp.processEvents()
-    return view
-
-
-def test_clicking_the_picture_moves_the_crosshairs_and_re_cuts_the_strips(qapp):
-    """A click re-sections the SAME volume through the clicked point; ``qc_composite`` already
-    takes ``centre``, so no RL run happens here."""
-    pytest.importorskip("matplotlib")
-    volume = np.zeros((5, 40, 40), dtype=np.float32)
-    volume[2, 20, 20] = 1000.0            # what the run centred on
-    volume[2, 10, 10] = 700.0             # a second structure, off both current sections
-    view = _qc_view(qapp, volume, (2, 20, 20))
-    before = view._rgb.copy()
-
-    _click(qapp, view, row=10, col=10)    # inside the x-y panel
-
-    assert view._centre == (2, 10, 10), "the crosshairs did not move to the clicked voxel"
-    assert not np.array_equal(view._rgb, before), (
-        "the crosshairs moved but the strips were not re-cut — the picture is stale")
-    assert "z=2" in view.crosshair_label.text() and "y=10" in view.crosshair_label.text()
-    # The halo/core number was measured where the RUN put the crosshairs, so once they move by
-    # hand the picture and the number are about different points and the view has to say so.
-    assert "moved by hand" in view.crosshair_label.text()
-    assert view.history == [(3, pytest.approx(0.31))], "a click is not another iteration"
+    assert not hasattr(view, "image_label"), "the turbo picture pane is back"
+    assert not hasattr(view, "crosshair_label"), "the crosshair chrome is back"
+    import squidxplorer._decon_qc as decon_qc
+    import squidxplorer._op_panels as op_panels
+    assert not hasattr(decon_qc, "turbo_rgb"), "_decon_qc still ships the turbo mapper"
+    assert not hasattr(decon_qc, "qc_composite"), "_decon_qc still ships the composite"
+    assert "turbo_rgb" not in open(op_panels.__file__).read()
+    view.show_iteration(3, 0.31, "improving", "still tightening")
+    assert "ITERATION 3 of 3" in view.caption_label.text()
     view.close()
 
 
-def test_clicking_a_separator_band_moves_nothing(qapp):
-    """A gap pixel points at no section; snapping to the nearest one would move the crosshairs
-    somewhere the user did not click."""
-    pytest.importorskip("matplotlib")
-    volume = np.zeros((5, 40, 40), dtype=np.float32)
-    volume[2, 20, 20] = 1000.0
-    view = _qc_view(qapp, volume, (2, 20, 20))
-    before = view._rgb.copy()
-
-    _click(qapp, view, row=41, col=10)    # the horizontal separator (gap=2 at rows 40..41)
-
-    assert view._centre == (2, 20, 20)
-    assert np.array_equal(view._rgb, before)
-    view.close()
-
-
-def test_a_view_shown_without_its_volume_is_simply_not_clickable(qapp):
-    """The three-argument show_iteration must not raise on a click: there is nothing to re-slice."""
-    pytest.importorskip("matplotlib")
-    from squidxplorer._decon_qc import qc_composite
-
-    volume = np.zeros((5, 40, 40), dtype=np.float32)
-    volume[2, 20, 20] = 1000.0
-    view = DeconQCResultView("A1/0/c0")
-    view.show_iteration(3, qc_composite(volume, (2, 20, 20)), 0.31, "improving", "")
-    view.resize(400, 400)
-    view.show()
-    qapp.processEvents()
-    before = view._rgb.copy()
-
-    _click(qapp, view, row=10, col=10)
-
-    assert view._centre is None
-    assert np.array_equal(view._rgb, before)
-    view.close()
-
-
-def test_the_worker_hands_the_volume_through_so_the_click_has_something_to_re_slice(qapp):
-    """The RL volume must survive the worker — emitting the composite alone would leave nothing
-    to cut a different section out of. Pinned via ``frame.volume``/``centre``/``view_half``."""
-    pytest.importorskip("matplotlib")
-    from squidxplorer._decon_qc import qc_composite
+def test_the_worker_hands_the_volume_through_for_the_data_preview(qapp):
+    """The RL volume must survive the worker — it IS the preview the view renders."""
     from squidxplorer._op_panels import QCFrame
 
     volume = np.zeros((5, 40, 40), dtype=np.float32)
     volume[2, 20, 20] = 1000.0
     panel = DeconQCPanel(_Host())
     panel._view = DeconQCResultView("A1/0/c0")
-    frame = QCFrame(qc_composite(volume, (2, 20, 20), view_half=8), volume, (2, 20, 20), 8)
+    frame = QCFrame(volume, (2, 20, 20), 8)
 
     panel._on_done(3, frame, 0.31)
 
-    assert panel._view._volume is not None, "the view got a picture but no volume to re-slice"
-    assert panel._view._centre == (2, 20, 20)
-    assert panel._view._view_half == 8
+    rec = panel._view.capture(3)
+    assert rec is not None and rec["volume"] is not None, (
+        "the view got a caption but no volume to preview")
+    assert rec["centre"] == (2, 20, 20)
+    assert rec["view_half"] == 8
     panel._view.close()
 
 
 def test_the_result_view_keeps_every_iteration_so_they_can_be_compared(qapp):
-    pytest.importorskip("matplotlib")
-    from squidxplorer._decon_qc import qc_composite
-
-    volume = np.zeros((5, 20, 20), dtype=np.float32)
-    volume[2, 10, 10] = 1000.0
-    c = qc_composite(volume, (2, 10, 10), gap=2)
     view = DeconQCResultView("A1/0/c0")
-    view.show_iteration(2, c, 0.40, "first", "")
-    view.show_iteration(3, c, 0.31, "improving", "")
+    view.show_iteration(2, 0.40, "first", "")
+    view.show_iteration(3, 0.31, "improving", "")
     assert [k for k, _ in view.history] == [2, 3]
 
 
@@ -568,11 +453,9 @@ def test_the_distortion_checkbox_is_greyed_out_with_registration_off(qapp):
 
 
 def test_the_panel_s_distortion_choice_travels_to_the_operator(qapp):
-    host = _Host()
-    p = StitcherPanel(host)
+    p = StitcherPanel(_Host())
     p.distortion_cb.setChecked(True)
-    p.run_btn.click()
-    assert host.calls[0][1]["operator_kwargs"]["correct_distortion"] is True
+    assert p.kwargs()["correct_distortion"] is True
 
 
 def test_the_timepoint_spin_is_hidden_on_a_single_timepoint_acquisition(qapp):
@@ -752,19 +635,15 @@ def test_a_value_read_back_keeps_the_declared_type(qapp, blob_operator):
     assert isinstance(kwargs["split_touching"], bool)
 
 
-def test_the_widget_s_value_travels_to_run_operator_through_operator_kwargs(qapp,
-                                                                            blob_operator):
-    """The SAME argument StitcherPanel uses, so this is an already-tested path."""
-    host = _Host()
-    p = GenericOperatorPanel(host, blob_operator)
+def test_the_widget_s_value_is_what_kwargs_hands_the_run(qapp, blob_operator):
+    """The operators row reads this panel through ``kwargs()`` (`operator_kwargs_for`), so
+    the widget's value IS what a run gets."""
+    p = GenericOperatorPanel(_Host(), blob_operator)
     p.widgets["min_area_px"].setValue(400)
     p.widgets["split_touching"].setChecked(False)
-    p.run_btn.click()
-    key, kw = host.calls[0]
-    assert key == blob_operator
-    assert kw["operator_kwargs"]["min_area_px"] == 400
-    assert kw["operator_kwargs"]["split_touching"] is False
-    assert kw["save"] is False
+    kw = p.kwargs()
+    assert kw["min_area_px"] == 400
+    assert kw["split_touching"] is False
 
 
 def test_every_kwarg_the_panel_emits_is_a_parameter_the_operator_accepts(qapp,
@@ -772,26 +651,20 @@ def test_every_kwarg_the_panel_emits_is_a_parameter_the_operator_accepts(qapp,
     """The panel's output must survive ``Operator.bind``, which refuses an unknown name loud."""
     from squidxplorer import bind_operator
 
-    host = _Host()
-    p = GenericOperatorPanel(host, blob_operator)
-    p.widgets["min_area_px"].setValue(80)
-    p.run_btn.click()
-    bind_operator(blob_operator, host.calls[0][1]["operator_kwargs"])   # raises if wrong
-
-
-def test_a_plane_op_is_offered_preview_only_and_the_choice_comes_off_consumes(qapp,
-                                                                               blob_operator):
-    """A plane-op keeps z at full depth, so there is no plate to save. Read off ``consumes``,
-    never the name."""
     p = GenericOperatorPanel(_Host(), blob_operator)
-    assert p._can_save is False
-    assert p.save_btn is None                # not built at all, not built-and-hidden
+    p.widgets["min_area_px"].setValue(80)
+    bind_operator(blob_operator, p.kwargs())   # raises if wrong
 
 
-def test_a_z_reducer_is_offered_the_save_run(qapp):
-    p = GenericOperatorPanel(_Host(), "mip")
-    assert p._can_save is True
-    assert p.save_btn is not None and p.save_btn.parent() is not None
+def test_the_generic_panel_carries_no_run_buttons(qapp, blob_operator):
+    """One flow (Julio, 2026-08-25): parameters only. Preview and Run on plate live in the
+    view's operators row; the old per-panel preview spinner and save button are gone."""
+    from qtpy.QtWidgets import QPushButton
+
+    p = GenericOperatorPanel(_Host(), blob_operator)
+    assert not hasattr(p, "run_btn") and not hasattr(p, "save_btn")
+    assert not hasattr(p, "wells_spin")
+    assert [b.text() for b in p.findChildren(QPushButton)] == []
 
 
 def test_an_operator_with_no_parameters_still_builds_and_says_so(qapp):
@@ -805,9 +678,10 @@ def test_an_operator_with_no_parameters_still_builds_and_says_so(qapp):
 # =======================================================================================
 # THE QC SWEEP STEPPER + the session optics row (2026-08-24)
 # =======================================================================================
-# Julio: "When I do decon, I would like to see the turbo colormap result with the xz, yz
-# as I click iteration by iteration." The sweep captures every iteration of ONE solve; the
-# view steps them; 'use k iterations' writes k into the run's ONE iterations parameter.
+# Julio (2026-08-24): step "iteration by iteration"; (2026-08-25): "The turbo colormap
+# preview makes no sense. remove it." The sweep captures every iteration of ONE solve; the
+# view steps them; 'use k iterations' writes k into the run's ONE iterations parameter; the
+# preview is the in-view data layer under the channel's own colormap.
 
 @pytest.fixture()
 def clean_decon_session():
@@ -821,29 +695,26 @@ def clean_decon_session():
 
 def _sweep_into(view, ks=(1, 2, 3)):
     """Feed *view* one distinct captured iteration per k, the way the worker's done signal does."""
-    from squidxplorer._decon_qc import qc_composite
-
     volumes = {}
     for k in ks:
         volume = np.zeros((5, 20, 20), dtype=np.float32)
         volume[2, 10, 10] = 100.0 * k               # genuinely different pixels per iteration
         volumes[k] = volume
-        view.show_iteration(k, qc_composite(volume, (2, 10, 10)), 0.5 - 0.1 * k,
+        view.show_iteration(k, 0.5 - 0.1 * k,
                             "improving", "still tightening", volume=volume,
                             centre=(2, 10, 10), delta=None if k == 1 else float(k))
     return volumes
 
 
 def test_the_view_steps_iteration_by_iteration_without_a_re_solve(qapp, clean_decon_session):
-    pytest.importorskip("matplotlib")
     view = DeconQCResultView("A1/0/c0")
     volumes = _sweep_into(view)
 
     assert "ITERATION 3 of 3" in view.caption_label.text()
     view.prev_btn.click()
     assert "ITERATION 2 of 3" in view.caption_label.text()
-    assert np.array_equal(view._volume, volumes[2]), (
-        "stepping back did not swap the click-resection volume with the picture")
+    assert np.array_equal(view.capture(view._shown_k)["volume"], volumes[2]), (
+        "stepping back did not land on iteration 2's captured volume")
     view.iter_slider.setValue(1)
     assert "ITERATION 1 of 3" in view.caption_label.text()
     view.next_btn.click()
@@ -855,7 +726,6 @@ def test_the_view_steps_iteration_by_iteration_without_a_re_solve(qapp, clean_de
 def test_the_per_step_change_is_shown_beside_the_ratio(qapp, clean_decon_session):
     """mean |Δ| vs the previous iteration is the honest 'is it still moving' number; the first
     iteration has no previous and must not invent one."""
-    pytest.importorskip("matplotlib")
     view = DeconQCResultView("A1/0/c0")
     _sweep_into(view, ks=(1, 2))
     assert "mean |Δ| vs k-1: 2" in view.caption_label.text()
@@ -867,7 +737,6 @@ def test_the_per_step_change_is_shown_beside_the_ratio(qapp, clean_decon_session
 def test_use_k_iterations_writes_the_displayed_count_into_the_run(qapp, clean_decon_session):
     """THE point of the preview: the displayed k lands in the panel's run-iterations control,
     which is what kwargs() -> operator_kwargs_for feeds every decon run. One source of truth."""
-    pytest.importorskip("matplotlib")
     from squidxplorer._decon import DEFAULT_ITERATIONS
 
     panel = DeconQCPanel(_Host())
@@ -919,11 +788,13 @@ def test_a_rebuilt_panel_keeps_the_session_medium(qapp, clean_decon_session):
     assert p.ni_combo.currentText() == "1.515 (oil)"
 
 
-def test_an_impossible_na_is_flagged_by_name_in_the_panel(qapp, clean_decon_session):
-    p = DeconQCPanel(_Host())                      # air installed
-    p.na_spin.setValue(1.40)
+def test_an_impossible_recorded_na_is_flagged_by_name_in_the_panel(qapp, clean_decon_session):
+    """No NA knob any more (2026-08-25): the guardrail names a RECORDED NA the chosen
+    immersion cannot carry."""
+    p = _fixed_optics_panel(_Host(), na=1.40)      # air installed; NA 1.40 is oil territory
+    p._refresh_optics_note()
     assert any("impossible in air" in s for s in p.host.said), (
-        "NA 1.40 under air went unflagged")
+        "recorded NA 1.40 under air went unflagged")
 
 
 def test_the_worker_sweeps_a_real_stack_emitting_every_iteration(qapp, clean_decon_session,
@@ -975,7 +846,7 @@ def test_the_panel_states_the_preview_channel_vs_run_contract(qapp, clean_decon_
         "the caption did not follow the preview channel")
 
 
-def _fixed_optics_panel(host, wavelength_by=None):
+def _fixed_optics_panel(host, wavelength_by=None, na=0.80):
     """A panel whose recorded optics are injected, so the effective line is deterministic."""
     from squidxplorer._decon import OpticsParams
 
@@ -984,15 +855,16 @@ def _fixed_optics_panel(host, wavelength_by=None):
     def _recorded():
         ch = panel.channel_combo.currentText()
         wl = (wavelength_by or {}).get(ch, 0.525)
-        return OpticsParams(na=0.80, wavelength_um=wl, dxy_um=0.752, dz_um=1.5, nz=10), ""
+        return OpticsParams(na=na, wavelength_um=wl, dxy_um=0.752, dz_um=1.5, nz=10), ""
 
     panel._recorded_optics = _recorded
     return panel
 
 
 def test_the_effective_line_shows_what_the_solve_will_use(qapp, clean_decon_session):
-    """Item 4: the FINAL values the PSF is built from — session NI/NA applied, medium named,
-    magnification derived from the sensor pixel — live-updating with the optics row."""
+    """The FINAL values the PSF is built from — the session NI applied, medium named,
+    magnification derived from the sensor pixel — live-updating with the NI choice. NA is
+    the RECORDED value (there is no NA knob, 2026-08-25)."""
     panel = _fixed_optics_panel(_Host())
     panel._sensor_pixel_um = lambda: 7.52
     panel._refresh_optics_note()
@@ -1005,8 +877,7 @@ def test_the_effective_line_shows_what_the_solve_will_use(qapp, clean_decon_sess
 
     panel.ni_combo.setCurrentIndex(1)              # water: the line must follow the session
     assert "water (ni 1.333)" in panel.effective_note.text()
-    panel.na_spin.setValue(0.95)
-    assert "NA 0.95" in panel.effective_note.text(), "the session NA override is not shown"
+    assert "NA 0.80" in panel.effective_note.text(), "the recorded NA must stay the NA"
 
 
 def test_the_effective_line_follows_the_preview_channel_s_own_wavelength(qapp,
@@ -1021,10 +892,13 @@ def test_the_effective_line_follows_the_preview_channel_s_own_wavelength(qapp,
     assert "emission 0.670" in panel.effective_note.text()
 
 
-def test_an_impossible_session_na_turns_the_effective_line_into_the_refusal(qapp,
-                                                                            clean_decon_session):
-    panel = _fixed_optics_panel(_Host())
-    panel.na_spin.setValue(1.40)                   # impossible in air
+def test_an_impossible_recorded_na_turns_the_effective_line_into_the_refusal(
+        qapp, clean_decon_session):
+    from squidxplorer._decon import set_session_ni
+
+    panel = _fixed_optics_panel(_Host(), na=1.40)  # recorded NA 1.40, air chosen
+    set_session_ni(1.0)
+    panel._refresh_optics_note()
     assert "the solve will refuse" in panel.effective_note.text()
 
 
@@ -1065,18 +939,16 @@ def _preview_rig(channels=("c0",)):
 def test_the_displayed_iteration_lands_in_a_view_at_its_stage_position(qapp,
                                                                        clean_decon_session):
     """Item 1: the sweep is judged on ACTUAL data at real size — the displayed capture lands
-    as a real turbo layer in a view showing that region, placed at the crop's own stage
-    footprint, and stepping the slider swaps the SAME layer's pixels (no re-solve)."""
-    pytest.importorskip("matplotlib")
-    from squidxplorer._decon_qc import qc_composite
-
+    as a real DATA layer (the channel's own colormap, never turbo) in a view showing that
+    region, placed at the crop's own stage footprint, and stepping the slider swaps the SAME
+    layer's pixels (no re-solve)."""
     panel, mosaic, _view = _preview_rig()
     panel._sweep_at = ("A1", 0, "c0")
     panel._view = DeconQCResultView("A1/0/c0")
     panel._view.iterationDisplayed.connect(panel._push_view_preview)
 
     vol1 = np.zeros((2, 16, 16), np.float32); vol1[1, 8, 8] = 100.0
-    panel._view.show_iteration(1, qc_composite(vol1, (1, 8, 8)), 0.5, "first", "v",
+    panel._view.show_iteration(1, 0.5, "first", "v",
                                volume=vol1, centre=(1, 8, 8), fov_origin=(6, 4))
 
     layer = mosaic.find(DeconQCPanel.PREVIEW_OP, "c0")
@@ -1086,10 +958,11 @@ def test_the_displayed_iteration_lands_in_a_view_at_its_stage_position(qapp,
     assert tuple(float(v) for v in layer.translate[-2:]) == (206.0, 104.0)
     assert tuple(float(v) for v in layer.scale) == (1.5, 1.0, 1.0), (
         "the crop is not placed at the acquisition's own pitch and z step")
-    assert getattr(layer.colormap, "name", None) == "turbo"
+    assert getattr(layer.colormap, "name", "") != "turbo", (
+        "the preview layer still renders in turbo; it must wear the channel's own colormap")
 
     vol2 = np.zeros((2, 16, 16), np.float32); vol2[1, 8, 8] = 300.0
-    panel._view.show_iteration(2, qc_composite(vol2, (1, 8, 8)), 0.4, "improving", "v",
+    panel._view.show_iteration(2, 0.4, "improving", "v",
                                volume=vol2, centre=(1, 8, 8), fov_origin=(6, 4), delta=1.0)
     assert mosaic.find(DeconQCPanel.PREVIEW_OP, "c0") is layer, (
         "stepping created a second layer instead of updating the preview")
@@ -1102,8 +975,6 @@ def test_the_displayed_iteration_lands_in_a_view_at_its_stage_position(qapp,
 
 def test_run_wires_the_stepper_to_the_view_preview(qapp, clean_decon_session, monkeypatch):
     """The production wiring: run() itself connects iterationDisplayed to the preview push."""
-    pytest.importorskip("matplotlib")
-    from squidxplorer._decon_qc import qc_composite
     from squidxplorer._op_panels import _DeconQCWorker
 
     monkeypatch.setattr(_DeconQCWorker, "start", lambda self: None)
@@ -1111,7 +982,7 @@ def test_run_wires_the_stepper_to_the_view_preview(qapp, clean_decon_session, mo
     panel.run()
     try:
         vol = np.zeros((2, 16, 16), np.float32); vol[1, 8, 8] = 50.0
-        panel._view.show_iteration(1, qc_composite(vol, (1, 8, 8)), 0.5, "first", "v",
+        panel._view.show_iteration(1, 0.5, "first", "v",
                                    volume=vol, centre=(1, 8, 8), fov_origin=(0, 0))
         assert mosaic.find(DeconQCPanel.PREVIEW_OP, "c0") is not None, (
             "run() did not wire the stepper to the in-view data preview")
@@ -1122,17 +993,183 @@ def test_run_wires_the_stepper_to_the_view_preview(qapp, clean_decon_session, mo
 def test_a_sweep_with_no_view_over_the_region_still_shows_in_the_panel(qapp,
                                                                        clean_decon_session):
     """No view over the region: the push is a quiet no-op, never an error — the panel's own
-    composite is still the preview."""
-    pytest.importorskip("matplotlib")
-    from squidxplorer._decon_qc import qc_composite
-
+    caption and metric still describe the sweep."""
     panel = DeconQCPanel(_Host())                  # host has no _viewer_manager at all
     panel._sweep_at = ("A1", 0, "c0")
     panel._view = DeconQCResultView("A1/0/c0")
     vol = np.zeros((2, 16, 16), np.float32)
-    panel._view.show_iteration(1, qc_composite(vol, (1, 8, 8)), 0.5, "first", "v",
+    panel._view.show_iteration(1, 0.5, "first", "v",
                                volume=vol, centre=(1, 8, 8), fov_origin=(0, 0))
     panel._push_view_preview(1)                    # must not raise
     panel._view.close()
 
 
+
+# ── the text diet + parameter hiding (Julio, 2026-08-25) ──────────────────────────────────────
+# "There is so much text in the operator UI. As if it was a book - that's crazy lol."
+# "There are so many parameters that should be default and our life science user should not
+# want to see them." "recorded NA should print the value to it's side."
+
+
+def test_the_decon_headline_is_iterations_ni_na_and_the_rest_hides(qapp, clean_decon_session):
+    """The panel shows the headline knobs; where-to-measure and the sweep knobs live behind
+    a 'more' disclosure, the PSF lines behind their own toggle - both closed by default."""
+    p = DeconQCPanel(_Host())
+    assert p._more.isHidden(), "the advanced knobs are on screen by default"
+    assert p._psf.isHidden(), "the PSF detail is on screen by default"
+    # the advanced knobs really moved INSIDE the disclosures
+    assert p.region_combo in p._more.findChildren(type(p.region_combo))
+    assert p.optics_note in p._psf.findChildren(type(p.optics_note))
+    # the headline stays out of them
+    assert p.run_iter_spin not in p._more.findChildren(type(p.run_iter_spin))
+    assert p.ni_combo not in p._more.findChildren(type(p.ni_combo))
+    p.more_btn.click()
+    assert not p._more.isHidden()
+    p.psf_btn.click()
+    assert not p._psf.isHidden()
+
+
+def test_ni_offers_custom_and_a_typed_value_reaches_the_session(qapp, clean_decon_session):
+    from squidxplorer._decon import session_ni
+
+    p = DeconQCPanel(_Host())
+    labels = [p.ni_combo.itemText(i) for i in range(p.ni_combo.count())]
+    assert "custom" in labels, "the NI dropdown offers no custom entry"
+    assert p.ni_custom.isHidden(), "the custom NI field shows while a standard medium is picked"
+    p.ni_combo.setCurrentText("custom")
+    assert not p.ni_custom.isHidden()
+    p.ni_custom.setValue(1.38)
+    assert session_ni() == pytest.approx(1.38), "the typed NI never reached the session"
+    p.ni_combo.setCurrentText("1.333 (water)")
+    assert p.ni_custom.isHidden()
+    assert session_ni() == pytest.approx(1.333)
+
+
+def test_recorded_na_prints_its_value_beside_the_control(qapp, clean_decon_session):
+    panel = _fixed_optics_panel(_Host())
+    panel._refresh_optics_note()
+    assert "recorded NA: 0.80" in panel.na_recorded.text(), (
+        f"the recorded NA is not printed beside the control: {panel.na_recorded.text()!r}")
+
+
+def test_magnification_stays_geometric_when_ni_changes(qapp, clean_decon_session):
+    """mag = sensor / dxy. ni shapes the PSF, not the geometry; a magnification that moved
+    with it would be a fake dependence."""
+    panel = _fixed_optics_panel(_Host())
+    panel._sensor_pixel_um = lambda: 7.52
+    panel._refresh_optics_note()
+    assert "magnification 10.0x" in panel.effective_note.text()
+    panel.ni_combo.setCurrentText("1.333 (water)")
+    assert "magnification 10.0x" in panel.effective_note.text(), (
+        "the shown magnification moved with ni")
+
+
+def test_the_decon_panel_carries_no_book_of_text(qapp, clean_decon_session):
+    """Every visible label is a line, not a paragraph (tooltips may keep a sentence; a
+    refusal quoting the loader's own error is exempt, so the panel gets readable optics)."""
+    from qtpy.QtWidgets import QLabel
+
+    p = _fixed_optics_panel(_Host())
+    p._sensor_pixel_um = lambda: 7.52
+    p._refresh_optics_note()
+    long_ones = [lab.text() for lab in p.findChildren(QLabel)
+                 if len(lab.text()) > 200]
+    assert not long_ones, f"paragraph-length label(s) in the panel: {long_ones}"
+
+# ── the knob principle (Julio, 2026-08-25): headline = only what the acquisition files
+# ── cannot express; everything else behind the collapsed "advanced" slot (Param.advanced) ──
+
+
+def test_the_decon_headline_is_iterations_and_ni_only_no_na_edit(qapp, clean_decon_session):
+    """"the user should only tweak what can't be deduced from acquisition filenames": the
+    NA edit is CUT; NA and the rest display READ-ONLY in the PSF slot; NI is the one optics
+    knob (no Squid file records the immersion medium)."""
+    p = DeconQCPanel(_Host())
+    assert not hasattr(p, "na_spin"), "the NA edit field is back"
+    assert p.na_recorded in p._psf.findChildren(type(p.na_recorded)), (
+        "the recorded NA line is not in the read-only PSF slot")
+    assert p.run_iter_spin is not None and p.ni_combo is not None
+
+
+def test_the_stitcher_headline_is_z_and_register_the_rest_is_advanced(qapp):
+    from qtpy.QtWidgets import QWidget
+
+    p = StitcherPanel(_Host())
+    assert p._advanced.isHidden(), "the advanced knobs are on screen by default"
+    adv = set(p._advanced.findChildren(QWidget))
+    assert p.reg_channel_combo in adv and p.blend_spin in adv and p.distortion_cb in adv
+    assert p.register_cb not in adv and p.z_operator_combo not in adv, (
+        "a headline knob fell into the advanced slot")
+    p.adv_btn.click()
+    assert not p._advanced.isHidden()
+
+
+def test_declared_advanced_params_hide_behind_the_advanced_slot(qapp):
+    """Declaration-driven: a Param(advanced=True) lands in the collapsed section, never by
+    a name match."""
+    from squidxplorer import add_operator, plane_op
+    from squidxplorer._engine import _OPERATORS, Param
+
+    def _factory(k=1, hidden_knob=2.0):
+        return plane_op(lambda plane: plane)
+
+    from qtpy.QtWidgets import QWidget
+
+    add_operator("advdemo_panel_test", _factory,
+                 params=(Param("k", 1, "headline"),
+                         Param("hidden_knob", 2.0, "advanced knob", advanced=True)))
+    try:
+        p = GenericOperatorPanel(_Host(), "advdemo_panel_test")
+        assert p._advanced is not None and p._advanced.isHidden()
+        assert p.widgets["hidden_knob"] in p._advanced.findChildren(QWidget)
+        assert p.widgets["k"] not in p._advanced.findChildren(QWidget)
+        # both still reach the run
+        assert p.kwargs() == {"k": 1, "hidden_knob": 2.0}
+        p.adv_btn.click()
+        assert not p._advanced.isHidden()
+    finally:
+        _OPERATORS.pop("advdemo_panel_test", None)
+
+
+def test_stitch_declares_its_registration_detail_advanced():
+    from squidxplorer._engine import operator_params
+
+    flags = {q.name: getattr(q, "advanced", False) for q in operator_params("stitch")}
+    assert flags["registration_channel"] and flags["registration_t"]
+    assert flags["correct_illumination"]
+    assert not flags["register"] and not flags["z_operator"]
+
+
+def test_rig_profile_notes_cross_check_the_sidecars(tmp_path):
+    """Guardrails, not knobs: each inconsistency is ONE advisory sentence."""
+    import json
+
+    from squidxplorer._decon import rig_profile_notes
+
+    root = tmp_path / "test_20x_stack"
+    root.mkdir()
+    (root / "acquisition.yaml").write_text(
+        "objective:\n  pixel_size_um: 0.752\nz_stack:\n  nz: 5\n  delta_z_mm: 0.02\n")
+    (root / "acquisition parameters.json").write_text(json.dumps(
+        {"sensor_pixel_size_um": 7.52, "objective": {"NA": 0.8, "magnification": 25.0}}))
+    notes = rig_profile_notes(root)
+    joined = " ".join(notes)
+    assert "pixel_size_um 0.752 disagrees" in joined, notes
+    assert "folder name says 20x" in joined and "25" in joined, notes
+    assert "undersamples the PSF" in joined, notes      # dz 20 um at NA 0.8
+    for note in notes:
+        assert "proceed" in note, f"a guardrail must say the run proceeds: {note!r}"
+
+
+def test_a_consistent_rig_profile_raises_no_notes(tmp_path):
+    import json
+
+    from squidxplorer._decon import rig_profile_notes
+
+    root = tmp_path / "test_10x_clean"
+    root.mkdir()
+    (root / "acquisition.yaml").write_text(
+        "objective:\n  pixel_size_um: 0.752\nz_stack:\n  nz: 5\n  delta_z_mm: 0.0015\n")
+    (root / "acquisition parameters.json").write_text(json.dumps(
+        {"sensor_pixel_size_um": 7.52, "objective": {"NA": 0.8, "magnification": 10.0}}))
+    assert rig_profile_notes(root) == []

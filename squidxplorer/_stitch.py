@@ -727,12 +727,15 @@ _STITCH_PARAMS = (
           "unchanged (no inner operator runs)"),
     Param("register", True,
           "solve per-tile offsets from the overlaps; off = stage-coordinate placement"),
+    # advanced=True: hidden behind the GUI's collapsed "advanced" slot (Julio, 2026-08-25:
+    # "the user should only tweak what can't be deduced from acquisition filenames").
     Param("registration_channel", 0,
           "the channel the pose graph is solved on, by index or name; every channel is then "
-          "fused with that one solution"),
-    Param("registration_t", _REG_T, "the timepoint the pose graph is solved on"),
+          "fused with that one solution", advanced=True),
+    Param("registration_t", _REG_T, "the timepoint the pose graph is solved on", advanced=True),
     Param("correct_illumination", True,
-          "flat-field the tiles on the read path, before registration and fusion"),
+          "flat-field the tiles on the read path, before registration and fusion",
+          advanced=True),
 )
 
 

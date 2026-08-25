@@ -486,8 +486,14 @@ class PlateOverview(QWidget):
         # ...and the deferred gestures. A single-shot timer that fires into a widget its owner has
         # already dropped is the shape `test_window_lifetime` exists for, and a navigation is the
         # one of the two that reaches OUT of this widget when it lands.
-        self._hold.stop()
-        self._nav.stop()
+        # The timers may already be C++-dead: while hosted in a view (one window, 2026-08-25)
+        # this widget can be destroyed WITH that view, and an exception out of a closeEvent
+        # aborts the process — a dead timer is a stopped timer.
+        for timer in (self._hold, self._nav):
+            try:
+                timer.stop()
+            except RuntimeError:
+                pass
         self._nav_well = None
 
     def _on_tile_ready(self, desc, arr) -> None:

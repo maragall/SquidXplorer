@@ -155,3 +155,104 @@ def test_a_uniformly_scaled_window_keeps_the_full_ratio(tmp_path):
     out_b = src.component_plane(plane, 2, "manual", 0, 30.0, 30.0, 2.0)
     assert np.array_equal(out_r, np.full((16, 16), 120, np.uint8))           # 80 * 1.5
     assert np.array_equal(out_b, np.full((16, 16), 40, np.uint8))            # 80 * 0.5
+
+
+# --- Ownership-aware ratios --------------------------------------------------------------------
+#
+# The overview PNG is written tile over tile, later overwrites earlier: in an FOV's overlap
+# band the PNG holds the NEIGHBOR frame's pixels (measured: FOV 72's right band correlates
+# 0.894 with neighbor 73's frame vs 0.515 with its own). Where the neighbor's rendering is
+# MISALIGNED, damping alone pulls those foreign ratios toward NEUTRAL, so the band renders
+# dark on gray while the overview shows pink (the customer's second-round complaint).
+# Ownership: a window pixel belongs to the LAST FOV in acquisition order whose footprint
+# covers it; on unowned pixels the damping FALLBACK becomes the frame's own owned hue,
+# extended across the band (chroma is low-frequency), instead of neutral. Where the PNG's
+# luminance AGREES with the plane the measured ratio still stands in full: on the well
+# aligned ground-truth set the band's measured hue is the same tissue seen by the neighbor
+# and replacing it wholesale measured WORSE (window corr 0.977 -> 0.775), so ownership only
+# decides what mistrust falls back to, never overrides trust.
+
+
+def _acq_chroma_source(tmp_path, png_rgb, csv_rows):
+    """A ChromaSource inside a real acquisition layout: root/0/mosaic_view/overview.png with
+    the executed root/0/coordinates.csv naming the blit order."""
+    from squidxplorer._stain import ChromaSource
+
+    mosaic = tmp_path / "0" / "mosaic_view"
+    mosaic.mkdir(parents=True)
+    path = mosaic / "overview.png"
+    Image.fromarray(png_rgb).save(path)
+    (tmp_path / "0" / "coordinates.csv").write_text(
+        "region,x (mm),y (mm)\n" + "\n".join(csv_rows) + "\n")
+    return ChromaSource(path, top_left_mm_yx=(0.0, 0.0), resolution_um=2.0)
+
+
+def test_ownership_mask_pins_the_blit_geometry(tmp_path):
+    """A window pixel belongs to the LAST acquisition-order FOV covering it: FOV 0's right
+    band under later FOV 1 is unowned; FOV 1, blitted last, owns its whole window."""
+    src = _acq_chroma_source(tmp_path, _flat_png((30, 30), r=50, g=50, b=50),
+                             ["manual,0.016,0.016", "manual,0.040,0.016"])
+    # Frame 16x16 at 2 um on a 2 um PNG: FOV 0's window is cols 0..15, FOV 1's cols 12..27.
+    own0 = src._ownership_mask("manual", 16.0, 16.0, (16, 16), 2.0)
+    assert own0.shape == (16, 16)
+    assert own0[:, :12].all()
+    assert not own0[:, 12:].any()
+    own1 = src._ownership_mask("manual", 40.0, 16.0, (16, 16), 2.0)
+    assert own1.all()
+
+
+def test_no_coordinates_record_means_every_pixel_is_owned(tmp_path):
+    """Without a blit-order record the mask cannot be computed: all-owned, damped-only."""
+    src = _chroma_source(tmp_path, _flat_png((30, 30), r=50, g=50, b=50))
+    assert src._ownership_mask("manual", 30.0, 30.0, (16, 16), 2.0).all()
+
+
+def test_a_mistrusted_unowned_band_falls_back_to_the_frames_own_hue(tmp_path):
+    """The PNG's band carries the neighbor's MISALIGNED (darker, different-hue) pixels: the
+    damped ratio there must fall back to this frame's own owned hue, not to neutral gray
+    (the dark rim the customer circled) and not keep the neighbor's hue at full."""
+    png = np.zeros((30, 30, 3), np.uint8)
+    png[:, :12, 0], png[:, :12, 1], png[:, :12, 2] = 100, 50, 25   # own: R/G 2.0, B/G 0.5
+    png[:, 12:, 0], png[:, 12:, 1], png[:, 12:, 2] = 10, 20, 40    # neighbor, dark: 0.5 / 2.0
+    src = _acq_chroma_source(tmp_path, png, ["manual,0.016,0.016", "manual,0.040,0.016"])
+    plane = np.full((16, 16), 40, np.uint8)
+    out_r = src.component_plane(plane, 0, "manual", 0, 16.0, 16.0, 2.0)
+    out_b = src.component_plane(plane, 2, "manual", 0, 16.0, 16.0, 2.0)
+    # Owned cols 0..11: luminance agrees (gain 50/40, weight 1), full measured hue.
+    assert np.array_equal(out_r[:, :11], np.full((16, 11), 80, np.uint8))    # 40 * 2.0
+    assert np.array_equal(out_b[:, :11], np.full((16, 11), 20, np.uint8))    # 40 * 0.5
+    # Band cols 13..15: measured trust w_m = 20/(40*1.25) = 0.4; the fallback is the own
+    # extended hue at full trust (extended G 50 agrees with the plane), so
+    # R: fb 2.0, final 2.0 + (0.5 - 2.0)*0.4 = 1.4 -> 56;  B: fb 0.5, final 0.5 +
+    # (2.0 - 0.5)*0.4 = 1.1 -> 44. Under the old neutral fallback the band was 32, darker
+    # than the plane's own 40: the dark rim. Toward pink now, never darker than the frame.
+    assert np.array_equal(out_r[:, 13:], np.full((16, 3), 56, np.uint8))
+    assert np.array_equal(out_b[:, 13:], np.full((16, 3), 44, np.uint8))
+
+
+def test_an_agreeing_unowned_band_keeps_the_measured_hue(tmp_path):
+    """Where the neighbor's band pixels AGREE in luminance the overview is describing this
+    tissue correctly and the measured hue stands in full: pinned because replacing it with
+    the extended own hue measured a 0.977 -> 0.775 window-corr drop on the aligned set."""
+    png = np.zeros((30, 30, 3), np.uint8)
+    png[..., 1] = 50
+    png[:, :12, 0], png[:, :12, 2] = 100, 25      # own hue: R/G 2.0, B/G 0.5
+    png[:, 12:, 0], png[:, 12:, 2] = 25, 100      # neighbor's hue at the SAME luminance
+    src = _acq_chroma_source(tmp_path, png, ["manual,0.016,0.016", "manual,0.040,0.016"])
+    plane = np.full((16, 16), 40, np.uint8)       # gain 50/40, weight 1 everywhere
+    out_r = src.component_plane(plane, 0, "manual", 0, 16.0, 16.0, 2.0)
+    assert np.array_equal(out_r[:, :11], np.full((16, 11), 80, np.uint8))    # 40 * 2.0
+    assert np.array_equal(out_r[:, 13:], np.full((16, 3), 20, np.uint8))     # 40 * 0.5 kept
+
+
+def test_the_last_fov_keeps_its_measured_band(tmp_path):
+    """FOV 1 was blitted last, so the overview's band there really is its own frame: its
+    measured ratios apply unfilled."""
+    png = np.zeros((30, 30, 3), np.uint8)
+    png[..., 1] = 50
+    png[:, :12, 0], png[:, :12, 2] = 100, 25
+    png[:, 12:, 0], png[:, 12:, 2] = 25, 100
+    src = _acq_chroma_source(tmp_path, png, ["manual,0.016,0.016", "manual,0.040,0.016"])
+    plane = np.full((16, 16), 40, np.uint8)
+    out_r = src.component_plane(plane, 0, "manual", 1, 40.0, 16.0, 2.0)
+    assert np.array_equal(out_r, np.full((16, 16), 20, np.uint8))   # 40 * measured 0.5

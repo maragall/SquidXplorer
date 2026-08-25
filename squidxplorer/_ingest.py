@@ -124,7 +124,9 @@ def ingest(win, path: str) -> None:
     win._active_op_key = None
     win._refresh_layers_tab()
     win._drop.hide()
-    win._left_l.addWidget(win._overview, 1)   # fills the pane and self-fits — no scrollbars
+    # ONE mount point: the hosted plate slot when a view holds it (one window), else the
+    # plate window's own column. Fills the pane and self-fits — no scrollbars.
+    win._mount_overview()
     win._declare_channel_axis(meta["channels"], meta["dtype"])
 
     # Hand the plate's region order to the SINGLE OWNER. Announcing it is what puts the red

@@ -1106,25 +1106,19 @@ def test_run_operator_rejects_empty_and_unknown_regions(qapp, squid_dataset, tmp
 
 
 
-def test_preview_spinner_still_runs_first_n_wells(qapp, squid_dataset, monkeypatch):
+def test_the_run_tab_and_its_preview_spinner_are_gone(qapp, squid_dataset):
+    """One flow (Julio, 2026-08-25): the destination-picker run tab died; mip's panel is the
+    generic declaration form, and every run launches from a view's operators row."""
+    from squidxplorer._param_panel import GenericOperatorPanel
+
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    seen = {}
-    real = V.PlateWindow.run_operator
-
-    def spy(self, key, out_parent=None, regions=None, save=True):
-        seen["regions"] = regions
-        return real(self, key, out_parent=out_parent, regions=regions, save=save)
-    monkeypatch.setattr(V.PlateWindow, "run_operator", spy)
-
-    tab = win._build_run_tab(V._OPERATIONS_BY_KEY["mip"])       # the real MIP tab
-    prev = [b for b in tab.findChildren(QPushButton) if b.text() == "Preview"][0]
-    spin = tab.findChildren(QSpinBox)[0]
-    spin.setValue(1)
-    prev.click()
-    assert seen["regions"] == ["B2"], "preview must still run the FIRST N wells"
-    win._stop_worker(); win.close()
+    assert not hasattr(win, "_build_run_tab")
+    tab = win._build_mip_tab()
+    assert isinstance(tab, GenericOperatorPanel)
+    assert not hasattr(tab, "wells_spin")
+    win.close()
 
 
 def test_a_preview_that_cannot_read_names_the_failure_instead_of_freezing_the_plate(qapp):
@@ -2885,16 +2879,20 @@ def test_the_stitch_card_is_the_stitcher_control_surface(qapp, squid_dataset):
 
 
 def test_the_stitcher_panel_kwargs_reach_the_worker(qapp, squid_dataset):
+    """One flow: the operators row reads the panel via operator_kwargs_for; the same dict
+    reaches the worker."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
     op = V._OPERATIONS_BY_KEY["stitch"]
     win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
     tab = win._op_tabs["stitch"]
-    # The fixture's frames are tiny, so pick a feather that fits inside them — the panel refuses a ramp as wide as the tile, asserted separately below.
+    # The fixture's frames are tiny, so pick a feather that fits inside them — the panel
+    # refuses a ramp as wide as the tile, asserted separately below.
     tab.blend_spin.setValue(2)
     tab.rel_spin.setValue(25)
-    tab.run_btn.click()
+    win.run_operator("stitch", regions=None, save=False,
+                     operator_kwargs=win.operator_kwargs_for("stitch"))
     qapp.processEvents()
     assert win._worker is not None, f"the run did not start: {win._readout.text()}"
     assert win._worker._operator_kwargs["blend_px"] == 2
@@ -2902,8 +2900,11 @@ def test_the_stitcher_panel_kwargs_reach_the_worker(qapp, squid_dataset):
     win._stop_worker(); win.close()
 
 
-def test_an_impossible_feather_is_refused_in_the_readout_not_at_the_end_of_a_fuse(
+def test_an_impossible_feather_is_refused_at_kwargs_read_never_swallowed(
         qapp, squid_dataset):
+    """The panel's refusal PROPAGATES out of operator_kwargs_for (swallowing it ran the
+    defaults while every control on screen said otherwise) and the one-line summary a view
+    prints IS the refusal sentence."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -2911,10 +2912,10 @@ def test_an_impossible_feather_is_refused_in_the_readout_not_at_the_end_of_a_fus
     win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
     tab = win._op_tabs["stitch"]
     tab.blend_spin.setValue(999)
-    tab.run_btn.click()
-    qapp.processEvents()
-    assert win._worker is None, "the run started with an impossible feather width"
-    assert "blend" in win._readout.text().lower()
+    with pytest.raises(ValueError, match="blend"):
+        win.operator_kwargs_for("stitch")
+    assert "blend" in win.operator_params_text("stitch").lower()
+    assert win._worker is None, "reading the panel started a run"
     win.close()
 
 
@@ -3693,7 +3694,7 @@ def test_gallery_view_is_a_view_menu_command_and_not_an_operator(qapp):
     """Gallery View consumes no axis and produces no pixels, so it is a View-menu command with no card, not a runnable operator."""
     win = V.PlateWindow(None)
     try:
-        assert "galleryview" not in win._op_cards
+        assert not hasattr(win, "_op_cards"), "the bulk cards are back (retired 2026-08-25)"
         assert "galleryview" not in win._op_actions
         assert "galleryview" not in {op.key for op in V._OPERATIONS}
         assert "galleryview" not in V.runnable_operators()
@@ -3719,9 +3720,12 @@ def test_gallery_view_is_a_view_menu_command_and_not_an_operator(qapp):
 
 #: Runnable operators that deliberately have no GUI card, and why — adding one without listing it here (or giving it a card) fails the test below.
 CLI_ONLY_OPERATORS = {
-    # EMPTY since 2026-08-24: every surviving operator (mip, decon, stitch, register) has a
-    # card. spot/cellpose/decon3d/coordinate/keepz left this dict by being shelved, not by
-    # gaining cards; the dict stays so a future CLI-only operator declares its reason here.
+    # (2026-08-24: every then-surviving operator — mip, decon, stitch, register — has a card.
+    # spot/cellpose/decon3d/coordinate/keepz left this dict by being shelved, not by gaining
+    # cards.)
+    # fstack (2026-08-25): deliberately cardless while one-window-dock reshapes the operator
+    # rows; it reaches the GUI through Process well-plates -> From their declaration.
+    "fstack": "the declaration-built panel serves it; a bespoke card waits on the dock refactor",
 }
 
 
