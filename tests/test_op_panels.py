@@ -960,3 +960,179 @@ def test_the_worker_sweeps_a_real_stack_emitting_every_iteration(qapp, clean_dec
         "iteration 1 and 2 delivered the same volume")
 
 
+# ── the preview-vs-run contract and the final PSF parameters (UI feedback 2026-08-24) ─────────
+
+
+def test_the_panel_states_the_preview_channel_vs_run_contract(qapp, clean_decon_session):
+    """Julio read a one-channel preview as "decon was running on only one channel": the
+    channel combo is the PREVIEW picker, and the caption says the run covers every channel."""
+    p = DeconQCPanel(_Host(channels=("c0", "c1")))
+    assert "preview: c0 only" in p.preview_note.text()
+    assert "every channel" in p.preview_note.text()
+    assert "own PSF" in p.preview_note.text()
+    p.channel_combo.setCurrentIndex(1)
+    assert "preview: c1 only" in p.preview_note.text(), (
+        "the caption did not follow the preview channel")
+
+
+def _fixed_optics_panel(host, wavelength_by=None):
+    """A panel whose recorded optics are injected, so the effective line is deterministic."""
+    from squidxplorer._decon import OpticsParams
+
+    panel = DeconQCPanel(host)
+
+    def _recorded():
+        ch = panel.channel_combo.currentText()
+        wl = (wavelength_by or {}).get(ch, 0.525)
+        return OpticsParams(na=0.80, wavelength_um=wl, dxy_um=0.752, dz_um=1.5, nz=10), ""
+
+    panel._recorded_optics = _recorded
+    return panel
+
+
+def test_the_effective_line_shows_what_the_solve_will_use(qapp, clean_decon_session):
+    """Item 4: the FINAL values the PSF is built from — session NI/NA applied, medium named,
+    magnification derived from the sensor pixel — live-updating with the optics row."""
+    panel = _fixed_optics_panel(_Host())
+    panel._sensor_pixel_um = lambda: 7.52
+    panel._refresh_optics_note()
+    line = panel.effective_note.text()
+    assert "the solve will use" in line
+    assert "NA 0.80" in line and "air (ni 1.000)" in line
+    assert "emission 0.525" in line and "(c0)" in line
+    assert "pixel 0.752" in line and "dz 1.50" in line and "nz 10" in line
+    assert "magnification 10.0x" in line, f"no derived magnification in {line!r}"
+
+    panel.ni_combo.setCurrentIndex(1)              # water: the line must follow the session
+    assert "water (ni 1.333)" in panel.effective_note.text()
+    panel.na_spin.setValue(0.95)
+    assert "NA 0.95" in panel.effective_note.text(), "the session NA override is not shown"
+
+
+def test_the_effective_line_follows_the_preview_channel_s_own_wavelength(qapp,
+                                                                         clean_decon_session):
+    """Every channel gets its OWN PSF: switching the preview channel must switch the shown
+    emission wavelength, or the line describes another channel's solve."""
+    panel = _fixed_optics_panel(_Host(channels=("c0", "c1")),
+                                wavelength_by={"c0": 0.525, "c1": 0.670})
+    panel._refresh_optics_note()
+    assert "emission 0.525" in panel.effective_note.text()
+    panel.channel_combo.setCurrentIndex(1)
+    assert "emission 0.670" in panel.effective_note.text()
+
+
+def test_an_impossible_session_na_turns_the_effective_line_into_the_refusal(qapp,
+                                                                            clean_decon_session):
+    panel = _fixed_optics_panel(_Host())
+    panel.na_spin.setValue(1.40)                   # impossible in air
+    assert "the solve will refuse" in panel.effective_note.text()
+
+
+def test_set_param_writes_the_run_iterations_and_refuses_unknown_names(qapp,
+                                                                       clean_decon_session):
+    panel = DeconQCPanel(_Host())
+    assert panel.set_param("iterations", 9) is None
+    assert panel.kwargs() == {"iterations": 9}
+    why = panel.set_param("blend_px", 3)
+    assert why and "blend_px" in why
+
+
+# ── the sweep's data preview lands in a view as a real layer (item 1) ─────────────────────────
+
+
+def _preview_rig(channels=("c0",)):
+    """(panel, mosaic, view): a host with a manager whose one view shows A1 with positions."""
+    from napari.components import ViewerModel
+
+    from squidxplorer._napari_view import MosaicLayers
+
+    host = _Host(channels=channels)
+    meta = dict(host._meta)
+    meta["fov_positions_um"] = {("A1", 0): (100.0, 200.0), ("A1", 1): (356.0, 200.0),
+                                ("A2", 0): (900.0, 200.0), ("A2", 1): (1156.0, 200.0)}
+    mosaic = MosaicLayers(ViewerModel())
+    view = type("V", (), {})()
+    view._regions = ["A1", "A2"]
+    view._meta = meta
+    view._pane = type("P", (), {"mosaic": mosaic})()
+    mgr = type("M", (), {"active_view": lambda self: view,
+                         "windows": lambda self: [view]})()
+    host._viewer_manager = mgr
+    panel = DeconQCPanel(host)
+    return panel, mosaic, view
+
+
+def test_the_displayed_iteration_lands_in_a_view_at_its_stage_position(qapp,
+                                                                       clean_decon_session):
+    """Item 1: the sweep is judged on ACTUAL data at real size — the displayed capture lands
+    as a real turbo layer in a view showing that region, placed at the crop's own stage
+    footprint, and stepping the slider swaps the SAME layer's pixels (no re-solve)."""
+    pytest.importorskip("matplotlib")
+    from squidxplorer._decon_qc import qc_composite
+
+    panel, mosaic, _view = _preview_rig()
+    panel._sweep_at = ("A1", 0, "c0")
+    panel._view = DeconQCResultView("A1/0/c0")
+    panel._view.iterationDisplayed.connect(panel._push_view_preview)
+
+    vol1 = np.zeros((2, 16, 16), np.float32); vol1[1, 8, 8] = 100.0
+    panel._view.show_iteration(1, qc_composite(vol1, (1, 8, 8)), 0.5, "first", "v",
+                               volume=vol1, centre=(1, 8, 8), fov_origin=(6, 4))
+
+    layer = mosaic.find(DeconQCPanel.PREVIEW_OP, "c0")
+    assert layer is not None, "the displayed capture never reached the view"
+    assert tuple(np.asarray(layer.data).shape) == (2, 16, 16), "the preview lost its z"
+    # FOV 0's top-left is the region origin (100, 200); the crop sits +4 px x, +6 px y at 1 um/px.
+    assert tuple(float(v) for v in layer.translate[-2:]) == (206.0, 104.0)
+    assert tuple(float(v) for v in layer.scale) == (1.5, 1.0, 1.0), (
+        "the crop is not placed at the acquisition's own pitch and z step")
+    assert getattr(layer.colormap, "name", None) == "turbo"
+
+    vol2 = np.zeros((2, 16, 16), np.float32); vol2[1, 8, 8] = 300.0
+    panel._view.show_iteration(2, qc_composite(vol2, (1, 8, 8)), 0.4, "improving", "v",
+                               volume=vol2, centre=(1, 8, 8), fov_origin=(6, 4), delta=1.0)
+    assert mosaic.find(DeconQCPanel.PREVIEW_OP, "c0") is layer, (
+        "stepping created a second layer instead of updating the preview")
+    assert float(np.asarray(layer.data).max()) == 300.0
+    panel._view.iter_slider.setValue(1)            # step BACK: the k=1 capture repaints
+    assert float(np.asarray(layer.data).max()) == 100.0
+
+    panel._view.close()
+
+
+def test_run_wires_the_stepper_to_the_view_preview(qapp, clean_decon_session, monkeypatch):
+    """The production wiring: run() itself connects iterationDisplayed to the preview push."""
+    pytest.importorskip("matplotlib")
+    from squidxplorer._decon_qc import qc_composite
+    from squidxplorer._op_panels import _DeconQCWorker
+
+    monkeypatch.setattr(_DeconQCWorker, "start", lambda self: None)
+    panel, mosaic, _view = _preview_rig()
+    panel.run()
+    try:
+        vol = np.zeros((2, 16, 16), np.float32); vol[1, 8, 8] = 50.0
+        panel._view.show_iteration(1, qc_composite(vol, (1, 8, 8)), 0.5, "first", "v",
+                                   volume=vol, centre=(1, 8, 8), fov_origin=(0, 0))
+        assert mosaic.find(DeconQCPanel.PREVIEW_OP, "c0") is not None, (
+            "run() did not wire the stepper to the in-view data preview")
+    finally:
+        panel.shutdown()
+
+
+def test_a_sweep_with_no_view_over_the_region_still_shows_in_the_panel(qapp,
+                                                                       clean_decon_session):
+    """No view over the region: the push is a quiet no-op, never an error — the panel's own
+    composite is still the preview."""
+    pytest.importorskip("matplotlib")
+    from squidxplorer._decon_qc import qc_composite
+
+    panel = DeconQCPanel(_Host())                  # host has no _viewer_manager at all
+    panel._sweep_at = ("A1", 0, "c0")
+    panel._view = DeconQCResultView("A1/0/c0")
+    vol = np.zeros((2, 16, 16), np.float32)
+    panel._view.show_iteration(1, qc_composite(vol, (1, 8, 8)), 0.5, "first", "v",
+                               volume=vol, centre=(1, 8, 8), fov_origin=(0, 0))
+    panel._push_view_preview(1)                    # must not raise
+    panel._view.close()
+
+

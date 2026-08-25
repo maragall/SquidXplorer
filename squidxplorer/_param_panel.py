@@ -143,7 +143,7 @@ class GenericOperatorPanel(_Panel):
         else:
             self.v.addWidget(_wrapped(
                 f"{self.key!r} keeps the z-stack at full depth (it consumes no axis), so there is "
-                "no plate to save — preview only. The raw acquisition is never modified.", _SUB))
+                "no plate to save - preview only. The raw acquisition is never modified.", _SUB))
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
@@ -184,6 +184,25 @@ class GenericOperatorPanel(_Panel):
         """
         return {name: _read_widget(widget) for name, widget in self.widgets.items()}
 
+    def set_param(self, name: str, value) -> "Optional[str]":
+        """Write ONE declared parameter into its widget, so an outside control (a view's
+        inline iterations spin) edits the same number the run reads. Refusal by name."""
+        widget = self.widgets.get(str(name))
+        if widget is None:
+            return (f"{self.key!r} declares no parameter {name!r}; "
+                    f"it has {sorted(self.widgets)}.")
+        if isinstance(widget, QCheckBox):
+            widget.setChecked(bool(value))
+        elif isinstance(widget, QSpinBox):
+            widget.setValue(int(value))
+        elif isinstance(widget, QDoubleSpinBox):
+            widget.setValue(float(value))
+        elif isinstance(widget, QLineEdit):
+            widget.setText(str(value))
+        else:
+            return f"no way to write a {type(widget).__name__}."
+        return None
+
     def _launch(self, *, regions, save: bool) -> None:
         try:
             kwargs = self.kwargs()
@@ -199,7 +218,7 @@ class GenericOperatorPanel(_Panel):
     def _preview(self) -> None:
         order = list(getattr(self.host, "_order", []) or [])
         if not order:
-            self.say("no acquisition is open — there are no wells to preview on.")
+            self.say("no acquisition is open - there are no wells to preview on.")
             return
         self._launch(regions=order[:self.wells_spin.value()], save=False)
 
@@ -228,7 +247,7 @@ class RegisterPanel(GenericOperatorPanel):
         self.copy_check.setChecked(True)
         self.copy_check.setToolTip(
             "Write stitched_<folder> beside the acquisition: image files hardlinked (a second "
-            "name for the same bytes — no duplication; copied in full where the filesystem "
+            "name for the same bytes - no duplication; copied in full where the filesystem "
             "refuses links), sidecars copied, and coordinates.csv rewritten with the solved "
             "positions. The source acquisition is never written.")
         self.run_all_btn = QPushButton("Register the selected wells")
@@ -288,5 +307,5 @@ def _read_widget(widget) -> Any:
         return float(widget.value())
     if isinstance(widget, QLineEdit):
         return str(widget.text())
-    raise ValueError(f"no way to read {type(widget).__name__} back — this panel builds only the "
+    raise ValueError(f"no way to read {type(widget).__name__} back - this panel builds only the "
                      f"widgets in WIDGET_KINDS")

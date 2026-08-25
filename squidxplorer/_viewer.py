@@ -551,7 +551,7 @@ class PlateWindow(QMainWindow):
             "QComboBox::drop-down{border:none;width:14px;}")
         self._view_combo.setToolTip(
             "Which layer the plate thumbnails draw. Only layers this plate has actually "
-            "processed appear here — a result computed in one window is that window's, and does "
+            "processed appear here - a result computed in one window is that window's, and does "
             "not give the plate pixels for its other wells.")
         self._view_combo.currentIndexChanged.connect(self._on_view_combo)
         _tb.addWidget(QLabel("view:"))
@@ -574,7 +574,7 @@ class PlateWindow(QMainWindow):
         # follows a PASTE and only a paste (`_bind_window_contrast` / `_follow_window_luts`).
         _sel_cap = QLabel("Selection:")
         _sel_cap.setStyleSheet("color:#8b98ad;font-size:12px;border:none;")
-        self._selection_label = QLabel("none — click wells, or Select all")
+        self._selection_label = QLabel("none - click wells, or Select all")
         self._selection_label.setStyleSheet("color:#c9d1d9;font-size:12px;border:none;")
         self.statusBar().addWidget(_sel_cap)
         self.statusBar().addWidget(self._selection_label, 1)
@@ -1140,7 +1140,7 @@ class PlateWindow(QMainWindow):
             self._readout.setText("open an acquisition first")
             return
         if not CLIPBOARD:
-            self._readout.setText("the LUT clipboard is empty — copy LUTs in a view first")
+            self._readout.setText("the LUT clipboard is empty - copy LUTs in a view first")
             return
         applied = 0
         for i, c in enumerate(self._meta["channels"]):
@@ -1154,8 +1154,8 @@ class PlateWindow(QMainWindow):
             if lut.get("on") is not None:
                 self._overview.set_channel_visible(i, bool(lut["on"]))
         self._readout.setText(
-            f"pasted LUTs onto the plate — {applied} channel(s)" if applied
-            else "the clipboard names no channel of this acquisition — nothing pasted")
+            f"pasted LUTs onto the plate - {applied} channel(s)" if applied
+            else "the clipboard names no channel of this acquisition - nothing pasted")
 
     def _open_op_tab(self, key: str, title: str, builder, tabs=None):
         """Open (or focus) a UI as a tab. Built lazily, once. *tabs* is the bar it belongs in;
@@ -1686,6 +1686,54 @@ class PlateWindow(QMainWindow):
             parts.append(f"{name}={value}")
         return " · ".join(parts)
 
+    def ensure_operator_panel(self, key: str):
+        """The live panel for *key*, BUILDING it (unshown) when none exists yet.
+
+        Filed in ``_op_tabs`` exactly like an opened one, so ``operator_kwargs_for`` reads it
+        and app-exit disposal joins its workers; the next ⚙ controls click shows this same
+        widget. Returns ``None`` (never raises) when no panel can exist — no acquisition, or
+        the declaration refuses a generic panel."""
+        key = str(key)
+        panel = (getattr(self, "_op_tabs", None) or {}).get(key)
+        if panel is not None and _widget_alive(panel):
+            return panel
+        if self._reader is None:
+            return None
+        op = _OPERATIONS_BY_KEY.get(key)
+        if op is not None:
+            builder = getattr(self, op.build_tab)
+        else:
+            from squidxplorer._param_panel import GenericOperatorPanel, panel_refusal
+
+            if panel_refusal(key):
+                return None
+            builder = lambda k=key: GenericOperatorPanel(self, k)   # noqa: E731
+        try:
+            panel = builder()
+        except Exception as exc:                 # noqa: BLE001 - named, never a crashed caller
+            log.warning("could not build %s's panel: %s: %s", key, type(exc).__name__, exc)
+            return None
+        self._op_tabs[key] = panel
+        return panel
+
+    def set_operator_param(self, key: str, name: str, value) -> Optional[str]:
+        """Write ONE parameter into *key*'s live panel — the run's single source of truth.
+
+        This is what a view's inline parameter control (the operator row's iterations spin)
+        writes through, so it edits the SAME widget the plate's ⚙ controls and the QC's
+        'use k iterations' button do, and ``operator_kwargs_for`` hands the run that number.
+        Returns a refusal sentence, or ``None`` on success."""
+        panel = self.ensure_operator_panel(key)
+        if panel is None:
+            return f"no controls exist for {key!r} here (open an acquisition first)."
+        setter = getattr(panel, "set_param", None)
+        if not callable(setter):
+            return f"{key!r}'s panel offers no writable parameters."
+        try:
+            return setter(str(name), value)
+        except Exception as exc:                 # noqa: BLE001 - a refused value, NAMED
+            return f"{key}: {type(exc).__name__}: {exc}"
+
     def _activate_operator(self, key: str, dock=None):
         """Operator card / menu clicked: open the operator's UI.
 
@@ -1935,7 +1983,7 @@ class PlateWindow(QMainWindow):
                 set_profile(profile, channel=ch)
                 others = [c["name"] for c in (self._meta or {}).get("channels", [])
                           if c["name"] not in active_profiles()]
-                missing = (f"  (no profile yet for {', '.join(others)} — estimate each one)"
+                missing = (f"  (no profile yet for {', '.join(others)} - estimate each one)"
                            if others else "")
                 prof_lbl.setText(f"estimated from plate ({ch})  {profile.shape}{missing}")
                 est_btn.setEnabled(True)
@@ -1966,7 +2014,7 @@ class PlateWindow(QMainWindow):
         """Generic plane-operator tab (MIP, …): pick a destination, run over the whole plate → a
         navigable OME-Zarr plate. ONE builder for every z-reduction operator — a new one needs no new
         tab code. Per-tab state lives in a closure (no per-operator instance attrs)."""
-        w, v = self._op_tab_shell(op.label, op.blurb + " Pick a destination with room — output can be large.")
+        w, v = self._op_tab_shell(op.label, op.blurb + " Pick a destination with room - output can be large.")
         state = {"dir": None}
         dir_lbl = QLabel("(no folder chosen)"); dir_lbl.setWordWrap(True)
         dir_lbl.setStyleSheet("color:#8b98ad;font-size:12px;")
@@ -1982,10 +2030,10 @@ class PlateWindow(QMainWindow):
         target.addItems([TARGET_SELECTION, TARGET_OPEN, TARGET_PLATE])
         target.setToolTip(
             "What the operator iterates over.\n"
-            f"{TARGET_SELECTION} — the wells picked on the plate (all if none).\n"
-            f"{TARGET_OPEN} — every region held by the open viewer windows. Picking it prints the "
+            f"{TARGET_SELECTION} - the wells picked on the plate (all if none).\n"
+            f"{TARGET_OPEN} - every region held by the open viewer windows. Picking it prints the "
             "exact window list, and each window's regions, to the log console.\n"
-            f"{TARGET_PLATE} — every region of the acquisition.")
+            f"{TARGET_PLATE} - every region of the acquisition.")
         run_row.addWidget(_rl); run_row.addWidget(target, 1)
 
         # PRINT THE TARGET WHEN IT IS CHOSEN, not only when Run is pressed. "Open views" is the one
@@ -2492,7 +2540,7 @@ class PlateWindow(QMainWindow):
         if not (zroot / "zarr.json").exists():
             zroot = base if (base / "zarr.json").exists() and base.name.endswith(".zarr") else zroot
         if not (zroot / "zarr.json").exists():
-            self._readout.setText("not an .hcs plate — pick a folder containing plate.ome.zarr")
+            self._readout.setText("not an .hcs plate - pick a folder containing plate.ome.zarr")
             return
         # A run that was stopped, or that lost a well to `on_error`, leaves a real-looking
         # plate.ome.zarr with only some of its wells in it. Refuse it by name rather than present a
@@ -2506,7 +2554,7 @@ class PlateWindow(QMainWindow):
         why = incomplete_reason(zroot)
         if why is not None:
             self._readout.setText(
-                f"{base.name} is INCOMPLETE — {why}. Re-run the operator, or delete "
+                f"{base.name} is INCOMPLETE - {why}. Re-run the operator, or delete "
                 f"{zroot.name}/.squidxplorer-incomplete to open it anyway.")
             return
         try:
@@ -2557,7 +2605,7 @@ class PlateWindow(QMainWindow):
             self._readout.setText(f"could not read plate metadata: {e}")
             return
         if not channels:
-            self._readout.setText("plate has no channel metadata (omero) — cannot open")
+            self._readout.setText("plate has no channel metadata (omero) - cannot open")
             return
 
         self._stop_worker()
@@ -2621,7 +2669,7 @@ class PlateWindow(QMainWindow):
             shown = ", ".join(wp for wp, _ in fov_fallbacks[:3])
             more = f" (+{len(fov_fallbacks) - 3} more)" if len(fov_fallbacks) > 3 else ""
             fov_warn = (f"  ·  {len(fov_fallbacks)} well(s) could not read their own image id and "
-                        f"fell back to well 0's [{shown}{more}] — the loupe may magnify the wrong "
+                        f"fell back to well 0's [{shown}{more}] - the loupe may magnify the wrong "
                         f"field for them")
         # Every well came from disk, so the loupe is available across the whole plate here.
         try:
@@ -2644,7 +2692,7 @@ class PlateWindow(QMainWindow):
                 f"✓ computed MIP · {len(self._order)} wells (read-only){fov_warn}"),
             on_problem=self._on_failed,
             on_progress=lambda i, n: self._readout.setText(
-                f"loading computed plate — {i}/{n} wells"),
+                f"loading computed plate - {i}/{n} wells"),
             signals={"tileReady": self._on_tile,
                      "streamEnded": lambda: self._recomposite("computed")})
 
@@ -2696,7 +2744,7 @@ class PlateWindow(QMainWindow):
         if _run_scope.operator_busy(self._worker, self._retired):
             # NOT ``_busy()``: that also counts a retired RAW PREVIEW, so an operator run could
             # refuse itself over a thread the user never started. See _run_scope.operator_busy.
-            self._readout.setText("already processing — let the current run finish first")
+            self._readout.setText("already processing - let the current run finish first")
             return
         # IMA-226: gate on the ENGINE registry, not on the card table. `_OPERATIONS_BY_KEY[key]`
         # raised a bare KeyError for a registered operator with no card and let a card that is
@@ -2704,7 +2752,7 @@ class PlateWindow(QMainWindow):
         # Refuse BY NAME here, in the readout, the same way an unknown region is refused below.
         if key not in runnable_operators():
             self._readout.setText(
-                f"'{key}' is not a runnable operator — this viewer can run: "
+                f"'{key}' is not a runnable operator - this viewer can run: "
                 f"{', '.join(runnable_operators())}")
             return
         # REGISTERED, and this machine cannot run it: a declared `requires=` package is missing
@@ -2759,7 +2807,7 @@ class PlateWindow(QMainWindow):
             if not isinstance(regions, dict):
                 regions = names
             if not names:
-                self._readout.setText("empty selection — nothing to run")
+                self._readout.setText("empty selection - nothing to run")
                 return
             unknown = [r for r in names if r not in self._fov_index]
             if unknown:      # fail NAMED, not with a bare KeyError out of the status loop below
@@ -2884,7 +2932,7 @@ class PlateWindow(QMainWindow):
         elif save:
             dest = f" → {out_dir.name}"
         else:
-            dest = " (preview — not saved)"
+            dest = " (preview - not saved)"
         reopen_note = ("  (re-openable acquisition)" if (acq_format or saves_copy)
                        else "  (re-openable OME-Zarr)")
         # IMA-226: report what the plate ACTUALLY got. A run where every well raised (flat-field
@@ -2894,11 +2942,11 @@ class PlateWindow(QMainWindow):
         def _done_msg(w=worker):
             if w.landed == 0:
                 self._run_readout(
-                    f"⚠ {label} · {scope} produced nothing — all {w.skipped or self._worker._total} "
+                    f"⚠ {label} · {scope} produced nothing - all {w.skipped or self._worker._total} "
                     f"well(s) were skipped (see the red markers)")
             elif w.skipped:
                 self._run_readout(
-                    f"✓ {label} · {scope}{dest} — {w.skipped} well(s) skipped"
+                    f"✓ {label} · {scope}{dest} - {w.skipped} well(s) skipped"
                     + (reopen_note if save else ""))
             else:
                 self._run_readout(
@@ -3034,7 +3082,7 @@ class PlateWindow(QMainWindow):
         if est > free * 0.9:
             what = "MIP" if regions is None else f"this {len(scoped)}-well run"
             return False, est / gb, (f"{what} would persist ~{est/gb:.0f} GB to {Path(out_dir).parent} "
-                                     f"but only {free/gb:.0f} GB free — free space or pick another disk.")
+                                     f"but only {free/gb:.0f} GB free - free space or pick another disk.")
         return True, est / gb, ""
 
     def _on_written(self, plate_path: str):
@@ -3240,7 +3288,7 @@ class PlateWindow(QMainWindow):
         added = self._deliver_to_views(op, result)
         if added:
             self._readout.setText(
-                f"{op} · {result.region_id} — {added} layer(s) added; toggle it against raw in "
+                f"{op} · {result.region_id}: {added} layer(s) added; toggle it against raw in "
                 f"the mosaic layers panel")
         else:
             # NO SILENT FAILURES: a computed result with nowhere to land is not a success.
@@ -3372,7 +3420,7 @@ class PlateWindow(QMainWindow):
             return f"{region} ({len(fovs)}/{len(per.get(region) or fovs)} FOVs)"
 
         if not sel:
-            lbl.setText("none — click wells, or Select all")
+            lbl.setText("none - click wells, or Select all")
         elif len(sel) <= 6:
             lbl.setText(f"{', '.join(name(r) for r in sel)}  ({len(sel)})")
         else:
@@ -3444,7 +3492,7 @@ class PlateWindow(QMainWindow):
         if win is None:
             # Say so rather than silently selecting: with no view open the click already had a
             # meaning, and the widget only sends this signal when it has been told one is open.
-            self._readout.setText("Open a view first — then clicking a well moves it.")
+            self._readout.setText("Open a view first - then clicking a well moves it.")
             return
         if not win.show_region(well_id):
             return                                     # show_region already named the refusal
@@ -3503,9 +3551,9 @@ class PlateWindow(QMainWindow):
         block = _run_scope.describe_view_target(views, action=action)
         if block is None:
             self._readout.setText(
-                f"Run on open views: {len(views)} open window(s) hold no regions between them — "
+                f"Run on open views: {len(views)} open window(s) hold no regions between them - "
                 f"nothing to run." if views else
-                "Run on open views: no windows are open — open some first.")
+                "Run on open views: no windows are open - open some first.")
             return None
         self.log.info("%s", block)
         self._readout.setText(block.splitlines()[0])
