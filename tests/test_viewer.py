@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import sys
-from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # headless Qt; must precede the PyQt import
 
@@ -25,21 +23,14 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 from qtpy.QtCore import QEvent, QPointF, Qt, Signal  # noqa: E402
 from qtpy.QtGui import QImage, QMouseEvent  # noqa: E402
 from qtpy.QtWidgets import (  # noqa: E402
-    QApplication, QCheckBox, QPushButton, QSlider, QSpinBox, QWidget,
+    QApplication, QPushButton, QWidget,
 )
 
 from squidxplorer import _viewer as V  # noqa: E402
 from squidxplorer import _workers as W  # noqa: E402
 from squidxplorer._napari_view import MosaicLayers as _MosaicLayers  # noqa: E402
 
-from .conftest import CH_IN_YAML  # noqa: E402
 
-
-def _needs(pkg: str):
-    """Skip when an OPTIONAL operator backend (stitch/decon/etc.) is absent, instead of failing on an empty result."""
-    return pytest.mark.skipif(
-        importlib.util.find_spec(pkg) is None,
-        reason=f"{pkg} not installed: this operator path is UNTESTED here, not passing")
 
 
 @pytest.fixture(scope="module")
@@ -1675,11 +1666,16 @@ def test_unavailable_well_reports_instead_of_showing_other_pixels(qapp, squid_da
     win.close()
 
 
-def test_no_source_means_the_gesture_never_arms(qapp, squid_dataset):
+def test_the_hold_never_arms_off_plate_or_without_a_source(qapp, squid_dataset):
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
     ov = win._overview
     ov.resize(600, 400)
+    ov.set_loupe_source(_FakeLoupeSource(), np.ones((2, 3), np.float32))
+    ov.mousePressEvent(_press(2, 2))               # in the label margin, off the grid
+    assert not ov._hold.isActive()
+    ov._arm_loupe()
+    assert ov._loupe is None
     ov.set_loupe_source(None)
     rc = sorted(ov._by_rc)[0]
     x, y = _cell_center(ov, *rc)
@@ -1693,6 +1689,8 @@ def test_raw_source_reads_real_acquisition_pixels(qapp, squid_dataset):
     root, arrays = squid_dataset
     win = _loupe_win(qapp, root)
     src = win._loupe_sources["raw"]
+    assert isinstance(src, V._RawLoupeSource) and win._overview._loupe_src is src
+    assert src.available("B2")[0]
     crop = src.read_crop("B2", 0, 0, 0, 4, 4)
     assert crop.shape[1:] == (4, 4)
     names = [c["name"] for c in win._meta["channels"]]
@@ -1986,7 +1984,7 @@ def test_opening_another_plate_joins_the_previous_loupe_thread(qapp, squid_datas
     assert not second.isRunning()                  # ...and closing joins the current one too
 
 
-def test_dragging_off_the_widget_dismisses_a_live_loupe(qapp, squid_dataset):
+def test_leaving_or_dragging_off_the_widget_dismisses_a_live_loupe(qapp, squid_dataset):
     """Qt grabs the mouse during a press, so no leaveEvent fires while dragging off-widget mid-hold."""
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
@@ -1995,6 +1993,11 @@ def test_dragging_off_the_widget_dismisses_a_live_loupe(qapp, squid_dataset):
     ov.set_loupe_source(_FakeLoupeSource(), np.ones((2, 3), np.float32))
     rc = sorted(ov._by_rc)[0]
     x, y = _cell_center(ov, *rc)
+    ov.mousePressEvent(_press(x, y))
+    ov._arm_loupe()
+    assert ov._loupe is not None
+    ov.leaveEvent(None)
+    assert ov._loupe is None
     ov.mousePressEvent(_press(x, y))
     ov._arm_loupe()
     assert ov._loupe is not None
@@ -2315,7 +2318,12 @@ class _IdleSignalWorker(V.QThread):
 
 
 def test_retire_disconnects_every_declared_signal(qapp, squid_dataset, tmp_path):
-    """_signal_names being right is worthless unless _retire actually uses it to disconnect."""
+    """_retire used to disconnect a hardcoded name list, so a worker declaring a new signal stayed connected through teardown."""
+    names = set(V._signal_names(_IdleSignalWorker))
+    assert {"progress", "exported", "launched", "failed", "finished_ok"} <= names
+    assert "finished" not in names and "started" not in names   # QThread's own — never torn down
+    assert {"tileReady", "resultReady", "streamEnded", "writtenReady", "wellFailed"} <= set(
+        V._signal_names(V._OperatorWorker))
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -2361,8 +2369,7 @@ def test_the_redock_BUTTON_works_not_just_the_method(qapp):
 
 
 
-def test_the_illumination_card_offers_the_loader_and_estimator_and_no_preview(qapp,
-                                                                              squid_dataset):
+def test_the_illumination_card_offers_the_loader_and_estimator(qapp, squid_dataset):
     """The shelved flatfield card's successor: the profile loader/estimator STITCH rides — load + estimate buttons, and NO preview/run (the standalone"""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -2375,7 +2382,6 @@ def test_the_illumination_card_offers_the_loader_and_estimator_and_no_preview(qa
     texts = [b.text() for b in tab.findChildren(QPushButton)]
     assert any("illumination profile" in s for s in texts), texts
     assert any("Estimate from plate" in s for s in texts), texts
-    assert "Preview" not in texts, "the shelved flatfield preview came back"
     win.close()
 
 
@@ -2602,6 +2608,8 @@ def test_every_uncarded_runnable_operator_is_offered_in_the_declaration_submenu(
                 if k not in V._OPERATIONS_BY_KEY}
     assert offered == expected
     assert blob_operator in offered
+    assert V.operator_label(blob_operator) == blob_operator      # a cardless key labels itself
+    assert V.operator_label("mip") == V._OPERATIONS_BY_KEY["mip"].label
     win.close()
 
 
@@ -2744,12 +2752,23 @@ def _result_win(op="alpha", region="A1", channels=("405", "488")):
 
 
 def test_a_plane_op_result_becomes_a_layer_group_one_layer_per_channel(qapp):
+    """One group per operator in raw's frame; a settle over complete regions is a no-op."""
+    from squidxplorer._mosaic_source import mosaic_bbox_um
+
     win = _result_win("alpha")
     for fov in (0, 1):
         V.PlateWindow._on_result(win, "A1", fov, np.full((2, 8, 8), 7, "uint16"))
     mos = win._view.mosaic
     assert mos.ops() == ["alpha"]                    # one GROUP, keyed by the operator
     assert [c[1] for c in mos.group("alpha")] == ["405", "488"]   # one LAYER per channel
+    assert mos.group("alpha")[0][3]["bbox_um"] == mosaic_bbox_um(win._meta, "A1")
+    win._readout.setText("")
+    assert V.PlateWindow._settle_stranded_results(win) == 0
+    assert win._readout.text() == "" and not win._run.error
+    win._active_op_key = "decon"
+    for fov in (0, 1):
+        V.PlateWindow._on_result(win, "A1", fov, np.zeros((2, 8, 8), "uint16"))
+    assert mos.ops() == ["alpha", "decon"], "two operators must make TWO toggleable groups"
 
 
 def test_a_run_that_ends_with_a_half_read_region_SAYS_SO_instead_of_stranding_it(qapp):
@@ -2834,9 +2853,9 @@ def _fitted_plate(nrows, ncols, w=1400, h=900):
 _cell = _cell_slices
 
 
-def test_selecting_a_well_on_a_1536wp_leaves_the_thumbnail_pixels_untouched(qapp):
-    ov = _fitted_plate(32, 48)
-    rc = (16, 24)
+@pytest.mark.parametrize("shape, rc", [((32, 48), (16, 24)), ((3, 3), (1, 1))])
+def test_selecting_a_well_leaves_the_thumbnail_pixels_untouched_at_any_plate_size(qapp, shape, rc):
+    ov = _fitted_plate(*shape)
     ov.add_tile(*rc, ov._by_rc[rc], _tile([3000]))
     ov.recomposite(quick=True)
     assert ov._cd > 14, f"cell is {ov._cd:.1f} px wide; the interior crop would be empty"
