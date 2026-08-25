@@ -1005,8 +1005,8 @@ per run; composition stays refused. Owed: per-set disk estimate; a set-run cance
 - **"Match layers to raw" is shelved whole**: the button, `RegionViewer._match_raw_contrast`,
   `_lut_clipboard.match_raw_contrast` and `MosaicLayers.match_contrast_to` (the button chain
   was its last caller). Absences pinned in tests.
-- **The LUT clipboard is back as exactly two buttons** (Julio: "ultra simple, minimal, two
-  button logic"): `_lut_clipboard.CLIPBOARD` (one plain dict) + `copy_luts`/`paste_luts` over
+- **The LUT clipboard is back as exactly two buttons** (REVERSED 2026-08-25, ruling v4: shelved
+  whole, see the no-collapse section) (Julio: "ultra simple, minimal, two button logic"): `_lut_clipboard.CLIPBOARD` (one plain dict) + `copy_luts`/`paste_luts` over
   the surviving `per_channel_luts`/`apply_luts`, driven by two chips in the view-controls
   block. **The plate follows a PASTE and only a paste**: `RegionViewer.lutsPasted` →
   `PlateWindow._follow_window_luts` → `follow_channel_window` (contrast only, never the manual
@@ -1081,182 +1081,78 @@ Julio's declutter directive (chart: `~/Downloads/napari dock all states.png`; pl
   single-shot fired into a torn-down window during the deleteLater drain (deterministic
   segfault at PYTHONHASHSEED=0, gone with the disarm).
 
-## Hero declutter (2026-08-25, branch hero-declutter, team feedback + DESIGN-PRINCIPLES.md)
+## Hero declutter, then the no-collapse reversal (2026-08-25, branch hero-declutter)
 
 Team thread verbatim: "hiding all the 'Operator' controls"; "minimize most of the Napari-Native
-tools"; "The plate view and the image should be the 'hero' features"; "'Let's fill the screen
-with verbose notifications about everything'". Julio's reconciliation stands: ONE window,
-operators hidden by default and summoned, never a separate window.
+tools"; "The plate view and the image should be the 'hero' features". The first pass folded
+sections behind summon grips. Julio REVERSED that the same day, verbatim: "the plate shouldn't
+be collapsible, the dock shouldn't be collapsible, the contrast controls shouldn't be
+collapsible, the operators shouldn't collapse, the operator controls shouldn't collapse, the
+GUI buttons such as 'FOVs' shouldn't collapse. The left dock shouldn't collapse, it should
+display its buttons in a way that it's pleasing, appropriately sized, not overwhelming and
+clunky." And the standing framing: "we're doing a less is more effort, and that requires
+quality and simplicity." The rules now:
 
-- **Sections fold behind summon grips** (`_region_viewer._FoldSection`, the plate-slot/log
-  grip pattern): the operator surface folds WHOLE behind "▸ operators"; the resting chip row
-  is [ 3D ] [ ▭ ROI ] [ ▸ controls ], buttons sized to their text. Collapsed by default,
-  state per VIEW, session-scoped, no prefs file. `_insert_param_slot` summons before
-  inserting (an insertion under a collapsed fold reads as a dead ⚙ chip).
-  `RegionViewer.summon_controls()` is the one entry that expands everything; GATE 3's view
-  sweep calls it as its settle step, because the sweep itself clicks the grips -
-  collapsed-by-default never hides a control from the gate.
-- **There is NO 2D button and no in-place 2D/3D switch** (Julio, 2026-08-25: "There should
-  not be 2D button since we make separate tabs for the 3d view. The ROI button shouldn't be
-  hidden behind controls."): a 2D tab IS 2D, a 3D tab IS 3D. Deleted whole with absence
-  pins: `_btn_2d`, `RegionViewer._view_roi_2d`, `_roi_tools.view_roi_2d`,
-  `RegionViewer._set_ndisplay` (each grep-proven caller-free). `_open_3d` stamps the child
-  via `note_volume_tab()`: the 3D tab's own 3D chip is disabled naming the way back (close
-  the tab). ROI-draw (`_btn_roi`) is top-level; select/clear/window/png/movie/focus/FOVs/
-  LUTs stay behind the summon. `_reslice_hidden_layers` still rides `dims.events.ndisplay`
-  (napari's own button and the volume machinery still flip it); nothing app-side switches a
-  live view's ndisplay any more.
-- **The collapsed log is a BAND, never a sliver** (Julio, live 2026-08-25: "Can't see log.
-  Blank frame."): the collapsed cap is re-derived from the layout's own hint whenever the
-  content relayouts (`LogPanel._apply_collapsed_cap` on every LayoutRequest, != guarded) -
-  a cap frozen at construction clipped the band once `adopt_status_row` grew it, cutting
-  the "2%" run bar mid-label with no reachable toggle. The view's left column is
-  `QSizePolicy.Maximum` vertically: a dock that can still grow paints the freed height as a
-  dead blank band instead of handing it to the layer controls (qSmartMaxSize caps a no-grow
-  policy at the size hint).
-- **The log starts COLLAPSED** (`LogPanel(start_collapsed=True)`), summoned by its own toggle
-  or View > Log. Expanding at home re-hands the splitter split at BOTH levels
-  (`PlateWindow._on_log_collapsed`, once more on a zero-timer after the layout pass - a
-  splitter keeps its sizes when a child's height cap lifts, measured 19 px); collapsing needs
-  no help, Qt's own maximum-size recalc gives the space to the plate. While HOSTED the
-  expanded height keeps the 3/4-of-plate-slot cap across collapse cycles
-  (`LogPanel.set_expanded_cap`). The plate slot's fixed 240 px is unchanged.
-- **napari chrome is hidden, NAMED, and stays hidden** (`_napari_pane.minimize_native_chrome`,
-  inventory on `MosaicPane.native_chrome_hidden`): the embedded status bar (27 px, a second
-  status surface), every dock title bar (20 px each, zero-height replacement - one window,
-  docks neither float nor close; napari re-installs its QtCustomTitleBar on every
-  visibilityChanged(True), so `keep_dock_slim` re-applies after napari's own handler), and
-  the layer-controls rows in `NATIVE_HIDDEN_ROWS` (`blending:`, `projection mode:`,
-  `interpolation:` - matched by the form's own LABEL TEXT, never napari attribute names).
-  Contrast, gamma, colormap, opacity rows stay: they are the IDENTITY_PROPS surface. Rows
-  stay hidden across 2D/3D flips and cover layers added after open (the container's
-  currentChanged re-applies); verified on the real pane, pinned headless in
-  tests/test_hero_declutter.py.
-- **Decon is just "decon", and the preview scope follows the TAB** (Julio, 2026-08-25: "2D
-  3D buttons are just how we view it"): no user-facing string says 2D decon, 3D decon or
-  volume solve (swept in tests/test_hero_declutter.py, same shape as the dash guard), and
-  the render-mode prefixes on the controls note and run echoes are gone. A 2D tab's
-  PREVIEW of a depth-keeping per-FOV operator computes ONLY the z plane in view - the same
-  solve over a 1-plane stack, the pinned degenerate case - via `preview_z_level`
-  (view -> `run_operator` -> `_OperatorWorker` -> `run_operator_once` -> `run_preview` ->
-  `run_plate(z_level=)` -> `project_well(z_level=)`, which now ACCEPTS one plane for a
-  keeps_depth z-consumer and still refuses it for a reducer). Declaration-driven at the
-  dispatch (`not is_region_operator and not operator_reduces_depth`), never a name match;
-  a 3D tab previews the full stack; a SAVE always runs full depth (the restriction is
-  computed before the copy arm flips `save`, so a copy-writing save can never be
-  z-cropped); the region arm refuses `z_level=` by name. The Preview tooltip carries the
-  one honesty caption: the saved run's mid stack planes also gain from their neighbors.
-- **The operator PAGES and the decon QC sweep are shelved whole** (Julio, 2026-08-25: "You
-  should shelf those operator pages"; "The sweep code should be shelved. I can just run on
-  an ROI iteration by iteration."). Gone, grep-proven, absence-pinned
-  (tests/test_op_panels.py): StitcherPanel, DeconQCPanel, DeconQCResultView, its worker,
-  QCFrame, `stitch_operator_kwargs`/`stitch_refusal`, `_decon_qc.py` + tools/decon_qc.py
-  (the halo/core verdict went with them - it had no home without the sweep surface), the
-  `snapshot_iters` capture hook in `_decon._run`/`_decon_gpu.rl` (consumer-free after the
-  cut; matplotlib is unconditionally excluded from the frozen build again), and
-  `PlateWindow.publish_qc_result`. THE ONLY PARAMETER SURFACE is the inline slot under the
-  view's operators row: `GenericOperatorPanel` over the declaration - headline knobs plus
-  the disclosure labeled exactly "advanced parameters" (collapsed) - with the declared
-  `inner_param` drawn as a combo over the plane operators plus the keep-every-plane label
-  (`operator_inner_param` is the registry query). Kept as minimal elements, each
-  load-bearing: RegisterPanel's copy switch (not a Param: it cannot change preview
-  pixels), DeconPanel's NI row (the one PSF input no Squid file records; writes
-  `set_session_ni`), and the NON-operator illumination tab (the flat-field loader), the
-  one band page left. `_activate_operator` routes to the active view's inline slot
-  (`RegionViewer.show_operator_controls_for`) and refuses without a view;
-  `adopt_operator_panel` PARKS a released panel hidden (never a tab). The iteration
-  workflow is manual: draw an ROI, set the iterations spin, Preview, repeat.
-- **Verbosity strip** (Julio, 2026-08-25: "too many description and tooltips"): labels are
-  a word or two; tooltips at most ONE short sentence (`_param_panel._one_sentence` clips
-  declaration blurbs; the panels' title/description headers are gone; Operation blurbs are
-  one line). Refusals and warnings keep their full sentences in the LOG.
-- **The log diet**: INFO is for facts a user acts on; narration went to DEBUG (deep-zoom
-  arming, preview cache/seed stats, bitdepth widening, cache pruning, measure_run's
-  "starting" twin, 3D/gallery open+timing lines, well-image backfill skips). Kept INFO on
-  purpose: every refusal/limitation line, the write/delete lines (`mosaic_view/wells`), the
-  measured outcome lines (`done in`, `window open`), `ViewLog.started` (the "started and
-  then went quiet" diagnosis depends on it), the GPU-ceiling line (once per change).
-  `tests/test_hero_declutter.py` pins an ordinary open-and-preview session at <= 8 INFO
-  lines (measured 3 on the fixture); raise the cap only with a written reason.
-- **The empty launch is a drop target saying ONE line** (`PlateWindow._drop`: "drop an
-  acquisition folder here, or File > Open"). `_set_empty_state` is the one writer of what
-  shows with no data: the drop line on, the data-bound title controls (`_view_caption` +
-  `_view_combo`, `_open_sel_btn`, `_plate_paste_btn`) off until an ingest lands (both ingest
-  refusal arms and `_open_computed` route through it). The operator band stays hidden and
-  the log band collapsed; a drop anywhere on the window reaches `ingest` (the label does not
-  accept drops, so Qt walks up to the window's handlers). `EMPTY_LAUNCH_INFO_CAP = 2`
-  (measured 0).
-- **ONE window for real** (Julio, live on bf982a2: "I still see the blank screen where the
-  old plate window used to go... we add the space where the old plate window was"). With the
-  path given to the constructor the default view opened INSIDE the plate's showEvent, so the
-  hosting's `hide()` ran while Qt was still mapping the window: the widget read hidden while
-  its QWindow stayed on screen (reproduced offscreen via `windowHandle().isVisible()`).
-  `showEvent` now defers `_open_default_view` to the next loop turn (`QTimer.singleShot(0)`),
-  and `_place_beside` gives a deck whose plate is `_hidden_for_one_window` the WHOLE
-  available geometry (frame-fitted through `_fit_frame`, shared with
-  `maybe_hide_for_one_window`), else `beside_rect` as before for a free-standing layout.
-  Tests assert the window HANDLE, not `isVisible()`.
-- **The ROI chip is two-state** (Julio: "the ROI button temporarily changes to the go to roi
-  arrow"): "▭ ROI" draws; once a box exists and has not been used it reads "→ ROI" and opens
-  the ROI child (`RegionViewer._roi_chip_clicked` / `_refresh_roi_chip`, driven by the
-  Shapes layer's data event through the view's `_on_roi_data`); using or clearing hands it
-  back, a new box offers the arrow again. Top-level, never behind the controls fold.
-- **The plate slot and the log are UNDER the layer controls and the layer list** (Julio: "not
-  above"): `_plate_log_host` is its own dock appended LAST in the left column
-  (`_napari_pane.append_left_dock` via `MosaicPane.dock_plate_slots`; `hoist_left_dock` is
-  the module-level twin the chips use), or below the chips in the window body headless.
-- **A scoped run owes only its own fields** (Julio: "Can't run decon sub FOV?"; measured: an
-  ROI preview computed 1 of 9 fields and was refused as "1 of 9 FOV(s) have results", then
-  reported as fields that could not be read, which was false). `OperatorRun.scope` carries
-  the `{region: [fov, ...]}` mapping; `RegionResultAccumulator(fovs=)` places, measures and
-  completes over that list (the region's list is replaced in its own meta copy, so the fuser
-  and the bbox stay the raw mosaic's code); an unscoped run still refuses holes.
-- **Left-column real estate** (Julio's screenshot: "realstate not being allocated
-  efficiently"): a Shapes layer's styling rows (`edge width:`, `edge color:`, `face color:`,
-  `display text:`) and its shape-tool grid are chrome (`NATIVE_HIDDEN_ROWS`, the grid by the
-  form's `edge width:` signature, an Image form keeps its own grid); napari's controls
-  container is capped at its CURRENT page's need (`fit_controls_container`, on every
-  currentChanged; the QStackedWidget's hint is its tallest page, 289 px measured); a
-  progress report after the run ended shows no bar (`operator_progress` returns with no
-  `_op_action`). NOT done: the ~110 px blank band above the chips in a CHILD view cannot be
-  measured here (offscreen has no OpenGL, so no docked real pane builds); check live.
-- **The left column's height goes to the layer list** (Julio's screenshot on 2888349:
-  blank bands under the operators band and the layer controls, the layer list squeezed to
-  two rows, the log band pushed out of the plate/log dock). A QDockWidget ignores its
-  child's size policy, so every dock the app adds is FIXED at its content's hint
-  (`_napari_pane.fit_dock_to_content`, kept by `_DockFitter` on every LayoutRequest via
-  `watch_dock_fit`: chips column, plate/log host, napari's layer-controls dock) and the
-  layer tree's dock is the ONE stretch consumer (`stretch_dock`; `_balance_left_column`
-  applies both, idempotent). `_FoldSection.showEvent` re-asserts its own fold (the
-  operators band was open on a fresh launch; the summoner was not found in code); the
-  "defaults" note row does not render when it has nothing set.
-- **A preview's layer has the asking view's raw extent and lands ONLY there** (Julio, live:
-  "decon layer is != raw view"). The ROI child crops a delivered result against the RESULT's
-  own extent (`deliver_result`; a scoped result's pixels cover only its FOVs, so cropping
-  against the region's mosaic bbox took the wrong window and gained a full-field layer);
-  `_deliver_to_views` delivers to `OperatorRun.requester` alone when a view asked (the dark
-  fan-out survives only for a run no view asked for), and a scoped result is never filed in
-  the cross-window cache. The solve stays whole-FOV; the save path never crops.
-- **Auto-contrast is OUR window rule on the pixels on screen** (Julio: "the napari
-  autocontrast SUCKS for the G7 dataset"; measured on G7 488/FOV 1/z 7: napari min/max
-  (6416, 65520) against a 15888 mode renders the field washed; `auto_contrast` full-res
-  (18296, 65520), 0 clipped). napari's once/continuous row (a slice's min/max) is hidden
-  chrome; the "◐ auto" chip samples the displayed rung under the viewport per visible
-  channel (`RegionViewer._on_screen_samples`), computes `_contrast.auto_contrast` on
-  `_workers._AutoContrastWorker` (off the Qt thread) and lands through
-  `MosaicLayers.set_contrast` inside `programmatic()`. The ceiling is foreground-aware
-  (max of the pmax percentile and the 99th percentile of pixels above the floor: a lone hot
-  pixel cannot carry it, an object population can); the raw-mosaic SEED reads the finest
-  rung within `SEED_MAX_PX` (4.2 Mpx), not the coarsest.
-- **The param slot holds controls only** (Julio: "just has like BS AI text"): no sentence in
-  a panel (the "runs as it ships" line, the illumination paragraph and the panel shell's
-  status label are gone or never drawn; `_Panel.say` is the host's log line); a
-  parameter-less operator's ⚙ chip is DISABLED ("no parameters") and inserts nothing;
-  all-advanced operators insert only the collapsed "advanced parameters" disclosure.
-- **Verbosity strip, measured** (labels + tooltips in a view's left column, folds summoned,
-  via a scratch probe at f063f55 vs bf982a2): resting column 33 elements both before and
-  after but 431 -> 207 words; with every operator's inline panel inserted once, 108 -> 64
-  elements and 1265 -> 454 words.
+- **Nothing collapses. ONE plain column, everything visible** (`RegionViewer._build`): a
+  QVBoxLayout with margins and gaps of `COLUMN_PX` holding, top to bottom, the chip grid
+  (3D, ROI, FOVs, select, clear, window, focus, movie, png; all top-level), the operators
+  row `[operator][Preview][Run on plate]` with the selected operator's panel ALWAYS under it,
+  napari's layer-controls container (taken out of its dock, capped at its current page by
+  `fit_controls_container`), the layer tree (THE stretch consumer), the plate slot
+  (`_PlateSlotBox`, fixed 240 px, no grip) and the log slot. Docked as ONE napari dock
+  (`MosaicPane.dock_left_column`, `native_column_widgets` hands over the controls and the
+  tree); headless it sits in the window body. Deleted whole, absence-pinned in
+  tests/test_hero_declutter.py: `_FoldSection`, `set_*_collapsed`, `summon_controls`, the
+  plate grip, `LogPanel.set_collapsed/toggle/collapsed/set_expanded_cap`, the dock-fit
+  mechanism (`_DockFitter`, `watch_dock_fit`, `stretch_dock`, `hoist_left_dock`,
+  `append_left_dock`), GATE 3's summon step.
+- **ONE parameter surface, ONE store** (ruling w: "we say 'iterations' 3 times"): the
+  ⚙ toggle, the inline iterations spin and the "iterations=9" summary are gone; the panel
+  under the row is what `operator_kwargs_for` reads. Decon's panel is exactly `iterations`
+  plus NI as a DROPDOWN, value with the medium beside it ("1.000 (air)" default, water,
+  silicone, glycerol, oil, custom). A parameter-less operator shows nothing under the row;
+  an all-advanced one (fstack) shows only the "advanced parameters" disclosure, the ONE
+  declaration-driven fold that survives.
+- **The log is a FIXED slot** (v2: "Re-docking the logger doesn't work"): `LogPanel.SLOT_PX`
+  tall, scrollable, always visible under the plate slot; no float, no collapse, no
+  View > Log. **The one bar is the run bar** (y: "The memory usage bar is confusing"): the
+  memory bar and the manager's memory poll are deleted; `StatusRow` is the run bar alone,
+  shown while a run is live, hidden after its drain.
+- **The LUT clipboard is shelved whole** (v4: "this will save us code lines"): the two chips,
+  `CLIPBOARD`/`copy_luts`/`paste_luts`, `lutsPasted`, the plate's paste button and
+  `_follow_window_luts`. `per_channel_luts`/`apply_luts` stay for the loupe, the movie and
+  the settings snapshots.
+- **napari's menu bar is chrome** (x: "lines and lines and lines of code"):
+  `minimize_native_chrome` makes it non-native, empties it (so Cmd+O/S/W no longer fire
+  napari's actions from the pane) and hides it. The ONE window's menu is the deck's: File
+  (Open Acquisition, Quit) and View (Select All Wells, Close All Views, Plate Window).
+- **A slider spans its OWN channel** (v1: "look how close to each other are the contrast
+  limits"): `_bitdepth.observe_array(frame, channel)` books a per-channel maximum, its
+  ceiling is `channel_ceiling` (the full-scale it reaches, else max x 1.05), `range_for(dtype,
+  channel)` seeds a layer from it, `depthChanged(channel, lo, hi)` widens only that channel's
+  layers, and a range never narrows per channel.
+- **napari's "once" IS the app's window rule; there is no auto chip** (Julio: "why did you do
+  an auto button?"): every app layer binds `reset_contrast_limits` per instance
+  (`MosaicLayers._bind_reset_contrast`), sampling the slice napari already materialised
+  (`displayed_sample`; before the first slice, ONE plane of the coarsest rung, never a whole
+  lazy stack) and handing (channel, sample) to `on_reset_contrast` subscribers; the view
+  computes on `_AutoContrastWorker` and lands through `set_contrast`. The "continuous" button
+  (per slice, 9.3 ms per 2050^2 frame) is hidden by its own text. The rule: floor =
+  max(mode + 2 sigma, the 99.5th percentile of the background population under mode +
+  6 sigma) (G7 561: mode 896, sigma 18.7; + 2 sigma left 16.7% of background above black);
+  ceiling = max(pmax percentile, the 99.5th percentile of pixels 5 sigma above the mode, at
+  least 16 sampled); the raw seed reads the finest rung within `SEED_MAX_PX`.
+- Kept from the first pass: the empty launch (one drop line, `_set_empty_state`), the
+  one-window showEvent fix, the ROI chip's two states, the scoped run's own FOV set, a
+  preview cropped to and delivered only in the asking view, the Shapes rows and shape-tool
+  grid as chrome, napari's status bar and dock titles hidden, the log diet (INFO for facts a
+  user acts on; `tests/test_hero_declutter.py` pins an ordinary session at <= 8 INFO lines).
+- **Measured, 2026-08-25**: ruling i's strip took the view column from 431 to 207 words at
+  rest (33 elements both) and from 1265 to 454 words with every operator panel inserted;
+  G7 488/FOV 1/z 7 windows: napari min/max (6416, 65520), auto full-res (18296, 65520).
+- **NOT done**: z (sub-FOV decon with a PSF halo) and aa (a 3D-tab preview delivered as a
+  full-depth volume) are unimplemented; a 3D-tab preview still delivers one plane and says
+  so. Offscreen has no OpenGL, so the docked real column is unverified headless.
 
 ## Agent skills
 
