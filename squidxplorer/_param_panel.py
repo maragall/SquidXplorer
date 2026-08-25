@@ -6,6 +6,8 @@ name. The fallback panel — the hand-written panels in ``_op_panels`` stay.
 
 from __future__ import annotations
 
+import re
+
 from typing import Any, Optional, Sequence
 
 from qtpy.QtWidgets import (
@@ -27,8 +29,9 @@ def _one_sentence(text) -> str:
     text = str(text or "").strip()
     if not text:
         return ""
-    head = text.split(". ", 1)[0].strip()
-    return head if head.endswith((".", "!", "?")) else head + "."
+    # The first sentence AS WRITTEN: the split keeps the sentence's own terminator and
+    # never invents one (a tooltip is the declaration's words, verbatim).
+    return re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0].strip()
 
 #: Widget kind by the EXACT type of a Param's default — never isinstance: bool is a
 #: subclass of int, so an isinstance ladder would draw every check box as a 0/1 spinner.

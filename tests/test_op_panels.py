@@ -150,6 +150,8 @@ def test_a_param_tooltip_is_at_most_one_sentence(qapp):
     from squidxplorer._param_panel import GenericOperatorPanel, _one_sentence
 
     assert _one_sentence("First. Second. Third.") == "First."
+    assert _one_sentence("counts added to every plane") == "counts added to every plane", \
+        "a tooltip is the declaration's own words: no invented trailing period"
     assert _one_sentence("") == ""
     panel = GenericOperatorPanel(_Host(), "stitch")
     for name, widget in panel.widgets.items():
