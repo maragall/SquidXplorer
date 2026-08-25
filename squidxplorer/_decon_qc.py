@@ -1,5 +1,5 @@
 """Richardson-Lucy semi-convergence QC: sweep iteration counts on one real FOV and put
-the orthogonal turbo sections plus a halo/core metric in front of a human.
+a halo/core metric (and, for the CLI, an orthogonal montage) in front of a human.
 Used by the GUI panel, tools/decon_qc.py and the tests — one implementation.
 """
 from __future__ import annotations
@@ -171,80 +171,10 @@ def _display(panel, gamma=0.5, reference=None):
     return (panel / peak) ** gamma
 
 
-# --------------------------------------------------------------------------------------
-# The orthogonal composite: ONE picture of ONE iteration
-# --------------------------------------------------------------------------------------
-
-#: Separator colour: a mid grey OUTSIDE turbo's ramp, so it can never be misread as intensity.
-GAP_RGB = (128, 128, 128)
-
-
-def _view_window(n, c, half):
-    """The [start, stop) slice one lateral axis is cropped to around *c*, clamped to the axis."""
-    if not half:
-        return 0, n
-    return max(int(c) - half, 0), min(int(c) + half, n)
-
-
-def qc_composite(volume, centre, view_half=None, gamma=0.5, gap=2):
-    """The x-y plane through *centre* with the y-z and x-z sections concatenated to it."""
-    volume = np.asarray(volume, dtype=np.float64)
-    if volume.ndim != 3:
-        raise ValueError(f"qc_composite needs a (Z, Y, X) volume; got shape {volume.shape}")
-    zc, yc, xc = (int(v) for v in centre)
-    nz, ny, nx = volume.shape
-
-    y0, y1 = _view_window(ny, yc, view_half)
-    x0, x1 = _view_window(nx, xc, view_half)
-    crop = volume[:, y0:y1, x0:x1]
-
-    xy = volume[zc, y0:y1, x0:x1]          # (Y, X)
-    yz = volume[:, y0:y1, xc].T            # (Z, Y) -> (Y, Z): y on ROWS, beside x-y
-    xz = volume[:, yc, x0:x1]              # (Z, X): x on COLUMNS, under x-y
-
-    h_xy, w_xy = xy.shape
-    gap = int(gap)
-    out = np.full((h_xy + gap + nz, w_xy + gap + nz), np.nan, dtype=np.float64)
-    out[:h_xy, :w_xy] = _display(xy, gamma, reference=crop)
-    out[:h_xy, w_xy + gap:] = _display(yz, gamma, reference=crop)
-    out[h_xy + gap:, :w_xy] = _display(xz, gamma, reference=crop)
-    # bottom-right stays NaN: a z-vs-z section does not exist, so nothing may be drawn there.
-    return out
-
-
-def composite_centre_at(shape, centre, row, col, view_half=None, gap=2):
-    """Which ``(z, y, x)`` a click at composite pixel ``(row, col)`` points at; None off-panel."""
-    nz, ny, nx = (int(v) for v in shape)
-    zc, yc, xc = (int(v) for v in centre)
-    row, col, gap = int(row), int(col), int(gap)
-    y0, y1 = _view_window(ny, yc, view_half)
-    x0, x1 = _view_window(nx, xc, view_half)
-    h_xy, w_xy = y1 - y0, x1 - x0
-
-    in_xy_rows = 0 <= row < h_xy
-    in_xy_cols = 0 <= col < w_xy
-    in_z_cols = w_xy + gap <= col < w_xy + gap + nz     # the y-z strip, to the right
-    in_z_rows = h_xy + gap <= row < h_xy + gap + nz     # the x-z strip, below
-
-    if in_xy_rows and in_xy_cols:
-        return zc, y0 + row, x0 + col
-    if in_xy_rows and in_z_cols:
-        return col - (w_xy + gap), y0 + row, xc
-    if in_z_rows and in_xy_cols:
-        return row - (h_xy + gap), yc, x0 + col
-    return None
-
-
-def turbo_rgb(panel):
-    """Map a 0..1 array through matplotlib's TURBO, NaN to :data:`GAP_RGB`. ``(H, W, 3)`` uint8."""
-    import matplotlib
-
-    panel = np.asarray(panel, dtype=np.float64)
-    cmap = matplotlib.colormaps["turbo"]
-    rgb = (np.asarray(cmap(np.clip(np.nan_to_num(panel, nan=0.0), 0.0, 1.0)))[..., :3]
-           * 255).round().astype(np.uint8)
-    rgb[np.isnan(panel)] = GAP_RGB
-    return rgb
+# The GUI's turbo composite (qc_composite / composite_centre_at / turbo_rgb) was removed on
+# 2026-08-25 (Julio: "The turbo colormap preview makes no sense. remove it"): the sweep's
+# preview is a normal data layer in the view, under the channel's own colormap. The montage
+# below stays: it is the CLI's (tools/decon_qc.py) offline report, not the GUI preview.
 
 
 def write_montage(path, per_iteration, centre, dxy_um, dz_um, title, view_half=None):

@@ -325,166 +325,75 @@ def test_the_window_navigator_is_gone_and_the_operator_dock_took_its_jobs(
         shutdown_plate_window(qapp, win)
 
 
-def test_the_deck_carries_a_collapsible_operator_dock(qapp, napari_pane_stub, squid_dataset):
-    """The BULK-processing cards live in the views window's right-edge dock (2026-08-19),
-    collapsed by default to a thin grip. Cards ONLY: the per-view operator surface moved to
-    each view's own left column (Julio: "The operators for this window row should also be on
-    the left vertical dock. The bulk processing is what is solutioned on the right vertical
-    column."), so the dock swaps nothing on tab changes."""
-    from squidxplorer._operator_dock import GRIP_PX, OperatorDock
+# --- the right-edge operator dock is RETIRED (Julio, 2026-08-25: "I think that the operator
+# --- right hand dock is obsolete"). The bulk path is a view's Run on plate; an operator's
+# --- controls INSERT into the view's own left column. ------------------------------------------
 
+def test_the_operator_dock_is_retired(qapp, napari_pane_stub, squid_dataset):
+    import importlib
+
+    import pytest as _pytest
+
+    with _pytest.raises(ModuleNotFoundError):
+        importlib.import_module("squidxplorer._operator_dock")
     root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
-    a, b = views
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
     try:
-        dock = deck._operator_dock
-        assert isinstance(dock, OperatorDock)
-        assert dock.collapsed, "the dock must open COLLAPSED — a grip, not a panel"
-        assert dock.width() == GRIP_PX
-        dock.set_collapsed(False)
-        assert not dock.collapsed and dock.minimumWidth() > GRIP_PX
-        # The cards are the PLATE's launcher: same registry keys, calling _activate_operator.
-        assert set(win._op_cards) >= {"mip", "stitch"}
-        dock.set_collapsed(True)
-        assert dock.collapsed and dock.width() == GRIP_PX
-        # NO per-view panel stack, pinned as absence: each view's panel is in its own left
-        # column and follows its tab for free.
-        assert not hasattr(dock, "_panels"), "the dock grew a per-view panel stack again"
-        assert not hasattr(dock, "show_window_panel"), "the tab-swap surface is back"
-        for v in (a, b):
-            panel = v.operator_panel()
-            p = panel.parentWidget()
-            while p is not None and p is not v and p is not dock:
-                p = p.parentWidget()
-            assert p is not dock, "a view's operator panel is parented into the bulk dock"
+        assert not hasattr(deck, "_operator_dock"), "the deck still grows an operator dock"
+        assert not hasattr(mgr, "operator_dock_installer"), "the installer seam survived"
+        assert not hasattr(win, "_op_docks") and not hasattr(win, "_op_cards")
     finally:
         shutdown_plate_window(qapp, win)
 
 
-def test_the_collapsed_dock_is_a_full_height_grip_not_a_blank_column(qapp, napari_pane_stub,
-                                                                     squid_dataset):
-    """Julio (2026-08-19): the collapsed dock "makes a whole dock white column only for that
-    button." Collapsed, the grip IS the dock's whole content (full height, theme-dark) under a
-    zero-height title bar — there is no empty content area for the platform to paint white."""
+def test_controls_inserts_the_param_slot_under_the_operators_row(qapp, napari_pane_stub,
+                                                                 squid_dataset):
+    """Julio (2026-08-25): "see this as an insertion to a list." ⚙ controls re-hosts the
+    plate's live panel into THIS view's param slot; a second click removes it; the plate's
+    kwargs reader still sees the same widget (one source of truth)."""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    v = views[0]
     try:
-        dock = deck._operator_dock
-        assert dock.collapsed
-        assert dock._stack.currentWidget() is dock._grip, "the grip is not the dock's content"
-        assert dock.titleBarWidget() is dock._no_title
-        assert dock.titleBarWidget().maximumHeight() == 0, (
-            "the collapsed dock still shows a title bar")
-        dock.set_collapsed(False)
-        assert dock._stack.currentWidget() is dock._body
-        assert dock.titleBarWidget() is dock._header
-        dock.set_collapsed(True)
-        assert dock._stack.currentWidget() is dock._grip
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
-# --- a card click opens its panel IN the dock (Julio, 2026-08-24) --------------------------------
-
-def test_a_card_click_opens_the_operator_panel_in_the_dock_not_the_plate(
-        qapp, napari_pane_stub, squid_dataset):
-    """Julio: "When I click on an operator on the operator collapsible dock, the UI appears in
-    the plate window, rather than as a tab in that same collapsible dock." — a complaint. The
-    card's panel must land on ITS dock's panel page, expanded, and the plate's _left_tabs must
-    stay untouched. The widget stays in _op_tabs, so the run's parameter reader still sees it."""
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
-    try:
-        dock = deck._operator_dock
-        assert dock.collapsed
-        card = win._op_cards["stitch"]
-        assert card.isEnabled(), "an ingested plate must enable its cards"
-        card.click()
+        v.operator_panel()
+        combo = v._op_combo
+        i = next(k for k in range(combo.count()) if combo.itemData(k) == "stitch")
+        combo.setCurrentIndex(i)
+        v._show_operator_controls()
         qapp.processEvents()
-        assert not dock.collapsed, "clicking a card must expand its dock"
-        assert dock._stack.currentWidget() is dock._panel_page
-        panel = dock.panel()
-        assert panel is not None and panel is win._op_tabs["stitch"]
-        assert win._left_tabs.indexOf(panel) == -1, "the panel still landed in the plate window"
-        assert win._left_tabs.count() == 0
-        # THE run seam: a dock-hosted panel's values still reach a launched run. (The blend
-        # width must first fit this fixture's tiny 4 px tile, or kwargs() rightly refuses.)
-        panel.blend_spin.setValue(2)
-        kwargs = win.operator_kwargs_for("stitch")
-        assert kwargs and "register" in kwargs and kwargs["blend_px"] == 2
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
-def test_back_to_cards_keeps_the_panel_alive_and_a_reclick_reuses_it(
-        qapp, napari_pane_stub, squid_dataset):
-    """The "◂ operators" affordance returns to the cards WITHOUT disposing the panel — its
-    state (a decon sweep, half-typed values) must survive the round trip, exactly the reuse
-    rule tabs had."""
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
-    try:
-        dock = deck._operator_dock
-        win._op_cards["stitch"].click()
-        qapp.processEvents()
-        panel = dock.panel()
-        panel.blend_spin.setValue(77)                      # user state to survive
-        dock.back_btn.click()
-        qapp.processEvents()
-        assert dock._stack.currentWidget() is dock._body, "back did not return to the cards"
-        assert win._op_tabs["stitch"] is panel, "back-to-cards disposed the panel"
-        win._op_cards["stitch"].click()
-        qapp.processEvents()
-        assert dock.panel() is panel, "a re-click rebuilt the panel instead of reusing it"
-        assert panel.blend_spin.value() == 77, "the panel's state did not survive the round trip"
-        # Collapse/expand lands back on the panel page, not the cards.
-        dock.set_collapsed(True)
-        dock.set_collapsed(False)
-        assert dock._stack.currentWidget() is dock._panel_page
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
-def test_a_menu_open_of_a_dock_hosted_panel_stays_in_the_dock(
-        qapp, napari_pane_stub, squid_dataset):
-    """ONE live panel per key: once a card homed the panel in a dock, a dock-less activation
-    (a menu, a view's ⚙ controls) must show it THERE, never grow a second panel in the plate —
-    two surfaces would disagree about the parameters of one run."""
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
-    try:
-        dock = deck._operator_dock
-        win._op_cards["mip"].click()
-        qapp.processEvents()
-        panel = dock.panel()
-        dock.back_btn.click()                              # user browsed away
-        win._activate_operator("mip")                      # menu open, no dock argument
-        qapp.processEvents()
-        assert dock.panel() is panel and dock._stack.currentWidget() is dock._panel_page
-        assert win._left_tabs.indexOf(panel) == -1, "the menu open duplicated the panel as a tab"
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
-def test_a_tab_hosted_panel_moves_into_the_dock_when_its_card_is_clicked(
-        qapp, napari_pane_stub, squid_dataset):
-    """A panel opened as a plate tab BEFORE the card click (the surviving non-card route) MOVES
-    into the dock — the same widget, so nothing the user set is lost and _op_tabs still holds
-    exactly one entry for the key."""
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
-    try:
-        dock = deck._operator_dock
-        win._open_op_tab("mip", "Maximum Intensity Projection",
-                         win._build_mip_tab)               # the plain tab route, directly
-        qapp.processEvents()
-        panel = win._op_tabs["mip"]
-        assert win._left_tabs.indexOf(panel) >= 0
-        win._op_cards["mip"].click()
-        qapp.processEvents()
-        assert dock.panel() is panel, "the card click built a second panel"
+        panel = v._inserted_panel
+        assert panel is not None and panel is win._op_tabs["stitch"], (
+            "the inserted panel is not the plate's live widget")
+        assert v._param_slot.indexOf(panel) >= 0, "the panel is not in the view's param slot"
         assert win._left_tabs.indexOf(panel) == -1, "the panel is still a plate tab"
-        assert win._op_tabs["mip"] is panel
+        # The values set IN THE SLOT are what a run reads: one source of truth.
+        panel.blend_spin.setValue(2)
+        assert win.operator_kwargs_for("stitch")["blend_px"] == 2
+        # The second click REMOVES the slot, and the panel survives (plate registry).
+        v._show_operator_controls()
+        assert v._inserted_panel is None
+        assert win._op_tabs["stitch"] is panel and panel.blend_spin.value() == 2
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_a_disposed_view_releases_the_inserted_panel_alive(qapp, napari_pane_stub,
+                                                           squid_dataset):
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    v = views[0]
+    try:
+        v.operator_panel()
+        combo = v._op_combo
+        combo.setCurrentIndex(next(k for k in range(combo.count())
+                                   if combo.itemData(k) == "stitch"))
+        v._show_operator_controls()
+        panel = v._inserted_panel
+        panel.blend_spin.setValue(7)
+        v.dispose()
+        qapp.processEvents()
+        assert win._op_tabs["stitch"] is panel, "disposing the view lost the plate's panel"
+        assert panel.blend_spin.value() == 7, "the panel's state died with the view"
     finally:
         shutdown_plate_window(qapp, win)
 

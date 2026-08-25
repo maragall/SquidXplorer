@@ -41,9 +41,10 @@ class Param:
     name: str
     default: Any
     blurb: str = ""
-    #: An advanced knob: not deducible from acquisition filenames and safe at its default,
-    #: so the GUI may fold it into an "advanced" slot. False (the default) keeps every
-    #: existing declaration untouched.
+    #: A knob the GUI hides behind the collapsed "advanced" slot (Julio, 2026-08-25: "the
+    #: user should only tweak what can't be deduced from acquisition filenames"). Headline
+    #: (False) is the exception, not the rule; the panels branch on THIS flag, never on a
+    #: parameter's name.
     advanced: bool = False
 
 

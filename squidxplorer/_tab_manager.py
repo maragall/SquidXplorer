@@ -60,6 +60,12 @@ class TabManager:
             w = builder()
             self.op_tabs[key] = w
             tabs.addTab(w, title)
+        elif tabs.indexOf(w) < 0:
+            # The live widget is currently hosted elsewhere (a view's param slot released
+            # it, 2026-08-25): re-tab the SAME object — setCurrentWidget on a widget the
+            # bar does not hold is a silent no-op.
+            tabs.addTab(w, title)
+            w.setVisible(True)
         tabs.setCurrentWidget(w)
 
     def close_tab(self, index: int, tabs=None) -> None:

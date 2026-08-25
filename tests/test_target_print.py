@@ -195,70 +195,10 @@ def test_the_print_and_the_run_cannot_disagree(qapp, squid_dataset):
         win._stop_worker(); win.close()
 
 
-def test_choosing_open_views_prints_the_block_before_anything_runs(qapp,
-                                                                  squid_dataset, caplog):
-    """Printed when the target is picked; driven through the combo so the wiring is exercised."""
-    win = _plate(squid_dataset, _FakeWindow(2, ["B2", "B3"], name="Deconvolution trial"),
-                 _FakeWindow(5, ["B3"]))
-    try:
-        tab = win._build_run_tab(V._OPERATIONS_BY_KEY["mip"])
-        combo = [c for c in tab.findChildren(QComboBox)
-                 if "Open views" in [c.itemText(i) for i in range(c.count())]][0]
-
-        with caplog.at_level(logging.INFO):
-            combo.setCurrentText("Open views")
-
-        printed = [r.getMessage() for r in caplog.records if "region slots" in r.getMessage()]
-        assert printed, "picking 'Open views' printed nothing to the log console"
-        assert "Deconvolution trial" in printed[-1], "the block did not name the windows"
-        assert "3 region slots across 2 windows, 2 distinct regions" in printed[-1]
-        assert win._readout.text().startswith("Run "), (
-            "the status line did not carry the headline")
-    finally:
-        win._stop_worker(); win.close()
-
-
-def test_pressing_run_prints_it_again_as_the_record_of_what_ran(qapp, squid_dataset,
-                                                               caplog, monkeypatch):
-    win = _plate(squid_dataset, _FakeWindow(2, ["B2", "B3"]), _FakeWindow(5, ["B3"]))
-    seen = {}
-    monkeypatch.setattr(V.PlateWindow, "run_operator",
-                        lambda self, key, out_parent=None, regions=None, **kw:
-                        seen.update(regions=regions))
-    try:
-        tab = win._build_run_tab(V._OPERATIONS_BY_KEY["mip"])
-        combo = [c for c in tab.findChildren(QComboBox)
-                 if "Open views" in [c.itemText(i) for i in range(c.count())]][0]
-        combo.setCurrentText("Open views")
-        run = [b for b in tab.findChildren(QPushButton) if b.text() == "Run"][0]
-        run.setEnabled(True)
-
-        caplog.clear()
-        with caplog.at_level(logging.INFO):
-            run.click()
-
-        assert seen["regions"] == ["B2", "B3"], "the run did not get the printed region set"
-        assert any("region slots" in r.getMessage() for r in caplog.records), (
-            "pressing Run left no record of what it was aimed at")
-    finally:
-        win._stop_worker(); win.close()
-
-
-def test_open_views_with_no_windows_still_refuses_in_a_sentence(qapp, squid_dataset):
-    win = _plate(squid_dataset)
-    try:
-        assert win._print_open_views_target("Run decon") is None
-        assert win._readout.text() == (
-            "Run on open views: no windows are open - open some first.")
-    finally:
-        win._stop_worker(); win.close()
-
-
-def test_windows_that_hold_no_regions_say_so_rather_than_claiming_none_are_open(qapp,
-                                                                                squid_dataset):
-    win = _plate(squid_dataset, _FakeWindow(2, []), _FakeWindow(5, []))
-    try:
-        assert win._print_open_views_target("Run decon") is None
-        assert "2 open window(s) hold no regions" in win._readout.text()
-    finally:
-        win._stop_worker(); win.close()
+def test_the_open_views_run_target_died_with_the_run_tab():
+    """One flow (Julio, 2026-08-25): runs launch from a view's operators row (Preview /
+    Run on plate); the run tab's destination picker and its 'Open views' target are gone.
+    The pure helpers (`describe_view_target`, `distinct_view_regions`) stay - the view-hue
+    painter still flattens through them."""
+    assert not hasattr(V.PlateWindow, "_build_run_tab")
+    assert not hasattr(V.PlateWindow, "_print_open_views_target")

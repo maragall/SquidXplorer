@@ -49,9 +49,14 @@ class _OperatorWorker(QThread):
     finished_ok = Signal()
 
     def __init__(self, operator: str, reader, meta, fov_index: dict, out_dir: str,
-                 regions=None, save: bool = True, n_fovs=1, operator_kwargs=None):
+                 regions=None, save: bool = True, n_fovs=1, operator_kwargs=None,
+                 z_level: int = 0):
         super().__init__()
         self._operator = operator
+        # The z plane the DISPLAY gets from a depth-keeping result: the requesting view's own
+        # in-view z (Julio, 2026-08-25: "decon runs on a z-level that's not in view"). Clamped
+        # per result in _result_pixels; 0 for a run no view asked for.
+        self._z_level = max(0, int(z_level or 0))
         self._reader, self._meta = reader, meta
         self._fov_index = fov_index
         self._out_dir = out_dir
@@ -102,7 +107,10 @@ class _OperatorWorker(QThread):
         """Composite one written field into the plate thumbnail (runs on write_plate writer threads)."""
         info = self._fov_index[region]
         ri, ci, well_id = *info["rc"], info["well_id"]
-        well = image[0, :, 0]  # (C, Y, X) -- the plate thumbnail's plane
+        # The plane the display gets: the requesting view's in-view z, clamped to the result's
+        # own depth (a z-reducer yields depth 1 whatever the view sits on).
+        z_shown = min(self._z_level, int(image.shape[2]) - 1)
+        well = image[0, :, z_shown]  # (C, Y, X) -- the plate thumbnail's plane
         box = self._boxes.get((region, fov))
         n_c = len(self._channels)
 
@@ -133,17 +141,19 @@ class _OperatorWorker(QThread):
         if self._region_op:
             return image[0]                       # (C, Nz, Y, X)
         self._z_dropped_note(int(image.shape[2]))
-        return well                               # (C, Y, X)
+        return well                               # (C, Y, X), cut at the in-view z in _on_well
 
     def _z_dropped_note(self, depth: int) -> None:
         """Say once per run that a per-FOV operator's extra planes are not reaching the layer."""
         if depth <= 1 or self._said_z_dropped:
             return
         self._said_z_dropped = True
-        log.info("%s: the layer shows z plane 0 of %d. A per-FOV operator's mosaic is re-fused "
-                 "for display one plane at a time, and only that plane is kept; the WRITTEN "
-                 "plate carries all %d. Stitch the region to see the whole volume in 3D.",
-                 self._operator, depth, depth)
+        z_shown = min(self._z_level, depth - 1)
+        log.info("%s: the layer shows z plane %d of %d - the plane the asking view is on. A "
+                 "per-FOV operator's mosaic is re-fused for display one plane at a time, and "
+                 "only that plane is kept; the WRITTEN plate carries all %d. Stitch the region "
+                 "to see the whole volume in 3D.",
+                 self._operator, z_shown, depth, depth)
 
     def _on_error(self, region, fov, exc):
         """Skip a failed well, mark its dot failed, and keep the run alive."""

@@ -1012,6 +1012,58 @@ Enforced by `tests/test_console_readable.py::test_no_gui_string_carries_an_em_or
 which sweeps every non-docstring string literal in `squidxplorer/` (a dash in a Python string
 is prose bound for a human surface). Docstrings and comments are out of scope.
 
+## ONE WINDOW + one flow + the knob principle (2026-08-25, branch one-window-dock)
+
+Julio's declutter directive (chart: `~/Downloads/napari dock all states.png`; plan:
+`AI-docs/SquidXplorer/in-progress/2026-08-25-one-window-slot-dock-plan.md`). The rules:
+
+- **ONE WINDOW**: the plate window keeps every book (runs, ingest, selection) but its VIEW
+  (`PlateOverview`) and the LOG render as SLOTS in the current view's left column.
+  `_viewer._PlateSlotBox` is the plate slot: FIXED 240 px, collapsible to a grip; the log
+  opens at 3/4 of it. `ViewerManager._sync_plate_slots` hosts on spawn and tab activation
+  and re-homes on close; `PlateWindow.adopt_plate_slots_home` is the never-an-orphan
+  guarantee (with no views left the plate window shows again - the app always has a
+  surface). In the working layout a hosted plate HIDES and the deck takes the work area;
+  `ViewDeck.bind_plate` makes the deck an app surface (drop-to-open, File/View menu
+  forwards, a "Plate Window" action to bring it back). Ingest mounts the rebuilt overview
+  through ONE mount point (`_mount_overview`), so a re-ingest lands in the live slot.
+  Widgets that can now die inside a hosting view tolerate it at teardown (the overview's
+  and log panel's timer stops, StatusRow's self-unhooking slots - each was a measured
+  abort out of a closeEvent).
+- **One flow, fewer buttons**: the operators row is Preview (this view's regions,
+  save=False) and Run on plate (save=True, plate-selection scope - also the set-bulk path).
+  "No body runs on whole plate to preview." Deleted with absence pins: the row's save
+  checkbox, every panel-level run/save button (StitcherPanel, GenericOperatorPanel,
+  RegisterPanel), the plate's destination-picker run tab, the right-edge `_operator_dock`
+  and its bulk cards, `_qtstyle.operator_card`. ⚙ controls INSERTS the operator's live
+  panel (the plate's `_op_tabs` widget, one source of truth) into a param slot under the
+  operators row; a second click removes it and the plate re-adopts the panel (never a
+  parentless orphan - one measured a segfault). A panel's refused setting PROPAGATES out
+  of `operator_kwargs_for` as the launch refusal (it was swallowed into running defaults);
+  the keep-every-plane combo label maps to `z_operator=None` through
+  `_op_panels.z_operator_choice`.
+- **The knob principle**: "the user should only tweak what can't be deduced from
+  acquisition filenames." `Param.advanced` (declaration-driven, never a name match) sends
+  a knob to a collapsed "advanced" section; headline is the exception. Decon's headline is
+  iterations + NI (the one PSF input no Squid file records); the NA edit is CUT - NA, mag,
+  dxy, dz, nz display read-only in the on-demand PSF slot, and a wrong rig profile is
+  handled by GUARDRAILS (`_decon.rig_profile_notes`: pixel size vs sensor x binning /
+  magnification, folder-name objective vs record, dz vs axial PSF extent - one advisory
+  log line each, the run proceeds on the record). Stitch declares registration_channel /
+  registration_t / correct_illumination advanced; its panel headline is z-handling +
+  register on/off.
+- **The turbo preview is REMOVED**: the QC sweep's picture is the in-view data layer under
+  the channel's OWN colormap; `DeconQCResultView` keeps the stepper, halo/core caption,
+  mean-delta metric and "use k iterations". `qc_composite`/`composite_centre_at`/
+  `turbo_rgb`/`GAP_RGB` are deleted from `_decon_qc` (the CLI montage stays).
+- **A depth-keeping preview shows the z the asking view is on**: the run carries
+  `z_level` (view `_z_slider_index` -> `run_operator` -> `_OperatorWorker`), the plane pick
+  clamps to the result's depth, dims stay put (pinned in `tests/test_decon_z_in_view.py`).
+  An ROI preview scopes to the box's FOVs (`{region: [fov, ...]}`), every channel.
+- **`RegionViewer.dispose` disarms the region/timepoint debounce timers** - a pending
+  single-shot fired into a torn-down window during the deleteLater drain (deterministic
+  segfault at PYTHONHASHSEED=0, gone with the disarm).
+
 ## Agent skills
 
 ### Issue tracker

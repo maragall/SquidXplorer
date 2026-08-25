@@ -494,6 +494,11 @@ class RegionViewer(QMainWindow):
         lv.setSpacing(4)
         lv.addWidget(self._build_view_controls(), 0)
         lv.addWidget(self.operator_panel(), 0)
+        # ONE WINDOW (Julio, 2026-08-25): the plate view and the log are SLOTS this column can
+        # host; `adopt_plate_slots` fills this layout when the manager elects this view.
+        self._plate_log_slot = QVBoxLayout()
+        self._plate_log_slot.setContentsMargins(0, 0, 0, 0)
+        lv.addLayout(self._plate_log_slot)
         dock_controls = getattr(pane, "dock_view_controls", None)
         if not (callable(dock_controls) and dock_controls(left_col)):
             lay.addWidget(left_col, 0)
@@ -738,12 +743,18 @@ class RegionViewer(QMainWindow):
             "away. Says so when the window is showing raw pixels, which have none.",
             self._show_operator_controls)
         opr.addWidget(self._btn_controls)
-        opr.addWidget(self._chip("Run", "Run the selected operator on THIS view's regions.",
-                                 self._run_view_operator))
-        self._save_chk = QCheckBox("save")
-        self._save_chk.setToolTip(self._SAVE_TIP_PLATE)   # re-derived per operator; see below
-        self._save_chk.setStyleSheet("QCheckBox{color:#c9d1d9;font-size:11px;}")
-        opr.addWidget(self._save_chk)
+        # ONE FLOW, fewer buttons (Julio, 2026-08-25): "They can preview on the window...
+        # After they preview, they can say run on plate, and then it will save to disk.
+        # No body runs on whole plate to preview." Preview is window-scoped and writes
+        # nothing; Run on plate is THE save path (and the bulk path - the cards died with
+        # the right-edge dock). The save checkbox is gone.
+        self._btn_preview = self._chip(
+            "Preview", "Preview the selected operator on THIS view's regions; nothing is "
+            "written to disk.", self._preview_view_operator)
+        opr.addWidget(self._btn_preview)
+        self._btn_run_plate = self._chip(
+            "Run on plate", self._RUN_PLATE_TIP, self._run_plate_operator)
+        opr.addWidget(self._btn_run_plate)
         ov.addLayout(opr)
         self._controls_note = QLabel("")
         self._controls_note.setStyleSheet("color:#8b949e;font-size:11px;border:none;")
@@ -753,14 +764,89 @@ class RegionViewer(QMainWindow):
         # NO "Match layers to raw" and no LUT chrome here: match-to-raw is shelved whole
         # (Julio, 2026-08-19) and the two-button LUT clipboard lives in the 2D/3D·ROI block.
         pv.addWidget(op_box)
+        # THE PARAM SLOT: ⚙ controls INSERTS the operator's panel here, directly under the
+        # operators row (Julio, 2026-08-25: "see this as an insertion to a list"). One slot,
+        # one panel at a time; the widget stays the plate's (_op_tabs), merely re-hosted.
+        self._param_slot = QVBoxLayout()
+        self._param_slot.setContentsMargins(0, 0, 0, 0)
+        pv.addLayout(self._param_slot)
 
         self._op_panel = panel
         self._refresh_controls_note()
         return panel
 
+    #: The operator panel currently inserted in this view's param slot, and its key.
+    _inserted_panel = None
+    _inserted_key = None
+
+    #: The inserted slot's height ceiling: a FIXED slot in the column (the chart's rule -
+    #: inserting a slot shrinks the flexible neighbours, never the whole window). The panel
+    #: scrolls inside itself.
+    _PARAM_SLOT_MAX_PX = 360
+
+    def _insert_param_slot(self, key: str, panel) -> None:
+        """Insert *panel* under the operators row, releasing any previously inserted one."""
+        self._remove_param_slot()
+        panel.setMaximumHeight(self._PARAM_SLOT_MAX_PX)
+        self._param_slot.addWidget(panel)
+        panel.setVisible(True)
+        self._inserted_panel = panel
+        self._inserted_key = str(key)
+
+    def _remove_param_slot(self) -> None:
+        """Take the inserted panel OUT without disposing it - it is the plate's live widget
+        (the run's single source of truth), so it must survive this view. The plate ADOPTS
+        it back: a parentless orphan awaiting deleteLater measured a segfault in the next
+        window's teardown."""
+        panel, key = self._inserted_panel, self._inserted_key
+        self._inserted_panel = self._inserted_key = None
+        if panel is None or not _alive(panel):
+            return
+        self._param_slot.removeWidget(panel)
+        panel.hide()
+        panel.setParent(None)
+        adopt = getattr(self._plate(), "adopt_operator_panel", None)
+        if callable(adopt) and key:
+            try:
+                adopt(key)
+            except Exception as exc:             # noqa: BLE001 - never let a re-home block
+                log.warning("view %s could not return %s's panel to the plate: %s: %s",
+                            self.window_id, key, type(exc).__name__, exc)
+
     def _plate(self):
         """The plate window, or None. The plate owns every operator panel; this window borrows."""
         return None if self._manager is None else self._manager.parent()
+
+    # -- ONE WINDOW: this view can host the plate view + log as slots (2026-08-25) --------------
+
+    #: Whether this view currently hosts the plate view + log slots.
+    _hosts_plate_slots = False
+
+    def adopt_plate_slots(self, plate_box, log_panel) -> bool:
+        """Host the plate's two slot widgets in this view's left column. Qt reparents them
+        out of any previous holder; returns whether the column exists to host in."""
+        slot = getattr(self, "_plate_log_slot", None)
+        if slot is None:
+            return False
+        slot.addWidget(plate_box)
+        slot.addWidget(log_panel)
+        plate_box.setVisible(True)
+        log_panel.setVisible(True)
+        self._hosts_plate_slots = True
+        return True
+
+    def release_plate_slots(self) -> None:
+        """Stop hosting: the plate ADOPTS its widgets home (they are never orphans)."""
+        if not self._hosts_plate_slots:
+            return
+        self._hosts_plate_slots = False
+        adopt = getattr(self._plate(), "adopt_plate_slots_home", None)
+        if callable(adopt):
+            try:
+                adopt()
+            except Exception as exc:             # noqa: BLE001 - a re-home must never block
+                log.warning("view %s could not return the plate slots: %s: %s",
+                            self.window_id, type(exc).__name__, exc)
 
     def _run_scope(self):
         """WHERE a run from this window goes: its regions, narrowed to the ROI's own FOVs."""
@@ -790,6 +876,8 @@ class RegionViewer(QMainWindow):
             return {}
         try:
             return dict(reader(str(key)) or {})
+        except ValueError:
+            raise                                # a REFUSED setting: the launch says it and stops
         except Exception as exc:                 # noqa: BLE001 - named, never a silent default
             log.warning("view %s could not read %s's parameters from the plate: %s: %s",
                         self.window_id, key, type(exc).__name__, exc)
@@ -911,17 +999,17 @@ class RegionViewer(QMainWindow):
             return
         self._refresh_controls_note()            # the note repeats what the run now gets
 
-    _SAVE_TIP_PLATE = ("Off = preview only (nothing written to disk). On = persist the "
-                       "operator result as an OME-Zarr.")
+    _RUN_PLATE_TIP = ("Run the selected operator over the plate selection (or the whole "
+                      "plate) and save the result to disk - the one save path.")
 
     def _refresh_save_tooltip(self, key) -> None:
-        """The save box says WHAT a save writes: a copy-saving operator's artifact is
-        stitched_<folder>, not an OME-Zarr — implying the wrong artifact is how a register
+        """The Run-on-plate chip says WHAT a save writes: a copy-saving operator's artifact
+        is stitched_<folder>, not an OME-Zarr — implying the wrong artifact is how a register
         preview read as "doesn't do anything"."""
-        chk = getattr(self, "_save_chk", None)
-        if chk is None:
+        btn = getattr(self, "_btn_run_plate", None)
+        if btn is None:
             return
-        tip = self._SAVE_TIP_PLATE
+        tip = self._RUN_PLATE_TIP
         try:
             from squidxplorer._engine import operator_saves_copy
             from squidxplorer._operations import operator_name
@@ -929,12 +1017,11 @@ class RegionViewer(QMainWindow):
             if key and operator_saves_copy(operator_name(str(key))):
                 src = getattr(self._reader, "source_id", None)
                 acq = Path(str(src)).name if src else "<folder>"
-                tip = ("Off = preview only (nothing written to disk). On = write "
-                       f"stitched_{acq} beside the acquisition (hardlinked copy with "
-                       "registered coordinates).")
+                tip = (f"Run over the plate selection and write stitched_{acq} beside the "
+                       "acquisition (hardlinked copy with registered coordinates).")
         except Exception:                            # noqa: BLE001 - a tooltip, never a crash
             pass
-        chk.setToolTip(tip)
+        btn.setToolTip(tip)
 
     def _window_operators(self) -> list:
         """THE OPERATORS FOR THIS WINDOW: every processing layer it holds, raw excluded."""
@@ -949,33 +1036,43 @@ class RegionViewer(QMainWindow):
             return []
 
     def _show_operator_controls(self) -> None:
-        """Raise the plate AND open the controls for the operators THIS WINDOW has."""
-        raised = self._manager is not None and self._manager.raise_plate()
-        if not raised:
-            self._say("controls: there is no plate window to open operator controls in.")
-            return
+        """INSERT the selected operator's parameter panel into THIS view's param slot.
 
+        Julio (2026-08-25): "see this as an insertion to a list" - the slot lands directly
+        under the operators row; a second click on the same operator removes it. The panel
+        is the plate's live widget (`_op_tabs`, the run's single source of truth), released
+        from wherever it was hosted and re-hosted here.
+        """
         combo = getattr(self, "_op_combo", None)
         key = combo.currentData() if combo is not None else None
         if not key:
             self._say("controls: no operator is selected in this window's dropdown, so there is "
-                      "nothing to tune. The plate is in front.")
+                      "nothing to tune.")
             return
+        from squidxplorer._operations import operator_name
 
-        plate = self._manager.parent()
-        activate = getattr(plate, "_activate_operator", None)
-        if activate is None:
-            self._say(f"controls: this plate cannot open operator tabs, so {key} cannot be tuned "
-                      "from here.")
+        op_key = operator_name(str(key))
+        if self._inserted_key == op_key and self._inserted_panel is not None:
+            self._remove_param_slot()                    # a toggle: the second click removes
+            return
+        plate = self._plate()
+        release = getattr(plate, "release_operator_panel", None)
+        if not callable(release):
+            self._say("controls: no plate is holding the operator panels.")
             return
         try:
-            activate(str(key))
+            panel = release(op_key)
         except Exception as exc:                         # noqa: BLE001 - named, never a dead click
             self._say(f"controls: could not open {key}: {exc}")
             return
+        if panel is None:
+            self._say(f"controls: no controls exist for {key} (open an acquisition first, or "
+                      "the operator declares nothing tunable).")
+            return
+        self._insert_param_slot(op_key, panel)
         self._refresh_controls_note()
-        self._say(f"controls: {combo.currentText()} - open on the plate window. This window will "
-                  f"run it {self._render_mode.upper()} with {self._params_summary(str(key))}.")
+        self._say(f"controls: {combo.currentText()} - inserted below. This window will run it "
+                  f"{self._render_mode.upper()} with {self._params_summary(str(key))}.")
 
     def _refresh_record_chip(self) -> None:
         """Enable the record chip only when there is a movie to make, and SAY WHY when there is not."""
@@ -1220,8 +1317,24 @@ class RegionViewer(QMainWindow):
         except Exception:                                 # noqa: BLE001 - a readout, never fatal
             return
 
-    def _run_view_operator(self) -> None:
-        """Run the operator picked in this window's dropdown on THIS view's regions, via the real engine."""
+    def _preview_view_operator(self) -> None:
+        """PREVIEW: the selected operator on THIS view's regions; nothing is written."""
+        self._launch_operator(save=False, regions=self._run_scope())
+
+    def _run_plate_operator(self) -> None:
+        """RUN ON PLATE: the one SAVE path - the plate selection (or the whole plate), to disk.
+
+        This is also the bulk path (the right-edge dock's cards are retired): with an
+        acquisition SET loaded and the plate's bulk box ticked, the save goes over every
+        member, which needs the run launched without a requester (`run_over_set`'s contract).
+        """
+        plate = self._plate()
+        bulk = bool(getattr(plate, "_acq_set", None)) and bool(
+            getattr(getattr(plate, "_bulk_all_box", None), "isChecked", lambda: False)())
+        self._launch_operator(save=True, regions=None, requester=None if bulk else self)
+
+    def _launch_operator(self, *, save: bool, regions, requester="self") -> None:
+        """The one launch: Preview and Run on plate differ only in scope and `save`."""
         if self._run_operator is None:
             self._say("the operator engine isn't connected to this window.")
             return
@@ -1229,22 +1342,31 @@ class RegionViewer(QMainWindow):
         if not key:
             self._say("no operator selected.")
             return
-        regions = self._run_scope()
-        save = bool(self._save_chk.isChecked()) if getattr(self, "_save_chk", None) is not None else False
-        kwargs = dict(self._plate_operator_kwargs(key))
+        try:
+            kwargs = dict(self._plate_operator_kwargs(key))
+        except ValueError as exc:                # a refused panel setting: SAY it, run nothing
+            self._say(str(exc))
+            return
         kwargs.update(self._z_kwargs_for_mode(key, kwargs))
         # Whether THIS run leaves a disk artifact: the save box, or a copy-saving operator's own
         # `copy` kwarg riding through from its panel. Read by `operator_done`, which must say
         # how to GET the artifact when a copy-saving preview run left none (Julio, 2026-08-19:
         # "Registering the wells doesn't do anything").
         self._op_run_wrote = bool(save or (kwargs or {}).get("copy"))
+        if requester == "self":
+            requester = self
         try:
             log.info("view %s running %s on %s with %s", self.window_id, key,
-                     (regions if isinstance(regions, dict) else list(regions)), kwargs)
-            self._run_operator(key, regions=regions, save=save, requester=self,
-                               operator_kwargs=kwargs)
+                     ("the plate scope" if regions is None else
+                      (regions if isinstance(regions, dict) else list(regions))), kwargs)
+            self._run_operator(key, regions=regions, save=save, requester=requester,
+                               operator_kwargs=kwargs,
+                               # A depth-keeping preview must show THE PLANE THIS VIEW IS ON
+                               # (Julio, 2026-08-25), so the run carries the view's own z.
+                               z_level=self._z_slider_index())
             mode = "saving" if save else "previewing"
-            self._echo(f"{mode} {self._op_combo.currentText()} on {self._view_label(regions)} "
+            where = ("the plate scope" if regions is None else self._view_label(list(regions)))
+            self._echo(f"{mode} {self._op_combo.currentText()} on {where} "
                        f"[{self._render_mode.upper()}] · {self._params_summary(key)}.")
         except Exception as exc:                          # noqa: BLE001 - named to the window
             self._say(f"could not start {self._op_combo.currentText()}: {exc}")
@@ -1270,7 +1392,7 @@ class RegionViewer(QMainWindow):
         bar.setFormat(report.sentence())
         bar.show()
 
-    #: Whether the run this window last asked for leaves a disk artifact; see _run_view_operator.
+    #: Whether the run this window last asked for leaves a disk artifact; see _launch_operator.
     _op_run_wrote = False
 
     def operator_done(self, action: str, seconds: float) -> None:
@@ -2324,6 +2446,27 @@ class RegionViewer(QMainWindow):
         if self._disposed:
             return
         self._disposed = True
+        # DISARM THE DEBOUNCE TIMERS FIRST: a pending single-shot fires into a torn-down
+        # window during the deleteLater drain (the plate's closeEvent records the identical
+        # measured segfault; these two were never stopped here).
+        for name in ("_load_timer", "_time_load_timer"):
+            timer = getattr(self, name, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                    timer.timeout.disconnect()
+                except (TypeError, RuntimeError):
+                    pass
+        # RELEASE, never dispose: the inserted parameter panel and the hosted plate/log slots
+        # are the PLATE's live widgets; dying with this view would lose them for good.
+        try:
+            self._remove_param_slot()
+        except Exception:                            # noqa: BLE001 - teardown must continue
+            pass
+        try:
+            self.release_plate_slots()
+        except Exception:                            # noqa: BLE001 - teardown must continue
+            pass
         panel = self._op_panel
         self._op_panel = None
         if panel is not None and _alive(panel):
@@ -2469,7 +2612,6 @@ class ViewerManager(QObject):
         #: Installs the collapsible Operators dock on a new deck / free window, or None (a
         #: manager built by a test, or a library caller). Set by `PlateWindow`; consulted only
         #: by `deck()` and `_spawn`, so the dock is wired ONCE per host, never per region.
-        self.operator_dock_installer = None
         self.defaults = ViewDefaults()
 
         self._run_progress = None
@@ -2658,11 +2800,6 @@ class ViewerManager(QObject):
             deck.raise_()
             deck.activateWindow()
         else:
-            installer = self.operator_dock_installer
-            if installer is not None and getattr(win, "_operator_dock", None) is None:
-                # A free-standing view gets the same collapsible bulk-cards dock as the deck;
-                # its own operator panel already lives in its left column.
-                win._operator_dock = installer(win)
             win.show()
             win.raise_()
             win.activateWindow()
@@ -2670,7 +2807,40 @@ class ViewerManager(QObject):
         self.windowOpened.emit(win)
         self.windowsChanged.emit()
         self.viewFocused.emit(list(win._regions))
+        self._sync_plate_slots()
         return win
+
+    def _sync_plate_slots(self, *_args) -> None:
+        """Host the plate view + log in the DECK's current view (one window, 2026-08-25).
+
+        The plate keeps its books; only where the two widgets render moves. With no view to
+        host (deck empty, or free-standing windows), the plate ADOPTS them home and shows
+        itself again - the app always has a surface.
+        """
+        plate = self.parent()
+        take = getattr(plate, "plate_slot_widgets", None)
+        if not callable(take):
+            return
+        deck = self.deck(create=False) if self.tabbed_views else None
+        view = deck.current_page() if deck is not None else None
+        if view is None or not hasattr(view, "adopt_plate_slots"):
+            adopt = getattr(plate, "adopt_plate_slots_home", None)
+            if callable(adopt):
+                adopt()
+            return
+        if getattr(view, "_hosts_plate_slots", False):
+            return                               # already the host; nothing to move
+        widgets = take()
+        if widgets is None:
+            return                               # nothing to host before an ingest
+        for w in self._windows.values():
+            w._hosts_plate_slots = False
+        if not view.adopt_plate_slots(*widgets):
+            plate.adopt_plate_slots_home()
+            return
+        hide = getattr(plate, "maybe_hide_for_one_window", None)
+        if callable(hide):
+            hide(deck)
 
     def _replay_cached_results(self, win: RegionViewer) -> int:
         """Give a NEWLY OPENED window every operator result already computed for its region."""
@@ -2737,11 +2907,15 @@ class ViewerManager(QObject):
 
         deck = ViewDeck(index=len(self._decks) + 1)
         deck.pageActivated.connect(self.note_focus)
-        # THE BULK-CARDS OPERATOR DOCK, once per deck. It swaps nothing on tab changes: each
-        # view's own operator panel lives in that view's LEFT column (2026-08-19).
-        installer = self.operator_dock_installer
-        if installer is not None:
-            deck._operator_dock = installer(deck)
+        # ONE WINDOW: the current tab hosts the plate view + log; a tab switch re-homes them.
+        deck.pageActivated.connect(self._sync_plate_slots)
+        # ...and the deck is the app surface while the plate window hides: drop-to-open and
+        # the essential menu actions forward to the plate.
+        bind = getattr(deck, "bind_plate", None)
+        if callable(bind):
+            bind(self.parent())
+        # NO right-edge operator dock (retired 2026-08-25): a view's Run on plate is the bulk
+        # path, and each view's operator panel lives in that view's own LEFT column.
         # A BOUND METHOD, NEVER A SELF-CAPTURING LAMBDA. PyQt keeps a lambda alive in a slot proxy
         # parented to the SENDER, so `destroyed` -- which fires while the deck is being torn down --
         # would call into this manager whether or not the manager still exists. Connected as a
@@ -2849,6 +3023,12 @@ class ViewerManager(QObject):
         if self._focused_id == wid:
             self._focused_id = None
         self.windowsChanged.emit()
+        # ONE WINDOW: the closed view may have hosted the plate view + log. Re-home them into
+        # the deck's current page, or back into the plate window when no view is left.
+        try:
+            self._sync_plate_slots()
+        except Exception as exc:                 # noqa: BLE001 - a re-home must not block a close
+            log.warning("could not re-home the plate slots: %s: %s", type(exc).__name__, exc)
 
     def _poll_memory(self) -> None:
         frac = _process_memory_fraction()
@@ -2899,35 +3079,55 @@ class StatusRow(QObject):
 
     def _on_run_progress(self, report) -> None:
         """Draw (or take down) the work bar. ``report`` is a ``ProgressReport``, or None for idle."""
-        if report is None:
-            self._work_label.hide()
-            self._work_bar.hide()
-            return
         try:
-            sentence, percent = report.sentence(), report.percent
-        except Exception:                            # noqa: BLE001 - a bad report is not a crash
-            self._work_label.hide()
-            self._work_bar.hide()
-            return
-        self._work_label.setText(sentence)
-        if percent is None:
-            self._work_bar.setRange(0, 0)
-        else:
-            self._work_bar.setRange(0, 100)
-            self._work_bar.setValue(int(percent))
-        self._work_label.show()
-        self._work_bar.show()
+            if report is None:
+                self._work_label.hide()
+                self._work_bar.hide()
+                return
+            try:
+                sentence, percent = report.sentence(), report.percent
+            except Exception:                        # noqa: BLE001 - a bad report is not a crash
+                self._work_label.hide()
+                self._work_bar.hide()
+                return
+            self._work_label.setText(sentence)
+            if percent is None:
+                self._work_bar.setRange(0, 0)
+            else:
+                self._work_bar.setRange(0, 100)
+                self._work_bar.setValue(int(percent))
+            self._work_label.show()
+            self._work_bar.show()
+        except RuntimeError:
+            # Adopted by the log panel, which can die inside a hosting view (one window,
+            # 2026-08-25): a dead bar unhooks this slot for good.
+            sender = self.sender()
+            try:
+                if sender is not None:
+                    sender.runProgressChanged.disconnect(self._on_run_progress)
+            except (AttributeError, TypeError, RuntimeError):
+                pass
 
     def _on_memory(self, frac: float) -> None:
         pct = max(0, min(100, int(round(frac * 100))))
-        self._mem_bar.setValue(pct)
-        warn = pct >= 85
-        self._mem_label.setText("Memory - HIGH, close a view" if warn else "Memory")
-        color = "#f85149" if warn else "#3fb950"
-        self._mem_bar.setStyleSheet(
-            "QProgressBar{background:#161b22;border:1px solid #30363d;border-radius:3px;}"
-            f"QProgressBar::chunk{{background:{color};border-radius:3px;}}"
-        )
+        try:
+            self._mem_bar.setValue(pct)
+            warn = pct >= 85
+            self._mem_label.setText("Memory - HIGH, close a view" if warn else "Memory")
+            color = "#f85149" if warn else "#3fb950"
+            self._mem_bar.setStyleSheet(
+                "QProgressBar{background:#161b22;border:1px solid #30363d;border-radius:3px;}"
+                f"QProgressBar::chunk{{background:{color};border-radius:3px;}}"
+            )
+        except RuntimeError:
+            # The bars are ADOPTED by the log panel, which can now live (and die) inside a
+            # hosting view (one window, 2026-08-25): a dead bar unhooks this slot for good.
+            sender = self.sender()
+            try:
+                if sender is not None:
+                    sender.memoryChanged.disconnect(self._on_memory)
+            except (AttributeError, TypeError, RuntimeError):
+                pass
 
 
 def _process_memory_fraction() -> Optional[float]:

@@ -74,7 +74,6 @@ from squidxplorer._plate_shape import PlateShapeError
 from squidxplorer._qt_tabs import _DetachTabBar, _DetachTabs, _FloatWindow  # noqa: F401 (re-export)
 from squidxplorer._qtstyle import dark_palette as _dark_palette
 from squidxplorer._qtstyle import hline as _hline
-from squidxplorer._qtstyle import operator_card as _operator_card
 from squidxplorer._time_point import TimePointBar
 from squidxplorer._region_nav import RegionCursor
 from squidxplorer._run import OperatorRun
@@ -139,7 +138,6 @@ _CONTROL_BLUE = _qtstyle.CONTROL_BLUE
 
 _STATUS = _qtstyle.STATUS   # processing-status hue coding
 _TABS_DARK = _qtstyle.TABS_DARK
-_CARD_QSS = _qtstyle.CARD_QSS
 _BTN_QSS = _qtstyle.BTN_QSS
 _COMBO_QSS = _qtstyle.COMBO_QSS
 _CHECK_QSS = _qtstyle.CHECK_QSS
@@ -201,6 +199,57 @@ class _LogReadout:
 
 #: Operator-over-Log split inside the band's right column (starting position).
 _RIGHT_COL_SIZES = [215, 165]
+
+
+class _PlateSlotBox(QWidget):
+    """THE PLATE SLOT: a fixed-height box the plate view renders in when it is hosted
+    inside the view window's left column (one window, Julio 2026-08-25), collapsible to a
+    grip. Fixed on purpose: inserting a slot shrinks the FLEXIBLE neighbours (layer
+    controls, toggles, log), never this one.
+    """
+
+    #: The slot's fixed height while open, and the grip's height while collapsed.
+    PLATE_SLOT_PX = 240
+    GRIP_PX = 18
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.collapsed = False
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        self.grip = QPushButton("▾ plate")
+        self.grip.setCursor(Qt.PointingHandCursor)
+        self.grip.setToolTip("Collapse or expand the plate view.")
+        self.grip.setStyleSheet(
+            "QPushButton{background:#161b22;color:#8b98ad;border:1px solid #232b3a;"
+            "border-radius:3px;font-size:10px;padding:1px 6px;text-align:left;}"
+            "QPushButton:hover{color:#c9d1d9;}")
+        self.grip.setFixedHeight(self.GRIP_PX - 4)
+        self.grip.clicked.connect(self.toggle)
+        v.addWidget(self.grip, 0)
+        self._body = QWidget()
+        self._bv = QVBoxLayout(self._body)
+        self._bv.setContentsMargins(0, 0, 0, 0)
+        self._bv.setSpacing(0)
+        v.addWidget(self._body, 1)
+        self._apply_height()
+
+    def set_view(self, widget: QWidget) -> None:
+        """Mount the plate view (rebuilt per ingest) as the slot's body content."""
+        self._bv.addWidget(widget, 1)
+        widget.setVisible(not self.collapsed)
+
+    def toggle(self, *_) -> None:
+        self.collapsed = not self.collapsed
+        self._body.setVisible(not self.collapsed)
+        self.grip.setText("▸ plate" if self.collapsed else "▾ plate")
+        self._apply_height()
+
+    def _apply_height(self) -> None:
+        h = self.GRIP_PX if self.collapsed else self.PLATE_SLOT_PX
+        self.setMinimumHeight(h)
+        self.setMaximumHeight(h)
 
 
 # --- the main window: the plate on top, the Open View list and the console below --------------
@@ -328,13 +377,10 @@ class PlateWindow(QMainWindow):
         # out of step with it.
         self._viewer_manager.viewFocused.connect(lambda _regions: self._refresh_plate_navigation())
         self._viewer_manager.windowsChanged.connect(self._refresh_plate_navigation)
-        # THE OPERATOR CARDS LIVE IN THE VIEWS WINDOW (2026-08-19): the manager installs the
-        # collapsible dock once per deck / free window it constructs; the cards it holds call
-        # this window's `_activate_operator`, so the panels still open here.
-        self._op_cards = {}
-        self._op_docks = []
+        # NO right-edge operator dock and NO bulk cards (Julio, 2026-08-25: "I think that the
+        # operator right hand dock is obsolete"): a view's Run on plate IS the bulk path, and
+        # ⚙ controls inserts the operator's panel into that view's own left column.
         self._ops_enabled = False
-        self._viewer_manager.operator_dock_installer = self._install_operator_dock
         # THE PLATE FOLLOWS THE WINDOWS' napari (Task 8.1). Julio: "there shouldn't be any controls
         # for the plate view. It just reacts to toggles and contrast adjustments in napari." With no
         # central pane left, the napari the plate must react to is the one inside each window, so
@@ -1023,78 +1069,6 @@ class PlateWindow(QMainWindow):
         self._rescale_fonts()
 
     # -- the Operators cards: a scrollable launcher, living in the VIEWS window's dock ------------
-    def _build_operator_cards(self, dock=None) -> QWidget:
-        """The Operators card launcher: a scrollable list of operator blocks — no header, no
-        footer (Julio, 2026-07-23). Each block opens that operator's panel IN ITS OWN DOCK's
-        panel page (Julio, 2026-08-24: "the UI appears in the plate window, rather than as a tab
-        in that same collapsible dock" — a complaint, so the tab route died for card clicks);
-        operators apply to the plate SELECTION (Cmd/Ctrl-A picks the whole plate). Since
-        2026-08-19 the launcher lives in the VIEWS window as a collapsible right-edge dock
-        (`_operator_dock`), built here because the cards are the PLATE's capability list. Julio
-        earlier rejected a collapsible operators chip in the window's centre-top toolbar; this
-        right-edge dock is the explicitly requested different thing.
-
-        Gallery View is NOT a card (it arranges windows, see the View menu — 2026-08-02, "I
-        guess I don't understand how this can be treated as an operator in bulk").
-        """
-        pane = QWidget()
-        pane.setStyleSheet(f"background:{_BG};")
-        v = QVBoxLayout(pane)
-        v.setContentsMargins(8, 8, 8, 8)
-        v.setSpacing(0)
-
-        stack = QWidget()
-        sv = QVBoxLayout(stack)
-        sv.setContentsMargins(0, 0, 0, 0)
-        sv.setSpacing(8)
-        # `_op_cards` is rebuilt per dock; with several hosts the LATEST build is the one tests
-        # and `_activate_operator` reach by name, and `_enable_operators` walks `_op_docks` so
-        # every host's cards gate together.
-        self._op_cards = {}
-        # Processing operators in registry order (Minerva's terminal card was shelved 2026-08-19).
-        for op in _OPERATIONS:
-            # ELIDED, not shortened: the blurb is where the registry says what the operator
-            # actually does, and this pane is ~300 px wide. See _qtstyle.operator_card.
-            card = _operator_card(op.label, op.blurb)
-            card.setEnabled(self._ops_enabled)             # enabled once an acquisition loads
-            card.setCursor(Qt.PointingHandCursor)
-            card.setStyleSheet(_CARD_QSS)
-            card.setMinimumHeight(54)
-            card.clicked.connect(lambda _=False, k=op.key, d=dock:
-                                 self._activate_operator(k, dock=d))
-            sv.addWidget(card)
-            self._op_cards[op.key] = card
-        sv.addStretch(1)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
-        scroll.setWidget(stack)
-        v.addWidget(scroll, 1)
-        pane._op_cards = self._op_cards
-        return pane
-
-    def _install_operator_dock(self, host) -> "Optional[QWidget]":
-        """Put the collapsible Operators dock on *host* (a ViewDeck or a free RegionViewer).
-
-        Called by `ViewerManager` ONCE at deck/window construction — never per region — through
-        `operator_dock_installer`. Collapsed by default to a thin titled grip on the right edge.
-        """
-        from squidxplorer._operator_dock import OperatorDock
-
-        try:
-            # The dock exists BEFORE its cards so each card's click can name the dock it lives
-            # in — a clicked card opens its panel on THAT dock's panel page (2026-08-24).
-            dock = OperatorDock(host)
-            dock.set_cards(self._build_operator_cards(dock=dock))
-        except Exception as exc:                         # noqa: BLE001 - a dock is never worth a crash
-            log.warning("could not build the operator dock: %s: %s", type(exc).__name__, exc)
-            return None
-        self._op_docks = [d for d in getattr(self, "_op_docks", []) if _widget_alive(d)]
-        self._op_docks.append(dock)
-        return dock
-
     # -- the Gallery View and the native-3D popout are LAUNCHED from here, not implemented here:
     # -- `_gallery_launch` owns both (thin delegates, because tests and the control wiring reach
     # -- these by name on the window). -------------------------------------------------------------
@@ -1648,17 +1622,23 @@ class PlateWindow(QMainWindow):
             return {}
         try:
             kwargs = dict(reader() or {})
-        except Exception as exc:                 # noqa: BLE001 - a refused setting, NAMED
+        except ValueError:
+            # A REFUSED SETTING (the panel's own sentence, e.g. a feather wider than the
+            # tile). Propagate: swallowing it here ran the operator with the DEFAULTS while
+            # every control on screen said otherwise.
+            raise
+        except Exception as exc:                 # noqa: BLE001 - an unreadable panel, NAMED
             log.warning("%s panel could not report its parameters: %s: %s",
                         key, type(exc).__name__, exc)
             return {}
         # The stitcher's z handling lives on its own combo rather than in `kwargs()` (which is
-        # `stitch_region`'s keyword set), and `StitcherPanel._run` adds it on the way out. It is a
-        # PARAMETER of the run either way, so it is added here too -- otherwise the window's Run
-        # silently reverted the one control this round of feedback was about.
+        # `stitch_region`'s keyword set). It is a PARAMETER of the run, so it is added here;
+        # the keep-every-plane label spells z_operator=None (`z_operator_choice`).
         combo = getattr(panel, "z_operator_combo", None)
         if combo is not None and "z_operator" not in kwargs:
-            kwargs["z_operator"] = combo.currentText()
+            from squidxplorer._op_panels import z_operator_choice
+
+            kwargs["z_operator"] = z_operator_choice(combo.currentText())
         return kwargs
 
     def operator_params_text(self, key: str) -> str:
@@ -1673,7 +1653,10 @@ class PlateWindow(QMainWindow):
         printed text and the run come to disagree, which is the thing being fixed. The window asks
         when it repaints, so the answer cannot be stale.
         """
-        kwargs = self.operator_kwargs_for(key)
+        try:
+            kwargs = self.operator_kwargs_for(key)
+        except ValueError as exc:                # a refused setting: the summary IS the refusal
+            return str(exc)
         if not kwargs:
             return "defaults"
         parts = []
@@ -1734,29 +1717,22 @@ class PlateWindow(QMainWindow):
         except Exception as exc:                 # noqa: BLE001 - a refused value, NAMED
             return f"{key}: {type(exc).__name__}: {exc}"
 
-    def _activate_operator(self, key: str, dock=None):
-        """Operator card / menu clicked: open the operator's UI.
+    def _activate_operator(self, key: str):
+        """Operator menu clicked: open the operator's UI as a plate tab.
 
         Two panel sources, in this order, and NEITHER of them is silent:
 
-        1. a HAND-WRITTEN panel, named by the ``Operation`` template's ``build_tab``. These do more
-           than parameter entry (``StitcherPanel`` converts units and refuses a plane-op;
-           ``DeconQCPanel`` runs the turbo QC sweep inline), so they win.
+        1. a HAND-WRITTEN panel, named by the ``Operation`` template's ``build_tab``
+           (``StitcherPanel`` converts units and refuses a plane-op; ``DeconQCPanel`` runs
+           the QC sweep inline), so they win.
         2. otherwise a panel built FROM THE DECLARATION — :class:`squidxplorer._param_panel
-           .GenericOperatorPanel` over the operator's ``params``. This is how an operator
-           discovered from somebody else's package gets real controls without an edit here.
+           .GenericOperatorPanel` over the operator's ``params``.
 
-        WHERE it opens (2026-08-24, Julio: "When I click on an operator on the operator
-        collapsible dock, the UI appears in the plate window, rather than as a tab in that same
-        collapsible dock" — a complaint): a card click passes its own *dock* and the panel opens
-        on that dock's panel page. Without a *dock* (menus, a view's ⚙ controls) the panel opens
-        where it already lives — the hosting dock if one holds it, else a plate tab as before.
-        ONE live panel per key either way: the widget stays in ``_op_tabs``, so
-        ``operator_kwargs_for`` and app-exit disposal see it wherever it is hosted.
-
-        This method used to end at step 1 with a bare ``if op is not None:``, so a key the card
-        table did not know made the click land on NOTHING: no tab, no error, no line in the
-        readout. Silence was the bug. Every path below now opens a panel or says why it cannot.
+        The right-edge dock and its cards are retired (2026-08-25); a view's ⚙ controls
+        inserts the SAME panel (``ensure_operator_panel`` + ``release_operator_panel``) into
+        that view's own left column. ONE live panel per key: the widget stays in
+        ``_op_tabs``, so ``operator_kwargs_for`` and app-exit disposal see it wherever it is
+        hosted, and this method re-tabs a panel a view currently holds.
         """
         if self._reader is None or self._overview is None:
             self._readout.setText("open an acquisition first")
@@ -1772,50 +1748,122 @@ class PlateWindow(QMainWindow):
                 self._readout.setText(why)
                 return
             title, builder = operator_label(key), (lambda k=key: GenericOperatorPanel(self, k))
-        if dock is None:
-            dock = self._dock_hosting(key)     # a dock-homed panel stays home for menu opens
-        if dock is not None:
-            self._open_op_in_dock(key, title, builder, dock)
-        else:
-            self._open_op_tab(key, title, builder)
+        self._open_op_tab(key, title, builder)
 
-    def _dock_hosting(self, key: str):
-        """The operator dock currently hosting *key*'s panel, or ``None``."""
-        panel = (getattr(self, "_op_tabs", None) or {}).get(str(key))
+    def release_operator_panel(self, key: str):
+        """Detach *key*'s live panel from wherever it is hosted and hand it over.
+
+        THE seam a view's ⚙ controls uses to insert the panel into its own left column:
+        the same widget (state and all) leaves the plate's tab bar — or another view's
+        slot, Qt reparenting handles that — and stays filed in ``_op_tabs``. ``None`` when
+        no panel can exist."""
+        panel = self.ensure_operator_panel(key)
         if panel is None:
             return None
-        for dock in getattr(self, "_op_docks", []):
-            if _widget_alive(dock) and dock.panel() is panel:
-                return dock
-        return None
+        i = self._left_tabs.indexOf(panel)
+        if i >= 0:
+            self._left_tabs.removeTab(i)
+            self._sync_left_tabs_visible()
+        return panel
 
-    def _open_op_in_dock(self, key: str, title: str, builder, dock) -> None:
-        """Open (or re-show) *key*'s panel on *dock*'s panel page.
+    def adopt_operator_panel(self, key: str) -> None:
+        """Take *key*'s live panel back as a plate tab when nothing else hosts it.
 
-        The panel is built once and FILED IN ``_op_tabs`` like a tab-hosted one — that registry
-        is what ``operator_kwargs_for`` reads at run launch and what ``closeEvent`` disposes, so
-        a dock-hosted panel's parameters reach the run and its worker is joined at exit. A panel
-        currently open as a plate tab (or on another dock) MOVES here: one live panel per key,
-        or two surfaces would disagree about the parameters of one run.
+        The other half of :meth:`release_operator_panel`: a panel a view's param slot lets
+        go of must never be left a parentless orphan (a deleteLater on one measured a
+        segfault in the next window's teardown), so removal hands it straight back here.
         """
-        win = self._floating.get(key)
-        if win is not None:                    # detached into its own window: raise it instead
-            win.raise_()
-            win.activateWindow()
+        panel = (getattr(self, "_op_tabs", None) or {}).get(str(key))
+        if panel is None or not _widget_alive(panel):
             return
-        w = self._op_tabs.get(key)
-        if w is None:
-            w = builder()
-            self._op_tabs[key] = w
+        if self._left_tabs.indexOf(panel) < 0:
+            panel.setMaximumHeight(16777215)     # undo the param slot's fixed-slot ceiling
+            self._left_tabs.addTab(panel, operator_label(str(key)))
+            panel.setVisible(True)
+        self._sync_left_tabs_visible()
+
+    # -- ONE WINDOW: the plate VIEW and the LOG render as slots in the view window ---------------
+    # Julio (2026-08-25): "this refactor enables us to have only one window." The books stay
+    # here; only WHERE the two widgets render moves. The manager drives hosting; these are the
+    # two halves of the seam, and `adopt_plate_slots_home` is the never-an-orphan guarantee.
+
+    #: The fixed-height collapsible box the plate view rides in while hosted, or None.
+    _plate_slot_box = None
+    #: Whether the plate view + log are currently hosted by a view.
+    _plate_hosted = False
+    #: Whether the working layout hid this window because a view hosts its slots.
+    _hidden_for_one_window = False
+
+    def plate_slot_widgets(self):
+        """``(plate_slot_box, log_panel)`` for a view to host, or ``None`` before an ingest."""
+        if self._overview is None or not _widget_alive(self._overview):
+            return None
+        box = self._plate_slot_box
+        if box is None or not _widget_alive(box):
+            box = self._plate_slot_box = _PlateSlotBox()
+        self._plate_hosted = True
+        self._mount_overview()
+        # The log opens at 3/4 of the plate slot's height (the chart's rule); flexible below.
+        self._log_panel.setMaximumHeight(int(box.PLATE_SLOT_PX * 3 / 4))
+        return box, self._log_panel
+
+    def _mount_overview(self) -> None:
+        """The ONE place the (per-ingest rebuilt) overview lands: the hosted slot, else home."""
+        if self._overview is None or not _widget_alive(self._overview):
+            return
+        if self._plate_hosted and self._plate_slot_box is not None \
+                and _widget_alive(self._plate_slot_box):
+            self._plate_slot_box.set_view(self._overview)
         else:
-            i = self._left_tabs.indexOf(w)
-            if i >= 0:                         # leaves the plate's bar: the dock is its home now
-                self._left_tabs.removeTab(i)
-                self._sync_left_tabs_visible()
-            other = self._dock_hosting(key)
-            if other is not None and other is not dock:
-                other.release_panel()
-        dock.show_panel(w, title)
+            self._left_l.addWidget(self._overview, 1)
+            self._overview.show()
+
+    def adopt_plate_slots_home(self) -> None:
+        """Take the plate view and the log BACK into this window (idempotent).
+
+        Called when the hosting view goes away — the widgets must never be orphans, and with
+        no view left the plate window is the app's only surface, so it shows again.
+        """
+        self._plate_hosted = False
+        box = self._plate_slot_box
+        if box is not None and _widget_alive(box):
+            box.hide()
+            box.setParent(self)                  # parked, never parentless
+        if self._overview is not None and _widget_alive(self._overview):
+            self._mount_overview()
+        log_panel = getattr(self, "_log_panel", None)
+        if log_panel is not None and _widget_alive(log_panel):
+            log_panel.setMaximumHeight(16777215)
+            col = getattr(self, "_right_col", None)
+            if col is not None and log_panel.parentWidget() is not col:
+                col.addWidget(log_panel)
+                col.setSizes(list(_RIGHT_COL_SIZES))
+            log_panel.setVisible(True)
+        if self._hidden_for_one_window:
+            self._hidden_for_one_window = False
+            self.show()
+
+    def maybe_hide_for_one_window(self, deck=None) -> None:
+        """In the WORKING LAYOUT, a hosted plate means ONE window: hide this one and give the
+        deck the whole work area. A library caller's plate (no default layout) stays visible."""
+        if not (self.default_layout and self._plate_hosted) or self._hidden_for_one_window:
+            return
+        screen = window_screen(self)
+        self._hidden_for_one_window = True
+        self.hide()
+        if deck is None or screen is None:
+            return
+        try:
+            avail = screen.availableGeometry()
+            frame, client = deck.frameGeometry(), deck.geometry()
+            deck.setGeometry(
+                avail.left() + (client.left() - frame.left()),
+                avail.top() + (client.top() - frame.top()),
+                avail.width() - (frame.width() - client.width()),
+                avail.height() - (frame.height() - client.height()),
+            )
+        except Exception:                        # noqa: BLE001 - geometry is never worth a crash
+            pass
 
     def _op_tab_shell(self, title: str, blurb: str) -> tuple:
         """A standard operator-UI tab body: title + blurb, returns (widget, vbox) to fill."""
@@ -1831,7 +1879,12 @@ class PlateWindow(QMainWindow):
         return w, v
 
     def _build_mip_tab(self) -> QWidget:
-        return self._build_run_tab(_OPERATIONS_BY_KEY["mip"])
+        # One flow (2026-08-25): the old run tab (destination picker, Run-on combo, subset
+        # preview spinner, save checkbox) is gone — the view's operators row launches every
+        # run. mip declares no params, so its panel is the generic declaration form.
+        from squidxplorer._param_panel import GenericOperatorPanel
+
+        return GenericOperatorPanel(self, "mip")
 
     def _build_stitch_tab(self) -> QWidget:
         """maragall/stitcher's control surface, in pane 1 (IMA-decon-stitch-ui).
@@ -2010,106 +2063,6 @@ class PlateWindow(QMainWindow):
         v.addStretch(1)
         return w
 
-    def _build_run_tab(self, op) -> QWidget:
-        """Generic plane-operator tab (MIP, …): pick a destination, run over the whole plate → a
-        navigable OME-Zarr plate. ONE builder for every z-reduction operator — a new one needs no new
-        tab code. Per-tab state lives in a closure (no per-operator instance attrs)."""
-        w, v = self._op_tab_shell(op.label, op.blurb + " Pick a destination with room - output can be large.")
-        state = {"dir": None}
-        dir_lbl = QLabel("(no folder chosen)"); dir_lbl.setWordWrap(True)
-        dir_lbl.setStyleSheet("color:#8b98ad;font-size:12px;")
-        run = QPushButton("Run"); run.setStyleSheet(_BTN_QSS); run.setEnabled(False)
-
-        # RUN ON — the target the operator iterates over (Julio: the per-tool "run on" choice, not a
-        # master-pane one). The decentralized model adds OPEN VIEWS: run the operator over the
-        # regions currently held by the independent windows, not just the plate selection.
-        TARGET_PLATE, TARGET_SELECTION, TARGET_OPEN = "Whole plate", "Selected wells", "Open views"
-        run_row = QHBoxLayout(); run_row.setSpacing(6)
-        _rl = QLabel("Run on"); _rl.setStyleSheet("color:#8b98ad;font-size:12px;")
-        target = QComboBox(); target.setStyleSheet(_COMBO_QSS)
-        target.addItems([TARGET_SELECTION, TARGET_OPEN, TARGET_PLATE])
-        target.setToolTip(
-            "What the operator iterates over.\n"
-            f"{TARGET_SELECTION} - the wells picked on the plate (all if none).\n"
-            f"{TARGET_OPEN} - every region held by the open viewer windows. Picking it prints the "
-            "exact window list, and each window's regions, to the log console.\n"
-            f"{TARGET_PLATE} - every region of the acquisition.")
-        run_row.addWidget(_rl); run_row.addWidget(target, 1)
-
-        # PRINT THE TARGET WHEN IT IS CHOSEN, not only when Run is pressed. "Open views" is the one
-        # target whose meaning is invisible from the combo: the other two name a surface the user is
-        # looking at, this one names a set of windows scattered across the desktop, deduplicated.
-        target.currentTextChanged.connect(
-            lambda choice: (self._print_open_views_target(f"Run {op.label}")
-                            if choice == TARGET_OPEN else None))
-
-        def pick():
-            d = QFileDialog.getExistingDirectory(self, f"Save {op.label} plate to folder")
-            if not d:
-                return
-            state["dir"] = d
-            ok, est_gb, _ = self._check_disk(Path(d) / f"{self._acq_name}.hcs")
-            dir_lbl.setText(f"{d}\n~{est_gb:.0f} GB needed" + ("" if ok else "  (not enough free space)"))
-            run.setEnabled(True)
-
-        pick_btn = QPushButton("Choose output folder…"); pick_btn.setStyleSheet(_BTN_QSS)
-        pick_btn.clicked.connect(pick)
-
-        def do_run():
-            choice = target.currentText()
-            if choice == TARGET_PLATE:
-                regions = None                       # None = whole dataset (run_operator's contract)
-            elif choice == TARGET_OPEN:
-                # Prints the block again at launch, deliberately: the log is the record of what was
-                # run, and the state may have moved since the target was picked (a window closed).
-                regions = self._print_open_views_target(f"Run {op.label}")
-                if not regions:
-                    return
-            else:                                    # selected wells (all if none selected)
-                regions = self._selected_regions or None
-            self.run_operator(op.key, out_parent=state["dir"], regions=regions)
-
-        v.addWidget(_hline())
-        run.clicked.connect(do_run)
-        v.addLayout(run_row)
-        v.addWidget(pick_btn); v.addWidget(dir_lbl); v.addWidget(run)
-
-        # PREVIEW on a subset — test the operator on the first N wells without committing the whole
-        # plate's compute + disk. Default: don't save (compute + push to the viewer only).
-        v.addWidget(_hline())
-        prev_lbl = QLabel("Preview (subset)")
-        prev_lbl.setStyleSheet("color:#57606a;font-size:10px;font-weight:800;letter-spacing:1.5px;padding-top:6px;")
-        v.addWidget(prev_lbl)
-        n_wells = max(1, len(self._order))
-        row = QHBoxLayout(); row.setSpacing(6)
-        row.addWidget(QLabel("First"))
-        spin = QSpinBox(); spin.setRange(1, n_wells); spin.setValue(min(4, n_wells))
-        spin.setStyleSheet(_COMBO_QSS)
-        row.addWidget(spin); row.addWidget(QLabel("wells")); row.addStretch(1)
-        v.addLayout(row)
-        save_cb = QCheckBox("Save previews to disk"); save_cb.setStyleSheet(_CHECK_QSS)
-        v.addWidget(save_cb)
-        prev = QPushButton("Preview"); prev.setStyleSheet(_BTN_QSS); prev.setEnabled(False)
-
-        def do_preview():
-            save = save_cb.isChecked()
-            dest = None
-            if save:
-                dest = state["dir"] or QFileDialog.getExistingDirectory(self, f"Save {op.label} preview to folder")
-                if not dest:
-                    return
-            # "first N wells" is just one way to build a region list, so the prefix policy lives
-            # here (in the UI that owns the spinner) rather than as a second subset parameter.
-            self.run_operator(op.key, out_parent=dest, regions=self._order[:spin.value()], save=save)
-
-        prev.clicked.connect(do_preview)
-        v.addWidget(prev)
-        v.addStretch(1)
-        # both run buttons enable once an acquisition is open (the tab is only reachable then, but be safe)
-        for b in (run, prev):
-            b.setEnabled(self._reader is not None)
-        return w
-
     def _build_layers_tab(self) -> QWidget:
         """The Layers tab: the OperationStack as a list of toggleable, reorderable layers. The topmost
         enabled layer is what the plate shows. Base 'raw' plus each operator you have run."""
@@ -2211,18 +2164,9 @@ class PlateWindow(QMainWindow):
         _ingest.update_loupe_source(self)
 
     def _enable_operators(self, flag: bool):
-        self._ops_enabled = bool(flag)             # a dock built LATER reads this at card build
+        self._ops_enabled = bool(flag)
         for a in self._op_actions.values():
             a.setEnabled(flag)
-        for dock in getattr(self, "_op_docks", []):
-            if not _widget_alive(dock):
-                continue
-            try:
-                dock.set_cards_enabled(flag)
-            except Exception:                      # noqa: BLE001 - a dead dock is not worth a crash
-                pass
-        for c in getattr(self, "_op_cards", {}).values():
-            c.setEnabled(flag)
         menu = getattr(self, "_declared_menu", None)
         if menu is not None:                       # the uncarded operators gate on the same flag
             menu.setEnabled(flag)
@@ -2713,7 +2657,8 @@ class PlateWindow(QMainWindow):
     def run_operator(self, key: str, out_parent: Optional[str] = None,
                      regions: Optional[list] = None, save: bool = True,
                      operator_kwargs: Optional[dict] = None,
-                     requester: Optional[Any] = None):
+                     requester: Optional[Any] = None,
+                     z_level: int = 0):
         """Run a plane operator (MIP / reference) over the plate, or over a subset of it.
 
         ``requester`` IS THE COMPLETION CALLBACK, and its absence was the root fault Julio
@@ -2919,7 +2864,8 @@ class PlateWindow(QMainWindow):
         run_order = self._order if regions is None else regions
         worker = _OperatorWorker(key, self._reader, self._meta, self._fov_index,
                                  str(out_dir) if out_dir else "", regions=regions, save=save,
-                                 n_fovs=None, operator_kwargs=operator_kwargs)
+                                 n_fovs=None, operator_kwargs=operator_kwargs,
+                                 z_level=z_level)
         self._overview.set_mosaic_boxes(worker.mosaic_boxes)
         # A re-run must not composite on top of the LAST run's pixels: with a mosaic, a run that
         # lands fewer FOVs would otherwise leave the previous run's fields standing in the same
@@ -3529,35 +3475,6 @@ class PlateWindow(QMainWindow):
             if v is not None:
                 entries.append((v.regions, _view_hue(v.window_id, focused=(v.window_id == focused))))
         self._overview.set_view_hues(entries)
-
-    def _print_open_views_target(self, action: str) -> "Optional[list]":
-        """Say WHICH windows an "Open views" run is aimed at, and return what it resolved to.
-
-        Julio, 2026-08-03: "it has to print which windows and subsets thereof are selected." The
-        selector only names the RULE — "Open views" — and the rule is not the answer: which windows
-        are open, what each holds, and how the overlap between them collapses are three facts a user
-        cannot infer from three words in a combo box.
-
-        Called when the user PICKS the target AND again when they press Run. Printing only at launch
-        would be printing it after the decision, and a plate-scale run is minutes of compute.
-
-        The block goes to the log console via this window's ``ViewLog`` — the existing addressed
-        channel, which is monospace, scrollable and copyable, and already interleaves every stream.
-        Only the headline goes to the status line, which is one line high.
-
-        Returns ``None`` when nothing would run, having said why.
-        """
-        views = self._open_view_targets()
-        block = _run_scope.describe_view_target(views, action=action)
-        if block is None:
-            self._readout.setText(
-                f"Run on open views: {len(views)} open window(s) hold no regions between them - "
-                f"nothing to run." if views else
-                "Run on open views: no windows are open - open some first.")
-            return None
-        self.log.info("%s", block)
-        self._readout.setText(block.splitlines()[0])
-        return _run_scope.distinct_view_regions(views)
 
     def _open_view_targets(self) -> list:
         """Every open window as a View — the target set BEFORE it is flattened to regions.

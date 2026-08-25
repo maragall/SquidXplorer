@@ -118,69 +118,17 @@ def test_a_view_window_is_placed_relative_to_its_own_screen_not_the_desktop_orig
     assert "self.move(120 + off, 90 + off)" not in src
 
 
-_BLURB = ("Register every FOV of a well against its neighbours and fuse one seamless mosaic "
-          "per well, instead of trusting the stage coordinates alone.")
-_LABEL = "Stitch (register + fuse)"
-
-
-@pytest.fixture
-def card(qapp):
-    c = _qtstyle.operator_card(_LABEL, _BLURB)
-    c.setStyleSheet(_qtstyle.CARD_QSS)
-    c.resize(300, 54)                      # about the Process pane's real width
-    c.show()
-    qapp.processEvents()
-    yield c
-    c.close()
-
-
-def test_the_description_is_elided_to_the_card_and_fits_it(card):
-    blurb_line = card.text().split("\n")[1]
-    assert blurb_line != _BLURB, "the full blurb is still being handed to the button"
-    assert blurb_line.endswith("…"), "an elision must SAY that there is more"
-    assert card.fontMetrics().horizontalAdvance(blurb_line) <= 300
-
-
-def test_eliding_never_loses_the_text_it_hides(card):
-    """Elide with a tooltip rather than shorten at the registry: nothing is deleted."""
-    assert card.toolTip() == f"{_LABEL}\n{_BLURB}"
-
-
-def test_a_wider_card_shows_more_of_the_description(card, qapp):
-    narrow = card.text().split("\n")[1]
-    card.resize(900, 54)
-    qapp.processEvents()
-    assert len(card.text().split("\n")[1]) > len(narrow)
-
-
-def test_the_card_never_demands_its_unelided_width_from_the_layout(card):
-    """A card that asks for 900 px inside a 300 px pane trades clipping for a scrollbar."""
-    assert card.minimumWidth() == 0
-    assert card.minimumSizeHint().width() <= 300
-
-
-def test_the_cards_in_the_operator_dock_all_elide(qapp, monkeypatch):
-    """The cards live in the views window's dock since 2026-08-19; still the plate's launcher."""
-    from squidxplorer._operations import _OPERATIONS
+# The operator cards died with the right-edge dock (Julio, 2026-08-25: "I think that the
+# operator right hand dock is obsolete"); a view's Run on plate is the bulk path.
+def test_the_operator_cards_are_retired():
+    from squidxplorer import _qtstyle
     from squidxplorer._viewer import PlateWindow
 
-    win = PlateWindow(None)
-    try:
-        pane = win._build_operator_cards()      # what _install_operator_dock hands each dock
-        cards = win._op_cards
-        # "galleryview" is not an operator key; it's a View-menu action now.
-        assert set(cards) == {op.key for op in _OPERATIONS}
-        assert pane._op_cards is cards
-        for key, c in cards.items():
-            assert hasattr(c, "_retext"), f"the {key!r} card is a plain QPushButton again"
-            assert c.toolTip(), f"the {key!r} card lost the full text its elision hides"
-    finally:
-        win.close()
+    assert not hasattr(_qtstyle, "operator_card")
+    assert not hasattr(_qtstyle, "CARD_QSS")
+    assert not hasattr(PlateWindow, "_build_operator_cards")
+    assert not hasattr(PlateWindow, "_install_operator_dock")
 
-
-# vispy installs a process-wide Qt message handler, so a stylesheet Qt's CSS parser rejects on
-# ANY widget surfaces as a vispy log warning. Checked over the whole window because the failure
-# is a class of bug (Python brace-escaping vs. Qt's grammar), not one string.
 
 def _qt_parse_failures(qapp, build, resizes=((1400, 900), (900, 700), (1600, 1000))):
     """Build a window, resize it, and collect Qt's "could not parse" complaints."""

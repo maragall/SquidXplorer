@@ -193,7 +193,12 @@ class LogPanel(QWidget):
         self._mem_timer.start()
 
     def stop(self) -> None:
-        self._mem_timer.stop()
+        # The timer may be C++-dead: hosted in a view (one window, 2026-08-25) this panel can
+        # be destroyed with that view, and an exception out of a closeEvent aborts the process.
+        try:
+            self._mem_timer.stop()
+        except RuntimeError:
+            pass
 
     def _on_record(self, level_name: str, line: str) -> None:
         # Runs on whatever thread logged; do nothing but emit — the append happens on the GUI

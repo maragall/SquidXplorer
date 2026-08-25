@@ -192,8 +192,10 @@ def test_the_operator_panel_carries_no_detect_row(qapp, napari_pane_stub, squid_
         while p is not None and p is not panel:
             p = p.parentWidget()
         assert p is None, "the shelved Detect row was adopted into the operator panel"
-        # The panel still carries the whole per-window operator surface.
-        assert v._op_combo is not None and v._save_chk is not None
+        # The panel still carries the whole per-window operator surface (one flow, 2026-08-25:
+        # Preview + Run on plate; the save checkbox is gone).
+        assert v._op_combo is not None and v._btn_preview is not None
+        assert v._btn_run_plate is not None and not hasattr(v, "_save_chk")
         assert v._btn_controls is not None
     finally:
         shutdown_plate_window(qapp, win)
