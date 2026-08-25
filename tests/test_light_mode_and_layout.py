@@ -162,14 +162,3 @@ def test_no_widget_in_the_plate_window_has_an_unparseable_stylesheet(qapp):
         f"spams the log on every repolish: {failures[:3]}")
 
 
-def test_the_log_panel_toggle_closes_its_qss_block_exactly_once(qapp):
-    """The specific brace bug: ``}}`` in the non-f-string half of a split literal."""
-    from squidxplorer._logpanel import LogPanel
-
-    panel = LogPanel()
-    try:
-        qss = panel._toggle.styleSheet()
-        assert qss.count("{") == qss.count("}"), f"unbalanced braces in {qss!r}"
-        assert not qss.endswith("}}"), "the sheet still closes one brace too many"
-    finally:
-        panel.deleteLater()

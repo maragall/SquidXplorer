@@ -214,7 +214,6 @@ class _Window(QObject):
 
     _open_3d = RegionViewer._open_3d
     set_render_mode = RegionViewer.set_render_mode
-    _refresh_controls_note = RegionViewer._refresh_controls_note
     _open_roi_3d = RegionViewer._open_roi_3d
     _volume_source = RegionViewer._volume_source
     _on_screen_luts = RegionViewer._on_screen_luts

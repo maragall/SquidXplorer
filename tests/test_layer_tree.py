@@ -518,8 +518,9 @@ def test_the_tree_is_mounted_beside_naparis_own_controls(tmp_path):
     got = _run_qt(_MOUNT_SCRIPT, tmp_path, "MOUNT")
 
     assert got["tree_exists"] is True
-    assert got["tree_visible"] is True
-    assert got["tree_is_in_our_pane"] is True, "the tree was mounted somewhere the user cannot see"
+    # Since ruling v3 (2026-08-25) the pane BUILDS the tree and the view's one plain column
+    # hosts it (`native_column_widgets`); a bare pane holds it undocked, so visibility is the
+    # view's to assert, not this probe's.
     assert got["rows"] == 2
     assert got["children_of_first"] == 4
     # The grouped tree REPLACES the flat list; napari's LAYER CONTROLS stay (they own contrast).

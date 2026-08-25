@@ -103,14 +103,10 @@ def test_the_log_owns_the_band_and_the_navigator_is_gone(shown):
     assert not hasattr(win, "_band"), "the horizontal band splitter survived its left child"
 
     assert win._log_panel.isVisible(), "the log is not on screen"
-    # Hero declutter (2026-08-25): the log starts COLLAPSED (its header only); summoned, the
-    # band is still the log's and it gets usable height.
-    assert win._log_panel.collapsed, "the log must start collapsed (quiet by default)"
-    win._log_panel.set_collapsed(False)
-    for _ in range(5):                    # the re-hand is a zero-timer after the layout pass
-        QApplication.processEvents()
-    assert _h(win._log_panel) > 100, f"the log has no usable height ({_h(win._log_panel)} px)"
-    win._log_panel.set_collapsed(True)
+    # Ruling v2 (2026-08-25): the log is a FIXED slot, a few lines tall, never collapsed.
+    from squidxplorer._logpanel import LogPanel
+
+    assert _h(win._log_panel) == LogPanel.SLOT_PX, f"the log slot is {_h(win._log_panel)} px"
     # The operator-tab bar exists but costs no pixels until an operator panel opens.
     assert win._left_tabs.count() == 0
     assert not win._left_tabs.isVisible(), "an empty operator-tab bar is taking the log's space"
@@ -151,23 +147,11 @@ def test_the_memory_and_progress_indicators_are_inside_the_log_panel(shown):
     win = shown
     row, log = win._status_row, win._log_panel
 
-    for name in ("_mem_label", "_mem_bar", "_work_label", "_work_bar"):
+    # Ruling y (2026-08-25): the memory bar is deleted; the run bar is the one bar.
+    for name in ("_work_label", "_work_bar"):
         w = getattr(row, name)
         assert _is_inside(w, log), f"{name} is not inside the log panel"
-
-    # Still driven by the manager's signals through StatusRow's own handlers.
-    row._on_memory(0.42)
-    assert row._mem_bar.value() == 42, "the adopted memory bar stopped following the poller"
-
-
-def test_the_adopted_status_strip_survives_collapsing_the_log(shown, qapp):
-    """Collapsed hides the log body; the status strip stays visible."""
-    win = shown
-    win._log_panel.set_collapsed(True)
-    qapp.processEvents()
-    assert win._log_panel._status.isVisible(), "the status strip went with the log body"
-    assert win._status_row._mem_bar.isVisible()
-    win._log_panel.set_collapsed(False)
+    assert not hasattr(row, "_mem_bar"), "the memory bar is back"
 
 
 def test_the_progress_bar_is_still_absent_while_nothing_runs(shown):
@@ -192,88 +176,3 @@ def test_the_acquisition_label_is_a_caption_not_a_headline(shown):
 
 # --- the log in a window of its own --------------------------------------------------------------
 
-def test_the_view_menu_reaches_the_log_in_every_state(shown, qapp):
-    """View > Log reaches the panel docked, collapsed or floated."""
-    win = shown
-    acts = {a.text().replace("&", ""): a for a in win.menuBar().actions()
-            if a.menu() is not None and a.text().replace("&", "") == "View"}
-    view = acts["View"].menu()
-    labels = [a.text().replace("&", "") for a in view.actions()]
-    assert "Log" in labels, "View > Log is gone"
-    assert "Log in a New Window" in labels, "the drawing's 'option to open in a new window' is gone"
-
-    log_act = next(a for a in view.actions() if a.text().replace("&", "") == "Log")
-
-    log_act.trigger()                                  # docked
-    qapp.processEvents()
-    assert win._log_panel.isVisible() and not win._log_panel.collapsed
-
-    win._log_panel.set_collapsed(True)                 # collapsed
-    log_act.trigger()
-    assert not win._log_panel.collapsed, "View > Log left the console collapsed"
-
-    float_act = next(a for a in view.actions()
-                     if a.text().replace("&", "") == "Log in a New Window")
-    float_act.trigger()                                # floated
-    qapp.processEvents()
-    fl = win._floating[win._LOG_FLOAT_KEY]
-    log_act.trigger()
-    assert win._floating.get(win._LOG_FLOAT_KEY) is fl, "View > Log lost the floated console"
-    win._redock_log()
-
-
-def test_detaching_and_redocking_preserves_the_console_and_its_scrollback(shown, qapp):
-    """Re-dock returns the SAME object, so the lines already on screen are still there."""
-    win = shown
-    win._log_panel._append("INFO", "a line that must survive the round trip")
-    qapp.processEvents()
-    before = win._log_panel.text()
-    assert "must survive" in before
-
-    panel = win._log_panel
-    fl = win._float_log()
-    qapp.processEvents()
-    assert fl.content() is panel, "the float does not hold the panel itself"
-    assert win._right_col.indexOf(panel) == -1, "the panel is in two places at once"
-    assert not win._left_tabs.isVisible(), "an EMPTY operator-tab bar showed itself on the float"
-    assert _is_inside(win._status_row._mem_bar, panel), "the memory bar was left behind"
-
-    win._redock_log()
-    qapp.processEvents()
-    assert win._log_panel is panel
-    assert win._right_col.indexOf(panel) == 1, "the console did not come back under the operators"
-    assert panel.isVisible() and _h(panel) > 50, "it came back with no height"
-    assert panel.text() == before, "the scrollback was rebuilt rather than returned"
-    assert _is_inside(win._status_row._mem_bar, panel), "the memory bar did not come back"
-
-
-def test_closing_the_float_gives_the_console_back_rather_than_deleting_it(shown, qapp):
-    """An operator float's close deletes; the console's must not."""
-    win = shown
-    panel = win._log_panel
-    win._float_log()
-    qapp.processEvents()
-    win._floating[win._LOG_FLOAT_KEY].close()
-    qapp.processEvents()
-    assert win._LOG_FLOAT_KEY not in win._floating
-    assert win._log_panel is panel
-    assert win._right_col.indexOf(panel) == 1
-    assert panel.isVisible()
-
-
-def test_the_float_is_swept_by_the_windows_close(qapp, monkeypatch):
-    """A floated console must not outlive the plate it reports on."""
-    win = V.PlateWindow(None)
-    win.show()
-    qapp.processEvents()
-    panel = win._log_panel
-    fl = win._float_log()
-    qapp.processEvents()
-    assert fl.isVisible()
-    win.close()
-    qapp.processEvents()
-    assert not win._floating, "a console window survived the plate that was logging into it"
-    # The wrapper was deleteLater'd and the event loop has run, so touching it raises.
-    with pytest.raises(RuntimeError):
-        fl.isVisible()
-    assert panel.parent() is not None, "the panel was orphaned into a top-level of its own"

@@ -145,35 +145,6 @@ def test_the_run_scope_is_resolved_by_the_shared_resolver_from_window_state(open
     assert seen["regions"] == regions, "the GUI did not resolve 'selected wells' from its selection"
 
 
-def test_the_log_panel_is_stacked_under_the_operators_and_can_never_be_lost(win):
-    """The panel exists for the window's whole life and is reachable from View > Log in every
-    state — docked, collapsed, floated."""
-    panel = win._log_panel
-
-    assert win._left_tabs.indexOf(panel) == -1, "the log is back in the tab bar"
-    assert win._right_col.indexOf(panel) >= 0, "the log is not in the right column at all"
-    assert win._right_col.indexOf(win._left_tabs) == 0, "Operator tabs are not above the log"
-    assert win._FIXED_TABS == 0, "no fixed tab since the cards moved to the views window's dock"
-
-    assert win._left_tabs.count() == 0, "a tab opened before anything was asked for"
-
-    panel.set_collapsed(True)
-    win.show_log()
-    assert not panel.collapsed, "View > Log did not expand the collapsed console"
-
-    fl = win._float_log()
-    assert fl is not None and win._floating[win._LOG_FLOAT_KEY] is fl
-    assert win._float_log() is fl, "a second request built a SECOND console window"
-    win.show_log()
-    assert win._floating.get(win._LOG_FLOAT_KEY) is fl, "show_log dropped the float"
-
-    # closing the float re-docks the same object rather than disposing it, so scrollback survives
-    fl.close()
-    assert win._LOG_FLOAT_KEY not in win._floating
-    assert win._log_panel is panel, "the console was replaced"
-    assert win._right_col.indexOf(panel) >= 0, "the console did not come back to the window"
-
-
 def test_a_plate_run_opens_AND_closes_a_started_done_pair_in_the_console(open_win, qapp, caplog):
     """A run over one region carries a view id and an address; a plate-wide run carries only the
     view id, since no single Extent can describe a set of regions."""

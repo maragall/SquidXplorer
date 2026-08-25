@@ -170,54 +170,23 @@ _RIGHT_COL_SIZES = [215, 165]
 
 
 class _PlateSlotBox(QWidget):
-    """THE PLATE SLOT: a fixed-height box the plate view renders in when it is hosted
-    inside the view window's left column (one window, Julio 2026-08-25), collapsible to a
-    grip. Fixed on purpose: inserting a slot shrinks the FLEXIBLE neighbours (layer
-    controls, toggles, log), never this one.
-    """
+    """THE PLATE SLOT: a fixed-height box the plate view renders in inside the view window's
+    column. Fixed on purpose; never collapsible (Julio, 2026-08-25: "the plate shouldn't
+    be collapsible")."""
 
-    #: The slot's fixed height while open, and the grip's height while collapsed.
     PLATE_SLOT_PX = 240
-    GRIP_PX = 18
 
     def __init__(self) -> None:
         super().__init__()
-        self.collapsed = False
-        v = QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-        self.grip = QPushButton("▾ plate")
-        self.grip.setCursor(Qt.PointingHandCursor)
-        self.grip.setToolTip("Collapse or expand the plate view.")
-        self.grip.setStyleSheet(
-            "QPushButton{background:#161b22;color:#8b98ad;border:1px solid #232b3a;"
-            "border-radius:3px;font-size:10px;padding:1px 6px;text-align:left;}"
-            "QPushButton:hover{color:#c9d1d9;}")
-        self.grip.setFixedHeight(self.GRIP_PX - 4)
-        self.grip.clicked.connect(self.toggle)
-        v.addWidget(self.grip, 0)
-        self._body = QWidget()
-        self._bv = QVBoxLayout(self._body)
+        self._bv = QVBoxLayout(self)
         self._bv.setContentsMargins(0, 0, 0, 0)
         self._bv.setSpacing(0)
-        v.addWidget(self._body, 1)
-        self._apply_height()
+        self.setFixedHeight(self.PLATE_SLOT_PX)
 
     def set_view(self, widget: QWidget) -> None:
-        """Mount the plate view (rebuilt per ingest) as the slot's body content."""
+        """Mount the plate view (rebuilt per ingest) as the slot's content."""
         self._bv.addWidget(widget, 1)
-        widget.setVisible(not self.collapsed)
-
-    def toggle(self, *_) -> None:
-        self.collapsed = not self.collapsed
-        self._body.setVisible(not self.collapsed)
-        self.grip.setText("▸ plate" if self.collapsed else "▾ plate")
-        self._apply_height()
-
-    def _apply_height(self) -> None:
-        h = self.GRIP_PX if self.collapsed else self.PLATE_SLOT_PX
-        self.setMinimumHeight(h)
-        self.setMaximumHeight(h)
+        widget.setVisible(True)
 
 
 # --- the main window: the plate on top, the Open View list and the console below --------------
@@ -499,10 +468,8 @@ class PlateWindow(QMainWindow):
         # COLLAPSED BY DEFAULT (hero declutter, team feedback 2026-08-25: "There are too many
         # controls and logs"): the log is a slot the user opens (its own toggle, View > Log),
         # not a broadcast. Session-scoped; no prefs file.
-        self._log_panel = LogPanel(self._log_bus, self._activity, start_collapsed=True)
+        self._log_panel = LogPanel(self._log_bus, self._activity)
         self._log_panel.start()
-        self._log_panel.float_requested.connect(self._float_log)
-        self._log_panel.collapsedChanged.connect(self._on_log_collapsed)
 
         # NO CENTRAL VIEWER (decentralized, 2026-07-23; the guards finally cut, 2026-08-06).
         # Viewing happens in INDEPENDENT windows spawned from the plate (see _region_viewer), each
@@ -609,21 +576,6 @@ class PlateWindow(QMainWindow):
             "QPushButton:hover{background:#388bfd;}")
         self._open_sel_btn.clicked.connect(self._open_selected_view)
         _tb.addWidget(self._open_sel_btn)
-
-        # THE ONE plate-side LUT control (Julio, 2026-08-19: "I like the plate side paste
-        # button"): paste the window-filled clipboard straight onto the plate. A deliberate
-        # gesture, so it latches manual and outranks the RGB-component full-range latch.
-        self._plate_paste_btn = QPushButton("⇩ paste LUTs")
-        self._plate_paste_btn.setCursor(Qt.PointingHandCursor)
-        self._plate_paste_btn.setStyleSheet(
-            "QPushButton{background:#0b0e14;color:#c9d1d9;border:1px solid #232b3a;"
-            "border-radius:4px;padding:3px 8px;font-size:12px;}"
-            "QPushButton:hover{border-color:#1f6feb;}")
-        self._plate_paste_btn.setToolTip(
-            "Paste the LUT clipboard (filled by a view's copy LUTs) onto the plate's channels: "
-            "contrast and on/off, latched so streaming wells cannot stomp it.")
-        self._plate_paste_btn.clicked.connect(self._paste_luts_onto_plate)
-        _tb.addWidget(self._plate_paste_btn)
 
         # ACQUISITION-SET CYCLING (2026-08-19). A dropped folder OF acquisitions gets a compact
         # "acquisition k of N" indicator with prev/next in this (nearly empty) title bar, plus
@@ -826,18 +778,12 @@ class PlateWindow(QMainWindow):
         # `show_log` — the console is reachable from here whether it is docked, collapsed or
         # floated, which is what makes "you cannot lose it" survive the log becoming floatable.
         view_menu = self.menuBar().addMenu("&View")
-        self._log_act = QAction("&Log", self)
-        self._log_act.triggered.connect(self.show_log)
-        view_menu.addAction(self._log_act)
         # Julio's drawing: "Log (option to open in a new window)". The panel's header carries the
         # same gesture as a ⧉ button; this is the discoverable duplicate, and it doubles as the way
         # back if the float is somehow off-screen (it raises rather than building a second). It sits
         # DIRECTLY under "Log" because the two are one pair — where the console is, and where you
         # would rather it were. The separator below keeps them from reading as a list with Gallery
         # View, which is a different kind of thing entirely.
-        self._log_float_act = QAction("Log in a &New Window", self)
-        self._log_float_act.triggered.connect(self._float_log)
-        view_menu.addAction(self._log_float_act)
         view_menu.addSeparator()
         # SELECT ALL left the top bar (2026-08-19 mock): the menu action and the plate's own
         # Cmd/Ctrl-A (`PlateOverview.keyPressEvent`) are the two ways in. No shortcut ON the
@@ -1087,36 +1033,6 @@ class PlateWindow(QMainWindow):
 
     # -- operator UIs live as tabs in the band's right column: the Operators home tab, one tab
     # -- per operator you open, and any result a panel publishes. ---------------------------------
-    def _paste_luts_onto_plate(self) -> None:
-        """Paste the LUT clipboard onto the plate's channels: clim + on/off, by channel name.
-
-        The one plate-side LUT control. A deliberate user gesture: ``set_channel_window``
-        latches manual, so it outranks both the running histograms and the RGB-component
-        full-range latch.
-        """
-        from squidxplorer._lut_clipboard import CLIPBOARD
-
-        if self._overview is None or self._meta is None:
-            self._readout.setText("open an acquisition first")
-            return
-        if not CLIPBOARD:
-            self._readout.setText("the LUT clipboard is empty - copy LUTs in a view first")
-            return
-        applied = 0
-        for i, c in enumerate(self._meta["channels"]):
-            lut = CLIPBOARD.get(c["name"]) or CLIPBOARD.get(c.get("display_name") or "")
-            if not lut:
-                continue
-            if lut.get("clim") is not None:
-                lo, hi = lut["clim"]
-                self._overview.set_channel_window(i, float(lo), float(hi))
-                applied += 1
-            if lut.get("on") is not None:
-                self._overview.set_channel_visible(i, bool(lut["on"]))
-        self._readout.setText(
-            f"pasted LUTs onto the plate - {applied} channel(s)" if applied
-            else "the clipboard names no channel of this acquisition - nothing pasted")
-
     def _open_op_tab(self, key: str, title: str, builder, tabs=None):
         """Open (or focus) a UI as a tab. Built lazily, once. *tabs* is the bar it belongs in;
         there is one bar (the band's right column) and it is the default.
@@ -1135,146 +1051,7 @@ class PlateWindow(QMainWindow):
         tabs = getattr(self, "_left_tabs", None)
         if tabs is None:
             return
-        show = tabs.count() > 0
-        was = not tabs.isHidden()
-        tabs.setVisible(show)
-        if show and not was:
-            # With the log collapsed by default the band sits at its minimum; a first tab
-            # published into it would get ZERO height (measured: the QC result view was
-            # 898 x 0 px). Opening a tab summons the band the way summoning the log does.
-            self._rehand_band()
-
-    #: Registry key for the floated log in `_floating`. Not an entry in `_op_tabs`: the log is not
-    #: an operator UI and must never be routed through `_dispose_tab_widget`, which deletes.
-    _LOG_FLOAT_KEY = "__log__"
-
-    def show_log(self) -> None:
-        """Bring the one global console to the front, wherever it currently is.
-
-        THE INVARIANT: the panel exists for the life of the window and is reachable from View > Log
-        in every state — docked, collapsed or floated. This is the method that makes that true, so
-        it has to answer for all three:
-
-        * floated  -> raise and activate its window;
-        * collapsed -> expand it;
-        * docked   -> make sure the strip is showing it (it always is: it is a splitter child that
-          cannot be collapsed to zero).
-
-        It used to end in ``_left_tabs.setCurrentWidget(panel)``, which was the whole of it while
-        the log was a tab. There is no tab to select now.
-        """
-        panel = getattr(self, "_log_panel", None)
-        if panel is None:
-            return
-        win = self._floating.get(self._LOG_FLOAT_KEY)
-        if win is not None:
-            if panel.collapsed:
-                panel.set_collapsed(False)
-            win.show()
-            win.raise_()
-            win.activateWindow()
-            return
-        if panel.collapsed:
-            panel.set_collapsed(False)
-        panel.setVisible(True)
-
-    def _rehand_band(self) -> None:
-        """Give the band its default height back, at BOTH splitters. A splitter keeps its
-        sizes when a child's height cap lifts, so any path that makes the band's content
-        taller (summoning the log, opening the first operator tab) must re-hand this. The
-        inner split runs once more on a zero-timer: the inner splitter is still at its
-        squeezed height when the first pass runs (measured 19 px), so the sizes it can
-        apply are the old ones. Guarded: a zero-timer must never fire into a torn-down
-        splitter."""
-        body = getattr(self, "_body", None)
-        if body is not None:
-            total = sum(body.sizes())
-            if total > 0:
-                body.setSizes([max(160, total - _BAND_DEFAULT_PX), _BAND_DEFAULT_PX])
-        # The queued half, run NOW: while the log was collapsed (and the tab bar empty) the
-        # inner splitter's own maximum height was recalced down to the header (measured 19
-        # px, QSplitterPrivate::recalc off its children's maximums), and both the recalc and
-        # the band host's layout normally wait for queued events, so the setSizes below
-        # would apply to the old squeezed space. refresh() re-runs the splitter's recalc,
-        # invalidate()+activate() re-runs the host layout with the lifted constraint.
-        col = getattr(self, "_right_col", None)
-        if col is None:
-            return
-        col.refresh()
-        host = getattr(self, "_band_host", None)
-        if host is not None and host.layout() is not None:
-            host.layout().invalidate()
-            host.layout().activate()
-        col.setSizes(list(_RIGHT_COL_SIZES))
-
-        def _rehand_inner() -> None:
-            if _widget_alive(col):
-                col.setSizes(list(_RIGHT_COL_SIZES))
-        QTimer.singleShot(0, _rehand_inner)
-
-    def _on_log_collapsed(self, collapsed: bool) -> None:
-        """Summoning the log AT HOME must give it the band back (`_rehand_band`).
-        Collapsing needs no help: Qt's own maximum-size recalc hands the space to the
-        plate, which is the hero rule working. A hosted or floated panel is not the
-        splitter's child and is left alone."""
-        if collapsed:
-            return
-        col = getattr(self, "_right_col", None)
-        panel = getattr(self, "_log_panel", None)
-        if col is None or panel is None or panel.parentWidget() is not col:
-            return
-        self._rehand_band()
-
-    # -- the console in a window of its own (Julio: "Log (option to open in a new window)") --------
-    def _float_log(self):
-        """Open the one global console in its own window, and give it back on Re-dock.
-
-        THIS PARTLY REVERSES 2026-07-29 Task 1, deliberately, and the difference is the whole
-        justification. The `_log_window` that was deleted was constructed and shown on EVERY
-        launch, which is why Spencer saw it "open over the main window" every time. This is a user
-        gesture on an always-present panel: docked by default, a window only when asked for.
-
-        It reuses `_FloatWindow` rather than hand-rolling a second float, which matters: the old
-        `_log_window` was one of the four widgets handed a Python-owned Fusion QStyle that ~QWidget
-        then unpolished after GC (the segfault pinned by tests/test_window_lifetime.py), and
-        `_FloatWindow` explicitly refuses that style for that reason (_qt_tabs.py:94-97). The
-        hazard is fixed AT THE SEAM a new float uses, not merely absent.
-
-        Its close handler RE-DOCKS. An operator float's close disposes the widget through
-        `_dispose_tab_widget`; doing that to the console would delete a live sink on the
-        process-wide root logger and lose it for good, which is the one outcome that would make
-        this the wrong call.
-        """
-        panel = getattr(self, "_log_panel", None)
-        if panel is None:
-            return None
-        win = self._floating.get(self._LOG_FLOAT_KEY)
-        if win is not None:                     # already out: raise it, never build a second
-            win.raise_()
-            win.activateWindow()
-            return win
-        if panel.collapsed:
-            panel.set_collapsed(False)          # a floated console that shows only its header is a
-                                                # window with nothing in it
-        # Through the ONE float mechanism. dispose_on_close=False is the log's whole policy:
-        # closing the window RE-DOCKS, because the panel is a live sink on the process-wide root
-        # logger and disposing it would lose the console for good.
-        return self._tabman.float_out(self._LOG_FLOAT_KEY, "Log", panel,
-                                      restore=self._return_log_home, dispose_on_close=False)
-
-    def _return_log_home(self, panel):
-        """Put the console back in `_right_col`, under the operators — the SAME widget, so the
-        log's scrollback survives. The log's `restore` for `TabManager.float_out`."""
-        col = getattr(self, "_right_col", None)
-        if col is None:                         # no layout to return to (never in a built window)
-            return
-        col.addWidget(panel)                    # index 1: _left_tabs is still index 0
-        panel.setVisible(True)
-        col.setSizes(list(_RIGHT_COL_SIZES))    # the same split it opened at, not a second guess
-
-    def _redock_log(self):
-        """Re-dock the floated console. Idempotent; routes through the one float mechanism."""
-        self._tabman.redock(self._LOG_FLOAT_KEY)
+        tabs.setVisible(tabs.count() > 0)
 
     def _close_op_tab(self, index: int, tabs=None):
         self._tabman.close_tab(index, tabs=tabs)
@@ -1840,10 +1617,6 @@ class PlateWindow(QMainWindow):
             box = self._plate_slot_box = _PlateSlotBox()
         self._plate_hosted = True
         self._mount_overview()
-        # The log opens at 3/4 of the plate slot's height (the chart's rule); flexible below.
-        # A CAP, not a bare setMaximumHeight: the panel starts collapsed and must keep this
-        # ceiling across its own collapse/expand cycles while hosted.
-        self._log_panel.set_expanded_cap(int(box.PLATE_SLOT_PX * 3 / 4))
         return box, self._log_panel
 
     def _mount_overview(self) -> None:
@@ -1872,7 +1645,6 @@ class PlateWindow(QMainWindow):
             self._mount_overview()
         log_panel = getattr(self, "_log_panel", None)
         if log_panel is not None and _widget_alive(log_panel):
-            log_panel.set_expanded_cap(None)
             col = getattr(self, "_right_col", None)
             if col is not None and log_panel.parentWidget() is not col:
                 col.addWidget(log_panel)
@@ -2189,8 +1961,7 @@ class PlateWindow(QMainWindow):
         LUTs) wait for an acquisition - a control with nothing to act on is a dead control.
         One writer: ingest's refusal arms and its success, and the computed-plate opener."""
         self._drop.setVisible(empty)
-        for w in (self._view_caption, self._view_combo, self._open_sel_btn,
-                  self._plate_paste_btn):
+        for w in (self._view_caption, self._view_combo, self._open_sel_btn):
             w.setVisible(not empty)
 
     def _open_acquisition_dialog(self):
@@ -2351,13 +2122,6 @@ class PlateWindow(QMainWindow):
         # latch, and never a plate write from the window's side. Contrast only: a stain-LUT
         # channel's plate look must remain the LUT rendering after a paste, so no colormap and
         # no eye icons travel.
-        sig = getattr(win, "lutsPasted", None)
-        if sig is not None:
-            try:
-                sig.connect(self._follow_window_luts)
-            except Exception:                    # noqa: BLE001 - a stub window without the signal
-                pass
-
         # `on_user_op` is KEPT for its own reason: which processing LAYER the plate draws is a
         # different quantity from how it is windowed, and it has exactly one honest answer.
 
@@ -2374,24 +2138,6 @@ class PlateWindow(QMainWindow):
         if callable(sub):
             sub(_op_sink)
         bound.add(wid)
-
-    def _follow_window_luts(self, win) -> None:
-        """A view pasted LUTs: the plate takes each channel's window off that view's own layers.
-
-        The parity Julio named (plate contrast must equal the window's after a paste), through
-        the one reader (`per_channel_luts`) and the plate's FOLLOW path. Contrast only.
-        """
-        from squidxplorer._lut_clipboard import per_channel_luts
-
-        try:
-            luts = per_channel_luts(win)
-        except Exception as exc:                 # noqa: BLE001 - a dead window is not a crash
-            log.warning("the plate could not read the pasted window's LUTs: %s", exc)
-            return
-        for name, lut in (luts or {}).items():
-            clim = lut.get("clim")
-            if clim is not None:
-                self._follow_window_contrast(str(name), float(clim[0]), float(clim[1]))
 
     def _follow_window_contrast(self, channel: str, lo: float, hi: float) -> None:
         """The plate takes ONE channel's resolved window from a view, through the FOLLOW path.
@@ -3858,7 +3604,6 @@ class PlateWindow(QMainWindow):
         # "windows are peers that outlive the plate", the log float must be explicitly excluded —
         # the panel is a live sink on the process-wide root logger and the bus is uninstalled a few
         # lines below, so a surviving log window would be a console attached to nothing.
-        self._redock_log()
         for key in list(self._floating):   # floated tabs are top-levels of their own — Qt won't
             win = self._floating.pop(key)  # close them for us, and each may hold a live shell
             w = win.take_content()

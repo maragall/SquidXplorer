@@ -196,58 +196,13 @@ def test_the_operator_panel_carries_no_detect_row(qapp, napari_pane_stub, squid_
         # Preview + Run on plate; the save checkbox is gone).
         assert v._op_combo is not None and v._btn_preview is not None
         assert v._btn_run_plate is not None and not hasattr(v, "_save_chk")
-        assert v._btn_controls is not None
+        assert not hasattr(v, "_btn_controls")
     finally:
         shutdown_plate_window(qapp, win)
 
 
 def _combo_index_for(combo, key: str):
     return next((i for i in range(combo.count()) if combo.itemData(i) == key), None)
-
-
-def test_the_operator_row_offers_iterations_for_a_declaring_operator(qapp, napari_pane_stub,
-                                                                     squid_dataset):
-    """Julio (2026-08-24): "the operators for this window in deconvolution should have like a
-    decorator that lets the user configure iterations by clicking." The row shows an inline
-    iterations spin for ANY operator declaring an int `iterations` Param (declaration-driven,
-    never a name match), seeded at the run's live value, and a write goes through the plate
-    panel — the run's single source of truth — so `operator_kwargs_for` hands the run that
-    exact number. An operator declaring no iterations hides it."""
-    from squidxplorer._decon import DEFAULT_ITERATIONS
-
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
-    v = views[0]
-    try:
-        v.operator_panel()
-        combo = v._op_combo
-        i = _combo_index_for(combo, "decon")
-        assert i is not None, f"decon is not in the window's operator dropdown: " \
-                              f"{[combo.itemData(k) for k in range(combo.count())]}"
-        combo.setCurrentIndex(i)
-        assert not v._iter_spin.isHidden(), "no inline iterations control beside the dropdown"
-        assert v._iter_spin.value() == DEFAULT_ITERATIONS, (
-            "the spin does not open at the run's declared default")
-
-        v._iter_spin.setValue(7)
-        assert win.operator_kwargs_for("decon") == {"iterations": 7}, (
-            "the inline spin's value is not what the run would get — two sources of truth")
-        # ONE source of truth: the panel's own declared widget holds the same number (the
-        # QC sweep and its adoption button are shelved, 2026-08-25).
-        assert win._op_tabs["decon"].widgets["iterations"].value() == 7
-
-        # ...and an outside write through the plate shows back up in the window's spin.
-        win.set_operator_param("decon", "iterations", 5)
-        v._refresh_controls_note()
-        assert v._iter_spin.value() == 5
-
-        j = _combo_index_for(combo, "mip")
-        if j is not None:
-            combo.setCurrentIndex(j)
-            assert v._iter_spin.isHidden(), (
-                "an operator declaring no iterations still shows the iterations spin")
-    finally:
-        shutdown_plate_window(qapp, win)
 
 
 def test_the_operator_panel_docstring_names_its_home(qapp, napari_pane_stub, squid_dataset):
@@ -289,8 +244,7 @@ def test_the_full_width_top_toolbar_is_gone_and_the_chips_live_in_the_left_colum
         assert box is not None
         # Every chip is inside the control block, and the block is inside the VIEW (with the
         # headless pane the left column falls back into the window body — same ancestry).
-        for name in ("_btn_roi", "_btn_3d", "_btn_focus", "_btn_record", "_btn_fovs",
-                     "_btn_copy_luts", "_btn_paste_luts"):
+        for name in ("_btn_roi", "_btn_3d", "_btn_focus", "_btn_record", "_btn_fovs"):
             chip = getattr(v, name)
             p = chip.parentWidget()
             while p is not None and p is not box:
@@ -308,113 +262,6 @@ def test_the_full_width_top_toolbar_is_gone_and_the_chips_live_in_the_left_colum
 
 
 # --- the two-button LUT clipboard and the paste-parity rule ---------------------------------------
-
-def test_a_lut_paste_reaches_the_plate_and_the_two_agree(qapp, napari_pane_stub, squid_dataset):
-    """Julio (2026-08-19): "Make sure that we don't have the issue where we copy luts and plate
-    contrast is different from the window contrast." The PASTE is the one event the plate
-    follows (a drag still leaves it alone — pinned in test_plate_follows_windows): after a
-    paste, each channel's plate window equals the view's own contrast_limits, through the
-    FOLLOW path (never the manual latch), and the plate's channel COLOURS are untouched so a
-    stain-LUT channel keeps its LUT rendering."""
-    import numpy as np
-
-    import squidxplorer._lut_clipboard as LC
-
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
-    v = views[0]
-    try:
-        names = [c["name"] for c in win._meta["channels"]]
-        mosaic = v._pane.mosaic
-        for ch in names:
-            if mosaic.find("raw", ch) is None:
-                mosaic.add_mosaic("raw", ch, np.full((8, 8), 500, dtype=np.uint16))
-        colors_before = [win._overview.channel_rgb(i) for i in range(len(names))]
-        LC.CLIPBOARD.clear()
-        LC.CLIPBOARD.update({ch: {"clim": (120.0, 900.0), "cmap": None, "rgb": None, "on": None}
-                             for ch in names})
-        # NO processEvents between paste and assert: the paste and the plate's follow are
-        # SYNCHRONOUS (a direct signal on one thread), and pumping events here lets the view's
-        # deferred region load clear and rebuild the very layers under test.
-        v._paste_luts()
-        for i, ch in enumerate(names):
-            assert mosaic.contrast(ch) == (120.0, 900.0), f"the paste never landed on {ch}"
-            assert win._overview._contrast.window(i) == (120.0, 900.0), (
-                f"the plate's {ch} window differs from the pasted view's")
-            assert not win._overview._contrast.is_manual(i), (
-                "a paste latched the plate manual; it must ride the FOLLOW path")
-        assert [win._overview.channel_rgb(i) for i in range(len(names))] == colors_before, (
-            "a paste moved the plate's channel colours; a stain-LUT channel would lose its "
-            "LUT rendering")
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
-def test_an_empty_clipboard_paste_is_a_refusal_not_a_noop(qapp, napari_pane_stub, squid_dataset):
-    import squidxplorer._lut_clipboard as LC
-
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
-    v = views[0]
-    try:
-        LC.CLIPBOARD.clear()
-        said = []
-        v._say = said.append
-        v._paste_luts()
-        assert said and "empty" in said[-1], "an empty paste said nothing"
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
-def test_the_plate_paste_button_applies_the_clipboard(qapp, squid_dataset):
-    """The one plate-side LUT control: paste latches the clipboard's clim per channel name."""
-    import numpy as np
-
-    import squidxplorer._viewer as V
-    from squidxplorer import _lut_clipboard
-
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    try:
-        win.ingest(str(root))
-        ch0 = win._meta["channels"][0]["name"]
-        _lut_clipboard.CLIPBOARD.clear()
-        win._paste_luts_onto_plate()
-        assert "empty" in win._readout.text()
-        _lut_clipboard.CLIPBOARD[ch0] = {"clim": (12.0, 345.0), "on": True}
-        win._paste_luts_onto_plate()
-        assert win._overview.channel_windows()[0] == (12.0, 345.0)
-        # a deliberate paste latches manual: streamed tiles cannot stomp it
-        win._overview._contrast.add(0, np.full((8, 8), 999, dtype=np.uint16))
-        assert win._overview.channel_windows()[0] == (12.0, 345.0)
-    finally:
-        _lut_clipboard.CLIPBOARD.clear()
-        win._stop_worker()
-        win.close()
-
-
-def test_copy_then_paste_round_trips_between_two_views(qapp, napari_pane_stub, squid_dataset):
-    """Two buttons, one dict: copy in one view, paste in another, same contrast."""
-    import numpy as np
-
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
-    a, b = views
-    try:
-        names = [c["name"] for c in win._meta["channels"]]
-        for v in (a, b):
-            for ch in names:
-                if v._pane.mosaic.find("raw", ch) is None:
-                    v._pane.mosaic.add_mosaic("raw", ch,
-                                              np.full((8, 8), 500, dtype=np.uint16))
-        a._pane.mosaic.set_contrast(names[0], 33.0, 333.0)
-        a._copy_luts()
-        b._paste_luts()
-        assert b._pane.mosaic.contrast(names[0]) == (33.0, 333.0), (
-            "the copied window never reached the second view")
-    finally:
-        shutdown_plate_window(qapp, win)
-
 
 # --- reconstructed color is a View-menu switch ----------------------------------------------------
 

@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from qtpy.QtCore import Qt, Signal
+from qtpy.QtGui import QKeySequence
 from qtpy.QtWidgets import QMainWindow, QStatusBar
 
 from squidxplorer._qt_tabs import _DetachTabs
@@ -97,12 +98,16 @@ class ViewDeck(QMainWindow):
         self._plate = plate
         self.setAcceptDrops(True)
         bar = self.menuBar()
+        # The ONE window's menu (Julio, 2026-08-25, ruling x): File (Open, Quit) and View,
+        # nothing else; napari's own menu bar is hidden chrome.
         file_menu = bar.addMenu("&File")
         act_open = file_menu.addAction("&Open Acquisition…")
+        act_open.setShortcut(QKeySequence.StandardKey.Open)
         act_open.triggered.connect(lambda *_: self._plate_call("_open_acquisition_dialog"))
+        act_quit = file_menu.addAction("&Quit")
+        act_quit.setShortcut(QKeySequence.StandardKey.Quit)
+        act_quit.triggered.connect(lambda *_: self._plate_call("close"))
         view_menu = bar.addMenu("&View")
-        act_log = view_menu.addAction("&Log")
-        act_log.triggered.connect(lambda *_: self._plate_call("show_log"))
         act_all = view_menu.addAction("Select &All Wells")
         act_all.triggered.connect(lambda *_: self._plate_call("_select_all_wells"))
         act_close = view_menu.addAction("Close All Vie&ws")

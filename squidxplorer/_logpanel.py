@@ -62,17 +62,14 @@ class LogPanel(QWidget):
     it a :class:`~squidxplorer._logpane.LogBus` and :class:`~squidxplorer._activity.ActivityLog` and
     it becomes a sink of both, or stays an inert valid widget with neither."""
 
-    #: The panel only notices the "open in new window" gesture; PlateWindow owns the window.
-    float_requested = Signal()
-
-    #: Fired when the collapsed state actually changes. A host that stacks this panel in a
-    #: splitter listens: a splitter keeps its sizes when a child's height cap lifts, so the
-    #: host must re-hand the space itself on a summon.
-    collapsedChanged = Signal(bool)
+    #: A FIXED slot, a few lines tall, scrollable; never collapsed, never floated (Julio,
+    #: 2026-08-25: "Re-docking the logger doesn't work... the logger fullscreen idea will
+    #: cause complications downstream").
+    SLOT_PX = 132
 
     def __init__(self, bus: Optional[LogBus] = None, activity: Optional[ActivityLog] = None,
                  *, level: int = DEFAULT_LEVEL, max_lines: int = MAX_LINES,
-                 start_collapsed: bool = False, parent=None) -> None:
+                 parent=None) -> None:
         super().__init__(parent)
         self._activity = activity
         self._bridge = _LogBridge()
@@ -89,19 +86,10 @@ class LogPanel(QWidget):
         hl.setContentsMargins(8, 3, 8, 3)
         hl.setSpacing(12)
 
-        self._toggle = QPushButton()
-        self._toggle.setFlat(True)
-        self._toggle.setCursor(Qt.PointingHandCursor)
-        # ONE closing brace: the f-string's `{{` collapses to `{`, but the second line is a plain
-        # literal so its `}}` stays two braces and the sheet ends `font-size:11px;}}` — Qt then
-        # fails to parse the whole sheet and warns "Could not parse stylesheet" on every repolish
-        # (labelled `WARN vispy:` only because vispy installs the process-wide Qt message handler).
-        self._toggle.setStyleSheet(
-            f"QPushButton{{color:#c3ccd9;border:none;background:transparent;font-family:{_MONO};"
-            "font-size:11px;}")
-        self._toggle.clicked.connect(self.toggle)
-        hl.addWidget(self._toggle)
-
+        self._title = QLabel("Log")
+        self._title.setStyleSheet(
+            f"color:#c3ccd9;font-family:{_MONO};font-size:11px;background:transparent;")
+        hl.addWidget(self._title)
         self._activity_lbl = QLabel("idle")
         self._activity_lbl.setStyleSheet(
             f"color:#c3ccd9;font-family:{_MONO};font-size:11px;background:transparent;")
@@ -116,16 +104,6 @@ class LogPanel(QWidget):
         self._mem_lbl.setStyleSheet(
             f"color:{_MUTED};font-family:{_MONO};font-size:11px;background:transparent;")
         hl.addWidget(_shrinkable(self._mem_lbl))
-
-        self._float_btn = QPushButton("⧉")
-        self._float_btn.setFlat(True)
-        self._float_btn.setCursor(Qt.PointingHandCursor)
-        self._float_btn.setToolTip("Open the log in a new window")
-        self._float_btn.setStyleSheet(
-            f"QPushButton{{color:#c3ccd9;border:none;background:transparent;"
-            f"font-family:{_MONO};font-size:11px;}}")
-        self._float_btn.clicked.connect(lambda *_: self.float_requested.emit())
-        hl.addWidget(self._float_btn)
 
         self.setMinimumWidth(0)
         header.setMinimumWidth(0)
@@ -160,33 +138,21 @@ class LogPanel(QWidget):
         self._mem_timer.setInterval(MEMORY_POLL_MS)
         self._mem_timer.timeout.connect(self._refresh_memory)
 
-        self._collapsed = False
+        self.setFixedHeight(self.SLOT_PX)
         if bus is not None:
             self.attach_bus(bus, level=level)
         if activity is not None:
             self.attach_activity(activity)
-        if start_collapsed:
-            self.set_collapsed(True)
-        else:
-            self._sync_toggle_text()
 
-    def adopt_status_row(self, memory_caption: QWidget, memory_bar: QWidget,
-                         work_caption: QWidget, work_bar: QWidget) -> None:
-        """Re-home the window's memory/run-progress widgets into this panel. Idempotent: adding a
-        widget to a layout it's already in is a no-op move, not a duplicate."""
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
-        row.addWidget(_shrinkable(memory_caption))
-        row.addWidget(memory_bar, 1)
-        self._status_l.addLayout(row)
+    def adopt_status_row(self, work_caption: QWidget, work_bar: QWidget) -> None:
+        """Re-home the run-progress caption and bar into this slot. Idempotent: adding a widget
+        already in this layout is a no-op for Qt."""
         self._status_l.addWidget(work_caption)
         self._status_l.addWidget(work_bar)
         self._status.setVisible(True)
         # The panel just grew; a collapsed cap frozen at the pre-adoption size CLIPS the
         # band (Julio, live 2026-08-25: the "2%" run bar cut mid-label, no reachable
         # summon toggle). Re-derive the cap from what the band now holds.
-        self._apply_collapsed_cap()
 
     def attach_bus(self, bus: LogBus, *, level: int = DEFAULT_LEVEL) -> None:
         bus.subscribe(self._on_record)      # called on the LOGGING thread — hop via the bridge
@@ -252,78 +218,8 @@ class LogPanel(QWidget):
     _activity_sentence = ""
 
     def _refresh_header_line(self) -> None:
-        """The header's middle label: the LATEST log line while collapsed (the band is the
-        only visible log surface then), the activity sentence while expanded (the body
-        already scrolls the lines)."""
-        if self._collapsed and self._latest_line:
-            self._activity_lbl.setText(self._latest_line)
-        else:
-            self._activity_lbl.setText(self._activity_sentence or "idle")
-
-    @property
-    def collapsed(self) -> bool:
-        return self._collapsed
-
-    def toggle(self) -> None:
-        self.set_collapsed(not self._collapsed)
-
-    #: The expanded panel's height ceiling, or None for uncapped. Set while the panel is
-    #: HOSTED in a view's left column (the 3/4-of-plate-slot rule), cleared when it comes
-    #: home, so a collapse cycle cannot lose the cap.
-    _expanded_cap: Optional[int] = None
-
-    def set_expanded_cap(self, cap: "Optional[int]") -> None:
-        """Cap the panel's expanded height (None removes the cap); applies now if expanded."""
-        self._expanded_cap = int(cap) if cap else None
-        if not self._collapsed:
-            self.setMaximumHeight(self._expanded_cap or 16777215)
-
-    def _apply_collapsed_cap(self) -> None:
-        """Cap a collapsed panel at what its VISIBLE content needs right now. The layout is
-        activated first: the cap is read in the same call that changed the content, when
-        the cached hint is still the old one (measured: a construction-time cap clipped
-        the band once the status rows were adopted)."""
-        if not self._collapsed:
-            return
-        lay = self.layout()
-        if lay is not None:
-            lay.activate()
-            need = lay.sizeHint().height()
-        else:
-            need = self.sizeHint().height()
-        if self.maximumHeight() != need:
-            self.setMaximumHeight(need)
-
-    def event(self, ev) -> bool:
-        # The band's content changes height at runtime (the run/memory bars show and hide
-        # with the work), and a stale collapsed cap CLIPS it (Julio, live 2026-08-25: the
-        # "2%" bar cut mid-label). Re-derive the cap on every layout request; the != guard
-        # in _apply_collapsed_cap keeps this from looping.
-        # getattr: layout events can land during construction, before _collapsed exists.
-        if ev.type() == QEvent.LayoutRequest and getattr(self, "_collapsed", False):
-            self._apply_collapsed_cap()
-        return super().event(ev)
-
-    def set_collapsed(self, collapsed: bool) -> None:
-        """Collapsing drops the vertical size hint to the header's height so the splitter hands the
-        space back to the panes, instead of leaving a grey gap."""
-        changed = self._collapsed != bool(collapsed)
-        self._collapsed = bool(collapsed)
-        self._view.setVisible(not self._collapsed)
-        if self._collapsed:
-            self._apply_collapsed_cap()
-            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        else:
-            # QWIDGETSIZE_MAX (no cap) unless a host installed one.
-            self.setMaximumHeight(self._expanded_cap or 16777215)
-            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._sync_toggle_text()
-        self._refresh_header_line()
-        if changed:
-            self.collapsedChanged.emit(self._collapsed)
-
-    def _sync_toggle_text(self) -> None:
-        self._toggle.setText("▸ Log" if self._collapsed else "▾ Log")
+        """The header's middle label: the activity sentence (the body scrolls the lines)."""
+        self._activity_lbl.setText(self._activity_sentence or "idle")
 
     def _refresh_memory(self) -> None:
         self._mem_lbl.setText(memory_line())

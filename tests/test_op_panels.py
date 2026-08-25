@@ -144,8 +144,9 @@ def test_decons_panel_is_iterations_plus_ni(qapp):
     try:
         panel = DeconPanel(_Host())
         assert "iterations" in panel.widgets, "iterations is decon's headline knob"
-        panel.ni_spin.setValue(1.33)
-        assert _decon.session_ni() == pytest.approx(1.33), (
+        values = [panel.ni_combo.itemData(i) for i in range(panel.ni_combo.count())]
+        panel.ni_combo.setCurrentIndex(values.index(1.333))
+        assert _decon.session_ni() == pytest.approx(1.333), (
             "the NI row must write the session index the PSF reads")
     finally:
         _decon.set_session_ni(before)

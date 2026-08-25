@@ -190,7 +190,6 @@ def test_a_region_window_fuses_the_timepoint_its_own_bar_shows(
         assert seen and seen[-1] == 1, (
             f"the window's mosaic worker was built with t={seen}, not the bar's timepoint 1")
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()

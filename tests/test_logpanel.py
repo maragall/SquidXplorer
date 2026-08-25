@@ -120,31 +120,6 @@ def test_an_ordinary_info_run_leaves_the_error_tally_empty(panel, bus):
 
 # --- collapse must not steal pane space ---------------------------------------------------------
 
-def test_collapsing_hides_the_body_and_caps_the_height(panel):
-    assert not panel.collapsed
-    panel.set_collapsed(True)
-    assert panel.collapsed
-    assert not panel._view.isVisibleTo(panel), "the body is still showing when collapsed"
-    assert panel.maximumHeight() <= panel.sizeHint().height() + 1
-    panel.set_collapsed(False)
-    assert panel._view.isVisibleTo(panel)
-    assert panel.maximumHeight() > 1000, "expanding did not release the height cap"
-
-
-def test_the_header_survives_collapse_so_the_status_is_never_hidden(panel):
-    """The RAM and activity labels stay visible when the body is gone."""
-    panel.set_collapsed(True)
-    assert panel._mem_lbl.isVisibleTo(panel)
-    assert panel._activity_lbl.isVisibleTo(panel)
-
-
-def test_the_toggle_text_reflects_the_state(panel):
-    panel.set_collapsed(False)
-    assert "▾" in panel._toggle.text()
-    panel.set_collapsed(True)
-    assert "▸" in panel._toggle.text()
-
-
 # --- it actually PAINTS -------------------------------------------------------------------------
 
 def test_the_panel_actually_PAINTS_without_raising(qapp, bus):
@@ -165,8 +140,6 @@ def test_the_panel_actually_PAINTS_without_raising(qapp, bus):
     try:
         pm = QPixmap(panel.size())
         panel.render(pm)
-        panel.set_collapsed(True)
-        panel.render(pm)                    # collapsed must paint too
     finally:
         sys.excepthook = original
         panel.stop()

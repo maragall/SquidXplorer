@@ -148,7 +148,6 @@ def manager(qapp, napari_pane_stub, squid_dataset):
     try:
         yield mgr
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -433,16 +432,19 @@ def test_a_ceiling_rise_reaches_a_window_that_is_ALREADY_open(qapp, manager):
     """
     from squidxplorer import _bitdepth
 
-    _bitdepth.depth().observe(3437.0)
+    import numpy as np
+
+    # PER CHANNEL (2026-08-25): the slider spans this channel's own observed maximum.
+    _bitdepth.depth().observe_array(np.array([[3437]], np.uint16), CH_IN_YAML)
     win = manager.open([REGIONS[0]])
     _loaded(qapp, win)
 
     layer = win._pane.mosaic.find(_RAW_OP, CH_IN_YAML)
     assert layer is not None
-    assert tuple(layer.contrast_limits_range) == (0.0, 4095.0)
+    assert tuple(layer.contrast_limits_range) == (0.0, _bitdepth.channel_ceiling(3437.0))
     layer.contrast_limits = (100.0, 3000.0)     # the window the user is looking through
 
-    _bitdepth.depth().observe(16380.0)          # E7 is fused
+    _bitdepth.depth().observe_array(np.array([[16380]], np.uint16), CH_IN_YAML)   # E7 is fused
     for _ in range(5):
         qapp.processEvents()                    # the rise is queued to the GUI thread
 

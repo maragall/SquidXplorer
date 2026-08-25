@@ -49,87 +49,7 @@ def _open_view(qapp, root, n_views=1):
 # --- the operator surface starts collapsed --------------------------------------------------
 
 
-def test_the_operator_surface_starts_collapsed_behind_a_summon_bar(qapp, napari_pane_stub,
-                                                                   squid_dataset):
-    root, _ = squid_dataset
-    win, views = _open_view(qapp, root)
-    try:
-        v = views[0]
-        fold = v._operators_fold
-        assert fold.collapsed, "the operator surface must start collapsed"
-        assert fold.grip.isVisibleTo(v), "the summon affordance is not on screen"
-        panel = v.operator_panel()
-        assert not panel.isVisibleTo(v), "the operator panel is showing while collapsed"
-        fold.grip.click()
-        assert not fold.collapsed
-        assert panel.isVisibleTo(v), "summon did not reveal the operator panel"
-        assert v._btn_preview.isVisibleTo(v)
-        assert v._btn_run_plate.isVisibleTo(v)
-        fold.grip.click()
-        assert fold.collapsed and not panel.isVisibleTo(v), (
-            "collapse did not fold the operator surface back behind the affordance")
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
-def test_the_fold_state_is_per_view(qapp, napari_pane_stub, squid_dataset):
-    root, _ = squid_dataset
-    win, views = _open_view(qapp, root, n_views=2)
-    try:
-        a, b = views
-        a._operators_fold.grip.click()
-        assert not a._operators_fold.collapsed
-        assert b._operators_fold.collapsed, "expanding one view expanded another"
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
-def test_inserting_a_param_panel_summons_the_operator_surface(qapp, napari_pane_stub,
-                                                              squid_dataset):
-    """A parameter panel inserted into a collapsed fold would be invisible: the insert summons."""
-    root, _ = squid_dataset
-    win, views = _open_view(qapp, root)
-    try:
-        v = views[0]
-        assert v._operators_fold.collapsed
-        combo = v._op_combo
-        combo.setCurrentIndex(next(k for k in range(combo.count())
-                                   if combo.itemData(k) == "stitch"))
-        v._show_operator_controls()
-        qapp.processEvents()
-        assert v._inserted_panel is not None
-        assert not v._operators_fold.collapsed, (
-            "inserting the operator's controls left the fold collapsed over them")
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
 # --- the chips fold to the essentials -------------------------------------------------------
-
-
-def test_only_the_3d_and_roi_essentials_show_until_the_controls_are_summoned(qapp,
-                                                                             napari_pane_stub,
-                                                                             squid_dataset):
-    root, _ = squid_dataset
-    win, views = _open_view(qapp, root)
-    try:
-        v = views[0]
-        fold = v._controls_fold
-        assert fold.collapsed, "the view controls must start collapsed"
-        assert v._btn_3d.isVisibleTo(v), "3D is an essential and must stay visible"
-        assert v._btn_roi.isVisibleTo(v), (
-            "ROI is top-level (Julio, 2026-08-25: 'The ROI button shouldn't be hidden "
-            "behind controls.')")
-        for name in ("_btn_focus", "_btn_record", "_btn_png", "_btn_fovs",
-                     "_btn_copy_luts", "_btn_paste_luts"):
-            assert not getattr(v, name).isVisibleTo(v), f"{name} is showing while collapsed"
-        fold.grip.click()
-        for name in ("_btn_focus", "_btn_record", "_btn_png", "_btn_fovs",
-                     "_btn_copy_luts", "_btn_paste_luts"):
-            chip = getattr(v, name)
-            assert chip.isVisibleTo(v), f"summon did not reveal {name}"
-    finally:
-        shutdown_plate_window(qapp, win)
 
 
 def test_the_2d_button_is_gone_whole_and_a_3d_tab_disables_its_own_3d(qapp, napari_pane_stub,
@@ -153,57 +73,7 @@ def test_the_2d_button_is_gone_whole_and_a_3d_tab_disables_its_own_3d(qapp, napa
         shutdown_plate_window(qapp, win)
 
 
-def test_summon_controls_expands_both_folds(qapp, napari_pane_stub, squid_dataset):
-    """The one entry GATE 3 (and any headless driver) uses to reach every control."""
-    root, _ = squid_dataset
-    win, views = _open_view(qapp, root)
-    try:
-        v = views[0]
-        v.summon_controls()
-        assert not v._controls_fold.collapsed
-        assert not v._operators_fold.collapsed
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
 # --- the log slot starts collapsed ----------------------------------------------------------
-
-
-def test_the_log_starts_collapsed_and_view_menu_summons_it(qapp, napari_pane_stub,
-                                                           squid_dataset):
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    try:
-        assert win._log_panel.collapsed, "the log must start collapsed (quiet by default)"
-        win.show_log()
-        assert not win._log_panel.collapsed, "View > Log did not summon the log"
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
-def test_a_hosted_log_keeps_its_height_cap_across_a_collapse_cycle(qapp, napari_pane_stub,
-                                                                   squid_dataset):
-    """Expanding a hosted log must respect the 3/4-of-plate-slot cap, not grow unbounded."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    mgr = win._viewer_manager
-    mgr.tabbed_views = True
-    views = [mgr.open([list(win._order)[0]])]
-    _drain_until(qapp, lambda: views[0]._pane is not None, timeout=10)
-    try:
-        box = win._plate_slot_box
-        cap = int(box.PLATE_SLOT_PX * 3 / 4)
-        panel = win._log_panel
-        panel.set_collapsed(False)
-        assert panel.maximumHeight() == cap, (
-            "an expanded hosted log lost the 3/4-of-plate-slot cap")
-        panel.set_collapsed(True)
-        panel.set_collapsed(False)
-        assert panel.maximumHeight() == cap, (
-            "a collapse cycle lost the hosted height cap")
-    finally:
-        shutdown_plate_window(qapp, win)
 
 
 # --- the collapsed log is a REAL band, never a clipped sliver -------------------------------
@@ -211,66 +81,6 @@ def test_a_hosted_log_keeps_its_height_cap_across_a_collapse_cycle(qapp, napari_
 # construction-time sizeHint, BEFORE adopt_status_row grew the panel (header + memory/run
 # bars), so the band rendered as a clipped sliver ("2%" cut mid-label) with no reachable
 # summon toggle.
-
-
-def test_a_collapsed_log_shows_its_whole_header_and_status_rows(qapp, napari_pane_stub,
-                                                                squid_dataset):
-    win = V.PlateWindow(None)
-    try:
-        panel = win._log_panel
-        assert panel.collapsed
-        panel.layout().activate()
-        need = panel.layout().sizeHint().height()
-        assert panel.maximumHeight() >= need, (
-            f"the collapsed log is clipped: cap {panel.maximumHeight()} px against "
-            f"{need} px of header + status rows - the summon toggle and the progress "
-            f"bars are cut mid-pixel")
-        assert panel._toggle.isVisibleTo(panel), "the summon toggle is not in the band"
-        assert panel._status.isVisibleTo(panel), (
-            "the adopted memory/run bars are not in the collapsed band")
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
-def test_a_hosted_collapsed_log_is_a_reachable_band(qapp, napari_pane_stub, squid_dataset):
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    mgr = win._viewer_manager
-    mgr.tabbed_views = True
-    views = [mgr.open([list(win._order)[0]])]
-    _drain_until(qapp, lambda: views[0]._pane is not None, timeout=10)
-    for _ in range(10):
-        qapp.processEvents()
-    try:
-        panel = win._log_panel
-        v = views[0]
-        assert panel.collapsed
-        assert panel._toggle.isVisibleTo(v), (
-            "the hosted collapsed log has no summon affordance on screen")
-        panel.layout().activate()
-        assert panel.maximumHeight() >= panel.layout().sizeHint().height(), (
-            "the hosted collapsed log is clipped")
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
-def test_the_view_column_cannot_claim_more_height_than_its_content(qapp, napari_pane_stub,
-                                                                   squid_dataset):
-    """The blank frame: the docked left column kept the height its collapsed content no
-    longer needed, a dead band between the plate slot and the layer controls. A Maximum
-    vertical policy makes the dock hand freed space to the other slots (qSmartMaxSize
-    caps a no-grow policy at the size hint)."""
-    from qtpy.QtWidgets import QSizePolicy
-
-    root, _ = squid_dataset
-    win, views = _open_view(qapp, root)
-    try:
-        col = views[0]._left_col
-        assert col.sizePolicy().verticalPolicy() == QSizePolicy.Maximum, (
-            "the left column can grow past its content and paints the slack as a blank band")
-    finally:
-        shutdown_plate_window(qapp, win)
 
 
 # --- napari-native chrome is minimized ------------------------------------------------------
@@ -324,8 +134,8 @@ def test_native_chrome_is_minimized(qapp):
 
 def test_the_layer_controls_diet_keeps_at_most_the_three_touched_rows(qapp):
     """Julio, live 2026-08-25: "Layer controls, too much height." The resting blade shows
-    ONLY what a life-science user touches: contrast limits and colormap (napari's autoscale
-    row is chrome since ruling s: the app's ◐ auto chip is the window rule). The
+    ONLY what a life-science user touches: contrast limits, auto-contrast (whose once button
+    runs the app's own rule), colormap. The
     pin is a row-count budget over napari 0.6.6's real image-controls labels, never a
     pixel number."""
     from qtpy.QtWidgets import QComboBox, QFormLayout, QLabel, QWidget
@@ -347,8 +157,8 @@ def test_the_layer_controls_diet_keeps_at_most_the_three_touched_rows(qapp):
     controls.show()
     qapp.processEvents()
     visible = sorted(t for t, lab in rows.items() if lab.isVisibleTo(controls))
-    assert visible == ["colormap:", "contrast limits:"], (
-        f"the resting blade must keep ONLY contrast limits and colormap; "
+    assert visible == ["auto-contrast:", "colormap:", "contrast limits:"], (
+        f"the resting blade must keep ONLY contrast limits, auto-contrast and colormap; "
         f"it shows {visible}")
 
 
@@ -514,26 +324,6 @@ def test_a_view_say_logs_classified_with_its_address(qapp, napari_pane_stub, squ
         shutdown_plate_window(qapp, win)
 
 
-def test_the_collapsed_log_band_shows_the_latest_entry(qapp):
-    from squidxplorer._logpane import LogBus
-    from squidxplorer._logpanel import LogPanel
-
-    bus = LogBus()
-    panel = LogPanel(bus, None, start_collapsed=True)
-    logger = logging.getLogger("squid.xplorer.test_band")
-    rec = logger.makeRecord("squid.xplorer.test_band", logging.WARNING, __file__, 1,
-                            "stitch refused: no positions", (), None)
-    bus.emit_record(rec)
-    for _ in range(5):
-        QApplication.processEvents()
-    assert "stitch refused: no positions" in panel._activity_lbl.text(), (
-        "a collapsed log band must show the latest entry so a refusal is noticed "
-        "without expanding")
-    panel.set_collapsed(False)
-    assert panel._activity_lbl.text() in ("idle", ""), (
-        "expanded, the header goes back to the activity sentence; the body has the lines")
-
-
 # --- the log diet ---------------------------------------------------------------------------
 
 #: An ordinary open-and-preview session's ceiling of INFO lines. The point is a SHORT log:
@@ -602,10 +392,9 @@ def test_an_empty_launch_shows_the_hero_as_a_drop_target_with_one_line(qapp):
         assert "\n" not in win._drop.text(), "the empty state must be ONE centred line"
         # Only the drop line and the collapsed bands: the data-bound title controls (a view
         # combo with nothing to pick, Open view, paste LUTs) wait for an acquisition.
-        for name in ("_view_caption", "_view_combo", "_open_sel_btn", "_plate_paste_btn"):
+        for name in ("_view_caption", "_view_combo", "_open_sel_btn"):
             assert not getattr(win, name).isVisibleTo(win), f"{name} is shown with no data"
         assert not win._left_tabs.isVisibleTo(win), "the operator band is open with no data"
-        assert win._log_panel.collapsed, "the log band is open on an empty launch"
     finally:
         shutdown_plate_window(qapp, win)
 
@@ -619,7 +408,7 @@ def test_the_data_bound_title_controls_appear_with_the_acquisition(qapp, napari_
         win.ingest(str(root))
         qapp.processEvents()
         assert not win._drop.isVisibleTo(win), "the drop target survived the ingest"
-        for name in ("_view_caption", "_view_combo", "_open_sel_btn", "_plate_paste_btn"):
+        for name in ("_view_caption", "_view_combo", "_open_sel_btn"):
             assert getattr(win, name).isVisibleTo(win), f"{name} is hidden after the ingest"
     finally:
         shutdown_plate_window(qapp, win)
@@ -839,48 +628,6 @@ def test_a_scoped_preview_lands_a_layer_and_an_unscoped_one_still_refuses_holes(
 # stuff and the layer toggle, not above."
 
 
-def test_the_plate_and_log_dock_is_appended_under_the_layer_docks(qapp):
-    from qtpy.QtCore import Qt
-    from qtpy.QtWidgets import QDockWidget, QLabel, QMainWindow
-
-    from squidxplorer._napari_pane import append_left_dock, hoist_left_dock
-
-    win = QMainWindow()
-    win.resize(400, 900)
-    controls = QDockWidget("layer controls", win)
-    controls.setWidget(QLabel("contrast"))
-    layers = QDockWidget("layer list", win)
-    layers.setWidget(QLabel("raw: 561"))
-    win.addDockWidget(Qt.LeftDockWidgetArea, controls)
-    win.addDockWidget(Qt.LeftDockWidgetArea, layers)
-    chips = QDockWidget("2D / 3D · ROI", win)
-    chips.setWidget(QLabel("[3D][ROI]"))
-    win.addDockWidget(Qt.LeftDockWidgetArea, chips)
-    hoist_left_dock(win, chips)
-    slots = append_left_dock(win, QLabel("plate · log"), name="plate · log")
-    win.show()
-    qapp.processEvents()
-    left = [d for d in win.findChildren(QDockWidget)
-            if win.dockWidgetArea(d) == Qt.LeftDockWidgetArea]
-    order = [d.windowTitle() for d in sorted(left, key=lambda d: d.geometry().top())]
-    assert order == ["2D / 3D · ROI", "layer controls", "layer list", "plate · log"], order
-    tb = slots.titleBarWidget()
-    assert tb is not None and tb.maximumHeight() == 0, "the slot dock spends a title bar"
-
-
-def test_the_plate_log_slot_lives_outside_the_chips_column(qapp, napari_pane_stub,
-                                                           squid_dataset):
-    root, _ = squid_dataset
-    win, (v,) = _open_view(qapp, root)
-    try:
-        host = v._plate_log_host
-        assert host.parentWidget() is not v._left_col, (
-            "the plate/log slot still sits inside the chips column, above the layer controls")
-        assert not v._left_col.isAncestorOf(host)
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
 # --- ruling o: the left column's real estate ------------------------------------------------
 # Julio, 2026-08-25, screenshot: "Top left corner, realstate not being allocated efficiently."
 
@@ -1007,107 +754,6 @@ def _settle(qapp, n=30):
         qapp.processEvents()
 
 
-def test_our_docks_are_content_sized_and_the_layer_list_is_the_one_stretch_consumer(qapp):
-    from qtpy.QtCore import Qt
-    from qtpy.QtWidgets import QDockWidget, QLabel, QMainWindow, QSizePolicy, QVBoxLayout, QWidget
-
-    from squidxplorer._napari_pane import stretch_dock, watch_dock_fit
-
-    win = QMainWindow()
-    win.resize(400, 900)
-    chips_content = QWidget()
-    cv = QVBoxLayout(chips_content)
-    row = QLabel("[3D][ROI]")
-    cv.addWidget(row)
-    band = QLabel("operators row")
-    cv.addWidget(band)
-    chips = QDockWidget("2D / 3D · ROI", win)
-    chips.setWidget(chips_content)
-    layers = QDockWidget("mosaic layers", win)
-    layers.setWidget(QLabel("raw\n 561\n 488\n BF"))
-    slots = QDockWidget("plate · log", win)
-    slots_content = QWidget()
-    sv = QVBoxLayout(slots_content)
-    plate = QLabel("plate")
-    plate.setFixedHeight(240)
-    log = QLabel("▸ Log  idle")
-    sv.addWidget(plate)
-    sv.addWidget(log)
-    slots.setWidget(slots_content)
-    for d in (chips, layers, slots):
-        win.addDockWidget(Qt.LeftDockWidgetArea, d)
-    watch_dock_fit(chips)
-    watch_dock_fit(slots)
-    stretch_dock(layers)
-    win.show()
-    _settle(qapp)
-
-    assert chips.height() == chips_content.sizeHint().height(), (
-        f"the chips dock is {chips.height()} px for {chips_content.sizeHint().height()} px of content")
-    assert slots.height() == slots_content.sizeHint().height()
-    assert log.isVisibleTo(win) and log.height() > 0, "the log band fell out of the slot dock"
-    assert layers.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
-    assert layers.height() > chips.height() + slots.height(), (
-        "the spare height did not go to the layer list")
-    band.hide()                                  # the operators band collapses
-    _settle(qapp)
-    assert chips.height() == chips_content.sizeHint().height() < 60, (
-        f"a collapsed band left the dock at {chips.height()} px")
-    band.show()
-    _settle(qapp)
-    assert chips.height() == chips_content.sizeHint().height()
-
-
-def test_the_hosted_log_band_is_on_screen_under_the_plate_slot(qapp, napari_pane_stub,
-                                                              squid_dataset):
-    from tests.test_view_deck import _tabbed_plate
-
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
-    try:
-        v = views[0]
-        _settle(qapp)
-        assert v._hosts_plate_slots
-        log = win._log_panel
-        assert log.collapsed
-        assert log.isVisibleTo(v), "the collapsed log is not on screen"
-        assert log.height() >= log.minimumSizeHint().height() > 0, (
-            f"the log band is {log.height()} px: not a reachable band")
-        host = v._plate_log_host
-        assert host.height() >= win._plate_slot_box.height() + log.height(), (
-            "the slot host is shorter than plate + log: the band is clipped")
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
-def test_a_fresh_view_rests_with_the_operators_band_collapsed_and_no_defaults_row(
-        qapp, napari_pane_stub, squid_dataset):
-    """Live on 2888349 the band opened by itself on launch with a bare 'defaults' row."""
-    root, _ = squid_dataset
-    win, (v,) = _open_view(qapp, root)
-    try:
-        v.show()
-        _settle(qapp)
-        fold = v._operators_fold
-        assert fold.collapsed, "the operators band opened without a summon"
-        assert not fold._body.isVisibleTo(v)
-        assert fold.grip.text().startswith("▸")
-        note = v._controls_note
-        assert not note.isVisibleTo(v) or note.text() not in ("", "defaults"), (
-            "a bare 'defaults' row renders with nothing to say")
-        fold.set_collapsed(False)
-        v._refresh_controls_note()
-        assert not note.isVisibleTo(v), "'defaults' is not a fact; the row stays hidden"
-        # A re-show of the host (a dock re-add, a tab switch) keeps the FOLD's own state.
-        fold.set_collapsed(True)
-        fold.hide()
-        fold.show()
-        _settle(qapp)
-        assert not fold._body.isVisibleTo(v)
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
 # --- ruling q: fstack is an operator with a card ---------------------------------------------
 # Julio: "Why isn't the fstack stuff integrated as an operator?" Measured: registered and CLI-
 # runnable, no card, so the view's dropdown (built from the cards) could not select it.
@@ -1121,39 +767,6 @@ def test_every_runnable_operator_has_a_card():
     missing = [n for n in runnable_operators()
                if n not in _OPERATIONS_BY_KEY and n not in CLI_ONLY_OPERATORS]
     assert not missing, f"runnable operator(s) without a card, invisible to the GUI: {missing}"
-
-
-def test_fstack_is_selectable_in_the_view_and_declares_a_depth_collapsing_plane_op(
-        qapp, napari_pane_stub, squid_dataset):
-    from squidxplorer import is_region_operator, operator_consumes
-    from squidxplorer._engine import operator_output
-    from squidxplorer._operations import _OPERATIONS_BY_KEY
-
-    card = _OPERATIONS_BY_KEY["fstack"]
-    assert card.label == "Focus stack (all-in-focus)"
-    assert card.blurb == "Fuse each z stack into one all-in-focus image (Pertuz SAF)."
-    assert len(card.blurb.split(". ")) == 1
-    # The same facts Preview / Run on plate read: per-FOV, z-collapsing (the 2D tab shows its
-    # one plane; a save writes the acquisition-format copy like mip).
-    assert not is_region_operator("fstack")
-    assert "z" in operator_consumes("fstack")
-    assert operator_output("fstack", {}) == (True, "intensity")
-
-    root, _ = squid_dataset
-    win, (v,) = _open_view(qapp, root)
-    try:
-        combo = v._op_combo
-        keys = [combo.itemData(i) for i in range(combo.count())]
-        assert "fstack" in keys, f"fstack is not in the view's dropdown: {keys}"
-        v.show_operator_controls_for("fstack")
-        _settle(qapp)
-        panel = v._inserted_panel
-        assert panel is not None, "fstack's inline panel did not insert"
-        assert panel.adv_btn is not None and panel.adv_btn.text() == "advanced parameters"
-        assert sorted(panel.widgets) == ["alpha", "nhsize", "sth"]
-        assert not v._controls_note.isVisibleTo(v), "an empty headline must not render a row"
-    finally:
-        shutdown_plate_window(qapp, win)
 
 
 # --- ruling r: a preview's layer has the asking view's raw extent and lands only there --------
@@ -1308,35 +921,44 @@ def test_the_seed_reads_the_finest_rung_its_budget_allows():
     assert sample_plane([fine, mid, coarse], max_px=10).shape == coarse.shape
 
 
-def test_napari_s_autoscale_row_is_chrome_and_the_auto_chip_lands_through_set_contrast(
-        qapp, napari_pane_stub, squid_dataset):
-    from squidxplorer._contrast import auto_contrast
-    from squidxplorer._napari_pane import NATIVE_HIDDEN_ROWS
+def test_the_continuous_autoscale_button_is_hidden_and_once_stays(qapp):
+    from qtpy.QtWidgets import QFormLayout, QHBoxLayout, QLabel, QPushButton, QWidget
 
-    assert "auto-contrast:" in NATIVE_HIDDEN_ROWS
-    root, _ = squid_dataset
-    win, (v,) = _open_view(qapp, root)
-    try:
-        assert v._btn_auto.text() == "◐ auto"
-        mosaic = v._pane.mosaic
-        _drain_until(qapp, lambda: bool(mosaic.channels(mosaic.visible_op() or "raw")), timeout=10)
-        channel = mosaic.channels(mosaic.visible_op())[0]
-        before = tuple(mosaic.find(mosaic.visible_op(), channel).contrast_limits)
-        samples = v._on_screen_samples()
-        assert channel in samples
-        want = auto_contrast(np.asarray(samples[channel]))
-        seen = []
-        mosaic.on_user_contrast(lambda ch, lo, hi: seen.append(ch)) \
-            if hasattr(mosaic, "on_user_contrast") else None
-        v._btn_auto.click()
-        layer = mosaic.find(mosaic.visible_op(), channel)
-        _drain_until(qapp, lambda: tuple(layer.contrast_limits) == tuple(want), timeout=20)
-        assert tuple(layer.contrast_limits) == pytest.approx(tuple(want)), (
-            f"the chip did not land our window {want}; layer holds {tuple(layer.contrast_limits)} "
-            f"(was {before})")
-        assert not seen, "an app write must not read as a user gesture"
-    finally:
-        shutdown_plate_window(qapp, win)
+    from squidxplorer._napari_pane import hide_native_rows
+
+    controls = QWidget()
+    form = QFormLayout(controls)
+    holder = QWidget()
+    row = QHBoxLayout(holder)
+    once, cont = QPushButton("once"), QPushButton("continuous")
+    row.addWidget(once)
+    row.addWidget(cont)
+    form.addRow(QLabel("auto-contrast:"), holder)
+    controls.show()
+    qapp.processEvents()
+    hidden = hide_native_rows(controls)
+    assert "continuous autoscale" in hidden
+    assert once.isVisibleTo(controls) and not cont.isVisibleTo(controls)
+
+
+def test_the_floor_clears_a_poisson_background():
+    """G7 561 / FOV 1 / z 7: mode 896, sigma 18.7, max 3840; mode + 2 sigma rendered 16.7% of
+    the background as speckle. The floor is the background population's 99th percentile."""
+    from squidxplorer._contrast import auto_contrast
+
+    rng = np.random.default_rng(3)
+    plane = rng.poisson(900.0, (1024, 1024)).astype(np.uint16)
+    background = plane.copy()
+    cells = []
+    for _ in range(30):
+        y, x = rng.integers(10, 1010, 2)
+        plane[y:y + 6, x:x + 6] = rng.integers(2500, 3800)
+        cells.append(plane[y:y + 6, x:x + 6].copy())
+    cell_px = np.concatenate([c.ravel() for c in cells])
+    lo, hi = auto_contrast(plane)
+    above = float((background > lo).mean())
+    assert above < 0.01, f"{above:.2%} of the background renders above black (floor {lo})"
+    assert hi >= float(np.percentile(cell_px, 99)) * 0.98, f"the ceiling {hi} cuts the cells"
 
 
 # --- ruling t: the param slot holds CONTROLS only, never a sentence -------------------------
@@ -1348,35 +970,249 @@ def _is_sentence(text: str) -> bool:
     return bool(t) and (t.endswith(".") or len(t.split()) > 6)
 
 
-def test_the_param_slot_holds_controls_only_and_mip_s_chip_is_disabled(qapp, napari_pane_stub,
-                                                                       squid_dataset):
-    from qtpy.QtWidgets import QLabel, QTextEdit
+# --- ruling u: one channel's checkbox is one channel's checkbox -------------------------------
+# Julio, live on G7 after an ROI decon preview: "When I turn off layer 561 for decon, the whole
+# layer turns off." Compute side settled headless (all three channels solved and delivered).
 
-    from squidxplorer import operator_params
+
+def test_hiding_one_result_channel_leaves_the_op_s_other_channels_and_raw_alone(
+        qapp, napari_pane_stub, squid_dataset):
+    from qtpy.QtCore import Qt
+
+    from squidxplorer._layer_tree import MosaicTree
 
     root, _ = squid_dataset
     win, (v,) = _open_view(qapp, root)
     try:
+        region = v.current_region()
+        fov = list(win._meta["fovs_per_region"][region])[0]
+        mosaic = v._pane.mosaic
+        channels = [c["name"] for c in win._meta["channels"]]
+        assert len(channels) >= 2
+        _drain_until(qapp, lambda: len(mosaic.channels("raw")) == len(channels), timeout=10)
+        assert v.deliver_result("mip", _scoped_result(win, region, fov), visible=True) >= 2
+        _settle(qapp)
+        for ch in channels:
+            assert mosaic.find("mip", ch) is not None, f"no (mip, {ch}) layer"
+            assert len(mosaic.layers_for("mip", ch)) == 1, "one layer per (op, channel) in 2D"
+        raw_before = {ch: bool(mosaic.find("raw", ch).visible) for ch in channels}
+        tree = MosaicTree(mosaic)
+        m = tree.model()
+        op_row = next(i for i, (op, _chs) in enumerate(m._rows) if op == "mip")
+        ch_row = m._rows[op_row][1].index(channels[0])
+        idx = m.index(ch_row, 0, m.index(op_row, 0))
+        assert m._key_at(idx) == ("mip", channels[0]), "the channel row is not keyed as one"
+        assert m.setData(idx, Qt.Unchecked, Qt.CheckStateRole)
+        _settle(qapp)
+        assert not mosaic.find("mip", channels[0]).visible
+        for ch in channels[1:]:
+            assert mosaic.find("mip", ch).visible, (
+                f"hiding (mip, {channels[0]}) also hid (mip, {ch}): the whole op went dark")
+        assert {ch: bool(mosaic.find("raw", ch).visible) for ch in channels} == raw_before, (
+            "raw was touched by a result channel's checkbox")
+        # The same through the layer's own property (napari's own list writes this).
+        mosaic.find("mip", channels[1]).visible = False
+        _settle(qapp)
+        mosaic.find("mip", channels[1]).visible = True
+        _settle(qapp)
+        assert mosaic.find("mip", channels[1]).visible
+        assert not mosaic.find("mip", channels[0]).visible, "re-lighting one channel lit another"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+# =============================================================================================
+# Ruling v (Julio, 2026-08-25): the REVERSAL of "hidden by default and summoned". Nothing
+# collapses; everything is visible, well-sized, one spacing. v2: the log is a fixed slot, never
+# floated. v4: the LUT clipboard is shelved whole. w: ONE parameter surface. x: napari's menu
+# bar is chrome. y: the one bar is the run bar. v1: a slider spans its OWN channel.
+# =============================================================================================
+
+
+def test_nothing_collapses_any_more_absence_pins():
+    import squidxplorer._region_viewer as RV
+    import squidxplorer._lut_clipboard as LC
+    import squidxplorer._napari_pane as NP
+    from squidxplorer._logpanel import LogPanel
+
+    assert not hasattr(RV, "_FoldSection"), "_FoldSection is back"
+    for name in ("set_operators_collapsed", "set_controls_collapsed", "summon_controls",
+                 "_show_operator_controls", "_copy_luts", "_paste_luts", "lutsPasted",
+                 "_refresh_controls_note", "_params_summary", "_refresh_quick_iterations"):
+        assert not hasattr(RV.RegionViewer, name), f"RegionViewer.{name} is back"
+    for name in ("grip", "toggle", "GRIP_PX"):
+        assert not hasattr(V._PlateSlotBox, name), f"the plate slot is collapsible again ({name})"
+    for name in ("set_collapsed", "toggle", "collapsed", "set_expanded_cap", "float_requested",
+                 "collapsedChanged"):
+        assert not hasattr(LogPanel, name), f"LogPanel.{name} is back"
+    for name in ("_float_log", "_redock_log", "_on_log_collapsed", "_rehand_band", "show_log",
+                 "_paste_luts_onto_plate", "_follow_window_luts", "_LOG_FLOAT_KEY"):
+        assert not hasattr(V.PlateWindow, name), f"PlateWindow.{name} is back"
+    for name in ("CLIPBOARD", "copy_luts", "paste_luts"):
+        assert not hasattr(LC, name), f"the LUT clipboard is back ({name})"
+    for name in ("_DockFitter", "watch_dock_fit", "stretch_dock", "hoist_left_dock",
+                 "append_left_dock", "fit_dock_to_content"):
+        assert not hasattr(NP, name), f"the dock-fit mechanism is back ({name})"
+    assert isinstance(RV.COLUMN_PX, int), "one spacing constant"
+
+
+def test_every_chip_and_the_operator_row_are_visible_at_rest(qapp, napari_pane_stub,
+                                                            squid_dataset):
+    from qtpy.QtWidgets import QAbstractButton, QLabel
+
+    root, _ = squid_dataset
+    win, (v,) = _open_view(qapp, root)
+    try:
+        v.show()
+        _settle(qapp)
+        for name in ("_btn_3d", "_btn_roi", "_btn_fovs", "_btn_focus", "_btn_record", "_btn_png",
+                     "_op_combo", "_btn_preview", "_btn_run_plate"):
+            assert getattr(v, name).isVisibleTo(v), f"{name} is not visible at rest"
+        for name in ("_btn_controls", "_btn_copy_luts", "_btn_paste_luts", "_btn_auto",
+                     "_iter_spin", "_controls_note"):
+            assert not hasattr(v, name), f"{name} is back"
         combo = v._op_combo
-        keys = [combo.itemData(i) for i in range(combo.count()) if combo.itemData(i)]
-        assert "mip" in keys and "fstack" in keys
-        for key in keys:
-            v.show_operator_controls_for(key)
-            _settle(qapp, 5)
-            if not operator_params(key):
-                assert not v._btn_controls.isEnabled(), f"{key}: chip enabled with no parameters"
-                assert v._btn_controls.toolTip() == "no parameters"
-                assert v._inserted_panel is None, f"{key}: something inserted for no parameters"
-                continue
-            assert v._btn_controls.isEnabled()
-            panel = v._inserted_panel
-            assert panel is not None, f"{key}: no panel inserted"
-            prose = [w.text() if isinstance(w, QLabel) else w.toPlainText()
-                     for w in panel.findChildren((QLabel, QTextEdit))
-                     if not w.isHidden() and _is_sentence(
-                         w.text() if isinstance(w, QLabel) else w.toPlainText())]
-            assert not prose, f"{key}: prose in the param slot: {prose}"
-            v._show_operator_controls()          # remove before the next
-            _settle(qapp, 5)
+
+        def pick(key):
+            combo.setCurrentIndex(next(i for i in range(combo.count()) if combo.itemData(i) == key))
+            _settle(qapp)
+
+        pick("decon")
+        panel = v._inserted_panel
+        assert panel is not None and panel.isVisibleTo(v), "decon's controls did not follow"
+        assert sorted(panel.widgets) == ["iterations"], sorted(panel.widgets)
+        assert panel.ni_combo.currentText() == "1.000 (air)"
+        area = [w for w in v.operator_panel().findChildren((QLabel, QAbstractButton))
+                if not w.isHidden()]
+        blob = " ".join(w.text().lower() for w in area) + " " + \
+            panel.widgets["iterations"].prefix().lower()
+        assert blob.count("iterations") == 1, f"'iterations' appears {blob.count('iterations')}x"
+        panel.widgets["iterations"].setValue(9)
+        assert win.operator_kwargs_for("decon")["iterations"] == 9, "the panel is not the store"
+        pick("mip")
+        assert v._inserted_panel is None, "a parameter-less operator shows nothing"
+        pick("fstack")
+        assert v._inserted_panel is not None and v._inserted_panel.adv_btn is not None
+        assert v._inserted_panel.adv_btn.text() == "advanced parameters"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_the_log_is_a_fixed_slot_with_no_bar_at_rest_and_one_bar_during_a_run(
+        qapp, napari_pane_stub, squid_dataset):
+    from qtpy.QtWidgets import QProgressBar
+
+    from squidxplorer._logpanel import LogPanel
+    from squidxplorer._progress import ProgressReport
+    from tests.test_view_deck import _tabbed_plate
+
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
+    try:
+        log = win._log_panel
+        assert log.height() == LogPanel.SLOT_PX
+        assert not hasattr(log, "_float_btn") and not hasattr(log, "_toggle")
+        v = deck.current_page()
+        assert v._hosts_plate_slots and log.isVisibleTo(v), "the log slot is not in the view"
+
+        def bars():
+            return [b for b in log.findChildren(QProgressBar) if not b.isHidden()]
+
+        assert not bars(), "a bar shows with no run live (y)"
+        mgr.set_run_progress(ProgressReport(label="decon", done=2, total=9, unit="field"))
+        _settle(qapp)
+        assert len(bars()) == 1, f"{len(bars())} bars during a run"
+        mgr.set_run_progress(None)
+        _settle(qapp)
+        assert not bars(), "the bar survived the run's end"
+        # The addendum: switching tabs re-homes the plate slot at its fixed height, visible.
+        for page in (views[1], views[0]):
+            deck._tabs.setCurrentWidget(page)
+            _settle(qapp)
+        cur = deck.current_page()
+        box = win._plate_slot_box
+        assert box.height() == V._PlateSlotBox.PLATE_SLOT_PX
+        assert cur._plate_log_host.isAncestorOf(box), "the plate slot is not in the current view"
+        assert win._overview.isVisibleTo(cur), "the overview is not showing after a tab switch"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_naparis_menu_bar_is_chrome_and_the_decks_menu_is_file_and_view(qapp, napari_pane_stub,
+                                                                       squid_dataset):
+    from qtpy.QtCore import Qt
+    from qtpy.QtGui import QAction, QKeySequence
+    from qtpy.QtTest import QTest
+    from qtpy.QtWidgets import QMainWindow
+
+    from squidxplorer._napari_pane import minimize_native_chrome
+    from tests.test_view_deck import _tabbed_plate
+
+    win = QMainWindow()
+    fired = []
+    act = QAction("Open File(s)...", win)
+    act.setShortcut(QKeySequence.StandardKey.Open)
+    act.triggered.connect(lambda *_: fired.append("napari open"))
+    win.menuBar().addMenu("&File").addAction(act)
+    win.show()
+    qapp.processEvents()
+    hidden = minimize_native_chrome(win)
+    assert "menu bar" in hidden
+    bar = win.menuBar()
+    assert bar.isHidden() and not bar.isNativeMenuBar() and not bar.actions()
+    QTest.keyClick(win, Qt.Key_O, Qt.ControlModifier)
+    qapp.processEvents()
+    assert not fired, "a hidden napari menu's shortcut still fires"
+
+    root, _ = squid_dataset
+    plate, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    try:
+        menus = [a.menu().title() for a in deck.menuBar().actions() if a.menu() is not None]
+        assert menus == ["&File", "&View"], menus
+        file_actions = [a.text() for a in deck.menuBar().actions()[0].menu().actions()]
+        assert file_actions == ["&Open Acquisition…", "&Quit"], file_actions
+    finally:
+        shutdown_plate_window(qapp, plate)
+
+
+def test_a_dim_channel_s_slider_spans_its_own_maximum_not_the_saturated_channel_s():
+    from squidxplorer import _bitdepth
+
+    depth = _bitdepth.new_dataset(np.uint16)
+    heard = []
+    depth.on_change(lambda ch, lo, hi: heard.append((ch, lo, hi)))
+    sat = np.full((64, 64), 65520, np.uint16)
+    dim = np.full((64, 64), 900, np.uint16)
+    dim[3, 3] = 3840
+    depth.observe_array(sat, "Fluorescence_488_nm_Ex")
+    depth.observe_array(dim, "Fluorescence_561_nm_Ex")
+    assert _bitdepth.range_for(np.uint16, "Fluorescence_488_nm_Ex") == (0.0, 65535.0)
+    lo, hi = _bitdepth.range_for(np.uint16, "Fluorescence_561_nm_Ex")
+    assert 3840 <= hi <= 3840 * 1.10, f"the dim channel's range top {hi} is not within 10% of its max"
+    assert [h[0] for h in heard] == ["Fluorescence_488_nm_Ex", "Fluorescence_561_nm_Ex"]
+    depth.observe_array(np.full((4, 4), 100, np.uint16), "Fluorescence_561_nm_Ex")
+    assert _bitdepth.range_for(np.uint16, "Fluorescence_561_nm_Ex") == (lo, hi), "a range narrowed"
+    _bitdepth.new_dataset(None)
+
+
+def test_naparis_once_button_runs_our_rule_on_an_app_layer(qapp, napari_pane_stub, squid_dataset):
+    from squidxplorer._contrast import auto_contrast
+
+    root, _ = squid_dataset
+    win, (v,) = _open_view(qapp, root)
+    try:
+        assert not hasattr(v, "_btn_auto")
+        mosaic = v._pane.mosaic
+        plane, spot_px = _sparse_plane()
+        layer = mosaic.add_result("intensity", "demo", "Fluorescence_561_nm_Ex", plane,
+                                  bbox_um=(0.0, 0.0, 1024.0, 1024.0), visible=True)
+        want = auto_contrast(np.asarray(mosaic.displayed_sample(layer)))
+        layer.reset_contrast_limits()            # what napari's once button calls
+        _drain_until(qapp, lambda: tuple(layer.contrast_limits) == pytest.approx(tuple(want)),
+                     timeout=20)
+        lo, hi = layer.contrast_limits
+        assert (lo, hi) == pytest.approx(want), f"once landed {(lo, hi)}, not our window {want}"
+        p99 = float(np.percentile(spot_px, 99))
+        assert 0.98 * p99 <= hi <= 1.2 * p99 and hi < float(plane.max())
     finally:
         shutdown_plate_window(qapp, win)

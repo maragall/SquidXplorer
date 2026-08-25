@@ -130,32 +130,6 @@ def test_a_gesture_in_a_window_leaves_the_plate_alone(qapp, squid_dataset):
         win.close()
 
 
-def test_the_plates_own_lut_pair_stays_shelved_and_the_window_pair_is_two_buttons(
-        qapp, squid_dataset):
-    """2026-08-19, twice: "Shelf the LUT logic completely", then "I do want the copy paste LUT.
-    But ultra simple, minimal, two button logic." So: the PLATE grows no copy/paste surface of
-    its own (absence pinned with `not hasattr`, the repo's convention), the WINDOW pair is back
-    as exactly two handlers over one module-level dict, and a window gesture still leaves the
-    plate alone (the test above) — only a PASTE moves the plate's contrast."""
-    import squidxplorer._lut_clipboard as LC
-    import squidxplorer._region_viewer as RV
-
-    win = _open_plate(squid_dataset)
-    try:
-        assert not hasattr(win, "_plate_copy_luts"), "the plate copy handler is back"
-        assert not hasattr(win, "_plate_paste_luts"), "the plate paste handler is back"
-        assert not hasattr(win, "_plate_copy_lut_btn") and not hasattr(win, "_plate_paste_lut_btn")
-        assert isinstance(LC.CLIPBOARD, dict), "the one clipboard is a plain dict on purpose"
-        assert callable(LC.copy_luts) and callable(LC.paste_luts)
-        assert not hasattr(RV, "_LUT_CLIPBOARD"), "the clipboard alias is back"
-        assert callable(getattr(RV.RegionViewer, "_copy_luts", None))
-        assert callable(getattr(RV.RegionViewer, "_paste_luts", None))
-        assert not hasattr(RV.RegionViewer, "_match_raw_contrast"), (
-            "match-to-raw is shelved whole; it must not ride back in with the clipboard")
-    finally:
-        win.close()
-
-
 def test_a_channel_the_plate_does_not_have_is_ignored_rather_than_raising(qapp, squid_dataset):
     """An unknown channel must be dropped quietly — an exception here dies inside a Qt slot."""
     win = _open_plate(squid_dataset)

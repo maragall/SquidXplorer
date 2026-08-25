@@ -74,7 +74,7 @@ def test_the_save_checkbox_is_gone(view):
 def test_every_operator_row_button_fits_its_text(view):
     """Julio: "Watchout, because some buttons are too small to fit text"."""
     win, _calls = view
-    for btn in (win._btn_preview, win._btn_run_plate, win._btn_controls):
+    for btn in (win._btn_preview, win._btn_run_plate):
         needed = btn.fontMetrics().horizontalAdvance(btn.text())
         assert btn.sizeHint().width() >= needed, (
             f"{btn.text()!r}: sizeHint {btn.sizeHint().width()} px cannot fit its "

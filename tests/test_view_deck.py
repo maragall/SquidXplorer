@@ -346,58 +346,6 @@ def test_the_operator_dock_is_retired(qapp, napari_pane_stub, squid_dataset):
         shutdown_plate_window(qapp, win)
 
 
-def test_controls_inserts_the_param_slot_under_the_operators_row(qapp, napari_pane_stub,
-                                                                 squid_dataset):
-    """Julio (2026-08-25): "see this as an insertion to a list." ⚙ controls re-hosts the
-    plate's live panel into THIS view's param slot; a second click removes it; the plate's
-    kwargs reader still sees the same widget (one source of truth)."""
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
-    v = views[0]
-    try:
-        v.operator_panel()
-        combo = v._op_combo
-        i = next(k for k in range(combo.count()) if combo.itemData(k) == "stitch")
-        combo.setCurrentIndex(i)
-        v._show_operator_controls()
-        qapp.processEvents()
-        panel = v._inserted_panel
-        assert panel is not None and panel is win._op_tabs["stitch"], (
-            "the inserted panel is not the plate's live widget")
-        assert v._param_slot.indexOf(panel) >= 0, "the panel is not in the view's param slot"
-        assert win._left_tabs.indexOf(panel) == -1, "the panel is still a plate tab"
-        # The values set IN THE SLOT are what a run reads: one source of truth.
-        panel.widgets["registration_channel"].setValue(2)
-        assert win.operator_kwargs_for("stitch")["registration_channel"] == 2
-        # The second click REMOVES the slot, and the panel survives (plate registry).
-        v._show_operator_controls()
-        assert v._inserted_panel is None
-        assert win._op_tabs["stitch"] is panel and panel.widgets["registration_channel"].value() == 2
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
-def test_a_disposed_view_releases_the_inserted_panel_alive(qapp, napari_pane_stub,
-                                                           squid_dataset):
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
-    v = views[0]
-    try:
-        v.operator_panel()
-        combo = v._op_combo
-        combo.setCurrentIndex(next(k for k in range(combo.count())
-                                   if combo.itemData(k) == "stitch"))
-        v._show_operator_controls()
-        panel = v._inserted_panel
-        panel.widgets["registration_channel"].setValue(7)
-        v.dispose()
-        qapp.processEvents()
-        assert win._op_tabs["stitch"] is panel, "disposing the view lost the plate's panel"
-        assert panel.widgets["registration_channel"].value() == 7, "the panel's state died with the view"
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
 # --- the cost, said out loud ------------------------------------------------------------------
 
 def test_the_deck_names_the_memory_once_there_are_many_views(qapp, napari_pane_stub,

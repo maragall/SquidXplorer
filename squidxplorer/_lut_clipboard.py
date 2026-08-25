@@ -1,4 +1,5 @@
-"""The window-side LUT helpers, and the ULTRA-MINIMAL two-button clipboard (2026-08-19).
+"""The window-side LUT helpers (per-channel look read/apply). The two-button clipboard was
+shelved whole on 2026-08-25 (Julio: "The copy paste luts should be shelfed").
 
 The old clipboard chrome (the plate-side pair, per-channel pickers) was shelved on Julio's
 instruction and stays shelved; the same day he asked for the minimum back: "I do want the copy
@@ -24,33 +25,6 @@ from __future__ import annotations
 from typing import Optional
 
 _RAW_OP = "raw"
-
-#: THE clipboard — one per process, shared by every window's copy/paste pair. A plain dict on
-#: purpose (Julio, 2026-08-19: "ultra simple, minimal, two button logic").
-CLIPBOARD: "dict[str, dict]" = {}
-
-
-def copy_luts(win) -> int:
-    """Copy this window's per-channel look into :data:`CLIPBOARD`. Returns channels copied."""
-    luts = per_channel_luts(win)
-    CLIPBOARD.clear()
-    CLIPBOARD.update(luts)
-    return len(luts)
-
-
-def paste_luts(win) -> Optional[int]:
-    """Paste :data:`CLIPBOARD` onto this window's layers. ``None`` = no mosaic here.
-
-    PLATE PARITY is the caller's half: ``RegionViewer._paste_luts`` emits ``lutsPasted`` after
-    this lands, and the plate (``PlateWindow._follow_window_luts`` ->
-    ``PlateOverview.follow_channel_window``) reads the pasted window's own layers and follows
-    each channel's window. The paste is the ONE event that moves the plate's contrast — a drag
-    still does not — so the drift Julio named ("plate contrast is different from the window
-    contrast") cannot re-open without breaking the pinned parity test.
-    """
-    return apply_luts(win, dict(CLIPBOARD))
-
-
 
 def per_channel_luts(win) -> "dict[str, dict]":
     """Read this window's per-channel LUTs off its OWN napari layers (the raw mosaic's)."""

@@ -17,6 +17,10 @@ _MIN_SPAN = 10.0
 #: Foreground membership for the ceiling: this many background sigmas above the mode, and
 #: at least this many sampled pixels (a lone hot pixel is not a population).
 _FOREGROUND_SIGMA = 5.0
+#: The background population for the floor: pixels under this many sigmas above the mode,
+#: and the percentile of it the floor sits at (< 1% of background renders above black).
+_BACKGROUND_SIGMA = 6.0
+_BACKGROUND_PCT = 99.5
 _FOREGROUND_MIN_PX = 16
 _FALLBACK_SPAN = 100.0
 
@@ -45,6 +49,14 @@ def auto_contrast(data: Any, pmax: float = 99.9,
     bg_std = float(np.std(background)) if background.size else abs(mode_val) * 0.1
 
     lo = mode_val + 2.0 * bg_std
+    # THE FLOOR SITS ABOVE THE BACKGROUND (Julio, 2026-08-25: the 561 background rendered as
+    # yellow speckle). Measured on G7 561 / FOV 1 / z 7 (mode 896, sigma 18.7): mode + 2 sigma
+    # leaves 16.7% of background pixels above black, + 3 sigma 7.7%, + 4 sigma 3.0%; the 99th
+    # percentile of the background population (pixels under mode + 6 sigma) leaves 0.99%.
+    # The below-median sigma is a half-normal under-estimate, so the percentile is the rule.
+    background_population = flat[flat < mode_val + _BACKGROUND_SIGMA * bg_std]
+    if background_population.size:
+        lo = max(lo, float(np.percentile(background_population, _BACKGROUND_PCT)))
     hi = float(np.percentile(flat, pmax))
     # THE CEILING IS FOREGROUND-AWARE (Julio, 2026-08-25: "the napari autocontrast SUCKS for
     # the G7 dataset"; a sparse field: bright cells on black). On a plane whose objects are

@@ -279,7 +279,6 @@ def test_playing_a_window_renders_a_DIFFERENT_frame_per_timepoint(
         values = _added_values(pane, channel)
         assert all(a != b for a, b in zip(values, values[1:])), values
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -313,7 +312,6 @@ def test_a_superseded_load_cannot_repaint_the_window_with_its_own_timepoint(
         win._on_done(TIME_SERIES_REGION, 1, gen=stale_gen)
         assert _added_values(pane, channel) == before, "a superseded load repainted the window"
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -337,7 +335,6 @@ def test_a_superseded_load_does_not_open_the_playback_gate(
         win._on_done(TIME_SERIES_REGION, 1, gen=win._load_gen)
         assert opened == [True], "the current load did NOT open the frame gate"
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -367,7 +364,6 @@ def test_a_reload_reuses_the_layers_instead_of_destroying_them(
         assert pane.mosaic.find(_RAW_OP, channel) is before_layer, (
             "the reload destroyed the raw layers; every frame now pays a full rebuild")
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -485,7 +481,6 @@ def test_a_region_change_never_hands_napari_a_layer_of_another_shape(
             previous = region
     finally:
         W._MosaicWorker = real_worker
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -522,7 +517,6 @@ def test_a_timepoint_change_keeps_the_very_same_layer_object(
                 f"timepoint {time_point} destroyed and rebuilt the layer instead of reusing it")
     finally:
         W._MosaicWorker = real_worker
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -546,7 +540,6 @@ def test_a_load_that_produces_nothing_DOES_drop_the_stale_layers(
         assert pane.mosaic.find(_RAW_OP, TIME_SERIES_CHANNELS[0]) is None, (
             "a load that built nothing left the previous timepoint's pixels on screen")
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -584,7 +577,6 @@ def test_the_camera_is_not_re_framed_on_every_frame(
         assert len(frames) == was, (
             f"the camera was re-framed {len(frames) - was} times while only the timepoint moved")
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -612,7 +604,6 @@ def test_a_finished_mosaic_worker_is_released_rather_than_piling_up(
             "the window is still holding its finished worker; nothing will ever free it")
         assert win._retired_workers == [], "superseded workers were never reaped"
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()

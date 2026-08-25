@@ -124,7 +124,7 @@ def fuse_region_mosaic(
         # data. Anything downstream is strided (`sub`, below) or averaged, and a maximum taken
         # from a decimated plane UNDER-states the real one -- which snaps the ceiling too low and
         # clips. ~0.06 ms on a 2048x2048 frame against a 2.6 ms decode.
-        _bitdepth.depth().observe_array(frame)
+        _bitdepth.depth().observe_array(frame, channel)
         sub = frame[::step, ::step]
         r0, c0 = row // step, col // step
         r1, c1 = min(r0 + sub.shape[0], out_h), min(c0 + sub.shape[1], out_w)
@@ -345,7 +345,7 @@ class _WindowedLevel:
                                              self._z, self._t))
         if frame.ndim != 2:
             frame = frame.reshape(frame.shape[-2:])
-        _bitdepth.depth().observe_array(frame)   # same full-resolution observation _fuse_levels makes
+        _bitdepth.depth().observe_array(frame, self._channel)   # full-res, per channel
         if self._region_fits(frame):
             self._cache.put(key, frame)
         return frame
@@ -398,7 +398,7 @@ class _WindowedLevel:
                                                                              copy=False)
         # An area-averaged plane UNDER-states the true ceiling, but the range only ever
         # widens (_bitdepth): this seeds a floor until the first full-resolution decode.
-        _bitdepth.depth().observe_array(arr)
+        _bitdepth.depth().observe_array(arr, self._channel)
         self._cache.put(self._plane_key, arr)
         return arr
 
@@ -481,7 +481,7 @@ def _fuse_levels(reader: Any, meta: dict, region: str, channel: str, z_level: in
         # any `frame[::step, ::step]` below has a chance to hide the brightest pixel. This is the
         # observation that covers every region the app displays, and it lands on the worker
         # thread BEFORE `ready` is emitted -- so a region's layer is built already knowing it.
-        _bitdepth.depth().observe_array(frame)
+        _bitdepth.depth().observe_array(frame, channel)
         row, col = offsets[fov]
         for px, h, w, st, _dt in plans:
             step = int(st)

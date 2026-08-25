@@ -239,18 +239,47 @@ class DeconPanel(GenericOperatorPanel):
 
         from squidxplorer._decon import session_ni, set_session_ni
 
+        # NI as a DROPDOWN, value with the medium beside it (Julio, 2026-08-25, ruling w):
+        # 1.000 (air) default, water, silicone, glycerol, oil, or custom.
+        from qtpy.QtWidgets import QComboBox
+
+        from squidxplorer._decon import IMMERSION_MEDIA
+
+        self.ni_combo = QComboBox()
+        for value, medium in IMMERSION_MEDIA:
+            self.ni_combo.addItem(f"{value:.3f} ({medium})", float(value))
+        self.ni_combo.addItem("custom", None)
         self.ni_spin = QDoubleSpinBox()
         self.ni_spin.setDecimals(3)
         self.ni_spin.setRange(1.0, 2.0)
         self.ni_spin.setSingleStep(0.01)
-        self.ni_spin.setValue(float(session_ni() or 1.0))
-        self.ni_spin.setToolTip("Immersion refractive index: 1.0 air, 1.33 water, 1.515 oil.")
-        self.ni_spin.valueChanged.connect(lambda v: set_session_ni(float(v)))
-        set_session_ni(float(self.ni_spin.value()))
+        self.ni_spin.setVisible(False)
+        current = float(session_ni() or 1.0)
+        k = next((i for i in range(self.ni_combo.count())
+                  if self.ni_combo.itemData(i) == current), None)
+        if k is None:
+            k = self.ni_combo.count() - 1
+            self.ni_spin.setValue(current)
+        self.ni_combo.setCurrentIndex(k)
+        self.ni_spin.setVisible(self.ni_combo.itemData(k) is None)
+
+        def _ni() -> float:
+            v = self.ni_combo.currentData()
+            return float(self.ni_spin.value()) if v is None else float(v)
+
+        def _on_ni(*_):
+            self.ni_spin.setVisible(self.ni_combo.currentData() is None)
+            set_session_ni(_ni())
+
+        self.ni_combo.currentIndexChanged.connect(_on_ni)
+        self.ni_spin.valueChanged.connect(_on_ni)
+        set_session_ni(_ni())
         lab = QLabel("ni:")
-        lab.setToolTip(self.ni_spin.toolTip())
+        lab.setToolTip("Immersion refractive index; the one PSF input no Squid file records.")
+        self.ni_combo.setToolTip(lab.toolTip())
         at = self.v.indexOf(self.status)
-        self.v.insertLayout(at, _row(lab, self.ni_spin))
+        self.v.insertLayout(at, _row(lab, self.ni_combo))
+        self.v.insertWidget(at + 1, self.ni_spin)
         _apply_qss(self)
 
 

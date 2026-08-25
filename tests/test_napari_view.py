@@ -427,7 +427,7 @@ def test_widening_the_range_does_not_move_a_single_contrast_limit(layers, twelve
     """The anti-flash assertion: opening the slider's travel changes no pixel on the canvas."""
     lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(100.0, 3000.0))
 
-    assert layers.widen_contrast_range(0.0, 16383.0) == 1
+    assert layers.widen_contrast_range("488", 0.0, 16383.0) == 1
 
     assert list(lyr.contrast_limits) == [100.0, 3000.0]
     assert list(lyr.contrast_limits_range) == [0.0, 16383.0]
@@ -436,9 +436,9 @@ def test_widening_the_range_does_not_move_a_single_contrast_limit(layers, twelve
 def test_widening_NEVER_narrows(layers, twelve_bit):
     """A narrower range does not merely restyle the slider -- napari clips the window into it."""
     lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(100.0, 3000.0))
-    layers.widen_contrast_range(0.0, 16383.0)
+    layers.widen_contrast_range("488", 0.0, 16383.0)
 
-    assert layers.widen_contrast_range(0.0, 4095.0) == 0
+    assert layers.widen_contrast_range("488", 0.0, 4095.0) == 0
     assert list(lyr.contrast_limits_range) == [0.0, 16383.0]
 
 
@@ -452,7 +452,7 @@ def test_widening_the_range_is_not_reported_as_a_USER_gesture(layers, twelve_bit
     seen = []
     layers.on_user_contrast(lambda *a: seen.append(a))
 
-    layers.widen_contrast_range(0.0, 16383.0)
+    layers.widen_contrast_range("488", 0.0, 16383.0)
 
     assert seen == []
 
@@ -462,7 +462,7 @@ def test_widening_skips_the_layers_that_have_no_contrast_at_all(layers, twelve_b
     layers.add_mosaic("raw", "488", _img(), contrast_limits=(100.0, 3000.0))
     layers.add_labels("nuclei", "488", np.zeros((32, 32), dtype=np.uint32))
 
-    assert layers.widen_contrast_range(0.0, 16383.0) == 1        # the image only
+    assert layers.widen_contrast_range("488", 0.0, 16383.0) == 1        # the image only
 
 
 def test_a_float_result_layer_keeps_its_own_range(layers, twelve_bit):
@@ -480,7 +480,10 @@ def test_a_region_change_re_widens_the_slider_without_moving_the_window(layers, 
     lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(100.0, 3000.0))
     assert list(lyr.contrast_limits_range) == [0.0, 4095.0]
 
-    _bitdepth.depth().observe(16380.0)                       # E7 is read
+    import numpy as np
+
+    # PER CHANNEL (2026-08-25): E7's 488 frames are read, so 488's own ceiling rises.
+    _bitdepth.depth().observe_array(np.array([[16380]], np.uint16), "488")
     same = layers.add_mosaic("raw", "488", _img(seed=1))     # same identity -> reuse
 
     assert same is lyr

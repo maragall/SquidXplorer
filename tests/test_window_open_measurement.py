@@ -59,7 +59,6 @@ def manager(qapp, napari_pane_stub, squid_dataset):
     try:
         yield mgr
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()

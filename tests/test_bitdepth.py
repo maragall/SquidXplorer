@@ -124,22 +124,28 @@ def test_nan_does_not_move_the_ceiling():
 
 
 def test_subscribers_hear_every_rise_and_nothing_else():
-    seen: list[tuple[float, float]] = []
-    d = _bitdepth.depth()
-    d.on_change(lambda lo, hi: seen.append((lo, hi)))
+    """Per CHANNEL (2026-08-25): a subscriber hears a channel's own ceiling rise."""
+    import numpy as np
 
-    d.observe(_A_DIM_REGION)                    # 65535 -> 4095
-    d.observe(3000.0)                           # no change
-    d.observe(_A_DATASET)                       # 4095 -> 16383
-    assert seen == [(0.0, 4095.0), (0.0, 16383.0)]
+    seen: list = []
+    d = _bitdepth.depth()
+    d.on_change(lambda ch, lo, hi: seen.append((ch, lo, hi)))
+
+    d.observe_array(np.array([[_A_DIM_REGION]], np.uint16), "c")
+    d.observe_array(np.array([[3000]], np.uint16), "c")          # no rise
+    d.observe_array(np.array([[_A_DATASET]], np.uint16), "c")   # reaches 14 bits
+    assert seen == [("c", 0.0, _bitdepth.channel_ceiling(_A_DIM_REGION)), ("c", 0.0, 16383.0)]
 
 
 def test_a_raising_subscriber_does_not_lose_the_ceiling():
     """A broken listener is a broken listener, not a reason to mis-render the data."""
+    import numpy as np
+
     d = _bitdepth.depth()
-    d.on_change(lambda lo, hi: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert d.observe(_A_DATASET) is True
+    d.on_change(lambda ch, lo, hi: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert d.observe_array(np.array([[_A_DATASET]], np.uint16), "c") is True
     assert d.ceiling == 16383.0
+    assert d.channel_range("c") == (0.0, 16383.0)
 
 
 def test_the_env_override_pins_the_ceiling(monkeypatch):

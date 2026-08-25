@@ -270,7 +270,6 @@ def region_window(qapp, napari_pane_stub, squid_dataset):
     try:
         yield win
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -330,7 +329,6 @@ def navigator(qapp):
     from squidxplorer._region_viewer import StatusRow, ViewerManager
 
     mgr = ViewerManager()
-    mgr._mem_timer.stop()                       # no polling: this test is not about memory
     panel = StatusRow(mgr)
     try:
         yield mgr, panel
@@ -379,7 +377,6 @@ def test_a_status_row_built_MID_RUN_shows_the_bar_without_waiting_for_the_next_u
     from squidxplorer._region_viewer import StatusRow, ViewerManager
 
     mgr = ViewerManager()
-    mgr._mem_timer.stop()
     mgr.set_run_progress(ProgressReport("decon", 5, 27, FOV_UNIT))
     panel = StatusRow(mgr)                      # built AFTER the run was already reporting
     try:
