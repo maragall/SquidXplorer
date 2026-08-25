@@ -26,7 +26,11 @@ menu = _load("menu")
 
 
 def _probe_ok():
-    return True, ""
+    return "cuda", "GPU: CUDA (petakit)"
+
+
+def _probe_cpu():
+    return "cpu", "CPU only: nvidia-smi not on PATH, no NVIDIA driver visible"
 
 
 def _row(rows, extra):
@@ -60,29 +64,69 @@ def test_an_operator_registered_with_an_extra_appears_in_its_own_row():
         del _OPERATORS["_menu_test_op"]
 
 
-def test_defaults_match_the_plan_decon_checked():
-    rows = menu.build_menu(probe=_probe_ok)
+@pytest.mark.parametrize("probe", [_probe_ok, _probe_cpu])
+def test_defaults_match_the_plan_decon_checked_on_every_machine(probe):
+    """decon is offered everywhere and starts checked: the probe is a NOTE, never a shade."""
+    rows = menu.build_menu(probe=probe)
     for extra in ("core", "stitch", "decon"):
         assert _row(rows, extra).checked, f"{extra} should start checked"
+    assert not hasattr(_row(rows, "decon"), "enabled"), "the shade came back"
 
 
+# the GPU probe: a three-way fact shown as the decon row's note
 
-# the CUDA probe
-
-def test_a_failed_cuda_probe_shades_decon_with_the_probe_reason():
-    rows = menu.build_menu(probe=lambda: (False, "no CUDA 12 driver on this Mac"))
+def test_the_decon_row_carries_the_probes_note_and_stays_checked():
+    rows = menu.build_menu(probe=_probe_cpu)
     decon = _row(rows, "decon")
-    assert not decon.enabled
-    assert not decon.checked
-    assert decon.reason == "no CUDA 12 driver on this Mac"
-    assert "no CUDA 12 driver on this Mac" in menu.render(rows)
+    assert decon.checked
+    assert decon.note.startswith("CPU only")
+    assert "CPU only" in menu.render(rows)
+    assert "[-]" not in menu.render(rows), "a shaded box; decon is never shaded"
+    assert _row(rows, "stitch").note == "", "only the decon row is GPU-noted"
 
 
 def test_the_probe_names_the_missing_driver(monkeypatch):
     monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
-    ok, why = menu.cuda12_available()
+    ok, why = bootstrap.cuda12_available()
     assert not ok
     assert "nvidia-smi" in why
+
+
+def _cuda(ok, reason=""):
+    return lambda: (ok, reason)
+
+
+def test_a_cuda12_driver_is_the_cuda_backend_on_any_platform():
+    for system, machine in (("Linux", "x86_64"), ("Windows", "AMD64"), ("Darwin", "arm64")):
+        kind, note = bootstrap.gpu_backend(system, machine, cuda=_cuda(True))
+        assert kind == "cuda"
+        assert note == "GPU: CUDA (petakit)"
+
+
+def test_apple_silicon_without_cuda_is_the_mps_backend():
+    kind, note = bootstrap.gpu_backend("Darwin", "arm64",
+                                       cuda=_cuda(False, "nvidia-smi not on PATH"))
+    assert kind == "mps"
+    assert note == "GPU: Apple (torch MPS)"
+
+
+@pytest.mark.parametrize("system,machine", [
+    ("Darwin", "x86_64"),           # an Intel Mac has no MPS torch wheel
+    ("Linux", "x86_64"),
+    ("Windows", "AMD64"),
+])
+def test_everything_else_is_cpu_only_and_says_why(system, machine):
+    kind, note = bootstrap.gpu_backend(system, machine,
+                                       cuda=_cuda(False, "nvidia-smi not on PATH"))
+    assert kind == "cpu"
+    assert note.startswith("CPU only")
+    assert "nvidia-smi not on PATH" in note
+
+
+def test_the_real_probe_answers_for_this_machine():
+    kind, note = bootstrap.gpu_backend()
+    assert kind in {"cuda", "mps", "cpu"}
+    assert note
 
 
 # click-path defaults: double-clicked with no flags, every argument resolves itself
@@ -99,11 +143,28 @@ def test_the_default_env_lives_under_the_users_app_data():
     assert str(env).startswith(str(Path.home()))
 
 
-def test_default_extras_gate_decon_on_the_probe():
-    assert bootstrap.default_extras(probe=lambda: (True, ""))[0] == ["gui", "stitch", "decon"]
-    extras, note = bootstrap.default_extras(probe=lambda: (False, "no CUDA 12 here"))
-    assert extras == ["gui", "stitch"], "a desktop install must always carry the gui extra"
-    assert "no CUDA 12 here" in note
+def test_default_extras_carry_decon_everywhere_and_the_cuda_payload_only_on_cuda():
+    extras, note = bootstrap.default_extras(probe=_probe_ok)
+    assert extras == ["gui", "stitch", "decon", bootstrap.CUDA_EXTRA]
+    assert "GPU: CUDA" in note
+    extras, note = bootstrap.default_extras(probe=lambda: ("mps", "GPU: Apple (torch MPS)"))
+    assert extras == ["gui", "stitch", "decon"], "a desktop install must always carry the gui extra"
+    assert "GPU: Apple" in note
+    extras, note = bootstrap.default_extras(probe=_probe_cpu)
+    assert extras == ["gui", "stitch", "decon"], "decon installs on a CPU-only machine too"
+    assert "CPU only" in note
+
+
+def test_the_cuda_payload_extra_exists_in_pyproject_and_names_cupy():
+    import tomllib
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    groups = tomllib.loads(pyproject.read_text())["project"]["optional-dependencies"]
+    assert bootstrap.CUDA_EXTRA in groups
+    assert any(r.startswith("cupy-cuda12x") for r in groups[bootstrap.CUDA_EXTRA])
+    assert any(r.startswith("torch") and "darwin" in r and "arm64" in r
+               for r in groups["decon"]), \
+        "the decon extra must carry torch for Apple Silicon, by marker"
 
 
 def test_without_a_wheel_or_source_the_refusal_says_so(tmp_path, capsys, monkeypatch):

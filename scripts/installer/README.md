@@ -5,8 +5,10 @@ the squidxplorer wheel and a `uv` binary ride inside the frozen setup program
 (PyInstaller `--add-data`; bootstrap reads them back from `sys._MEIPASS/payload`).
 Click it and it installs the whole thing: a private env
 (`%LOCALAPPDATA%\SquidXplorer\env` on Windows, `~/.local/share/squidxplorer/env`
-elsewhere) with extras `gui` + `stitch`, plus `decon` when the CUDA-12 probe passes,
-then a double-clickable launcher pointing at the viewer.
+elsewhere) with extras `gui` + `stitch` + `decon` on every machine, plus `decon-cuda`
+(petakit's cupy payload) when the GPU probe sees an NVIDIA CUDA-12 driver, then a
+double-clickable launcher pointing at the viewer. The probe prints which decon backend
+the machine gets: `GPU: CUDA (petakit)`, `GPU: Apple (torch MPS)`, or `CPU only`.
 
 Rerun the same file later with `--extras` to add operators (Fiji model; the env is
 upgraded in place). Flags override every default; `--dry-run` prints the exact uv
@@ -26,8 +28,9 @@ refuses a plain double-click — right-click → Open → Open (or
 **~/Applications/SquidXplorer.app** launches the viewer; the app bundle is built
 locally by the installer, so it carries no quarantine flag and double-clicks cleanly.
 
-`decon` never installs here: petakit is cupy-cuda12x and no Mac passes the probe. The
-installer says so rather than failing.
+`decon` runs on the Apple GPU here (torch MPS, pulled in by the decon extra on Apple
+Silicon); an Intel Mac gets the CPU path. Until the petakit pin moves past its
+cupy-cuda12x hard requirement (see pyproject), the decon install still fails on a Mac.
 
 ## Linux (x86_64) — `SquidXplorer-Setup-x86_64.AppImage`
 
@@ -35,6 +38,9 @@ Download, `chmod +x` once (or file manager → Properties → "Allow executing")
 double-click or `./SquidXplorer-Setup-x86_64.AppImage`. On success **SquidXplorer**
 appears in the application menu. Needs glibc ≥ 2.35 (ubuntu-22.04 build machine); on a
 system without FUSE, run it with `--appimage-extract-and-run`.
+
+`decon` installs on Linux and Windows alike; an NVIDIA machine whose `nvidia-smi` reports a
+CUDA-12 driver also gets `decon-cuda` (cupy) and runs on the GPU, any other box runs on CPU.
 
 ## What the machine needs (and does not need)
 
