@@ -320,6 +320,130 @@ def test_native_chrome_is_minimized(qapp):
     assert hidden, "nothing was reported hidden; the inventory must be named"
 
 
+# --- decon is just decon: the preview scope follows the tab ---------------------------------
+# Julio (2026-08-25): "2d decon vs 3d decon. That's confusing. It should just say decon. if
+# it's on 3D mode it runs it on all panes, if it's on 2d mode it runs it only on that one."
+
+
+def _depthkeep_operator():
+    """A core depth-keeping z-consumer (decon's declaration shape, no petakit needed)."""
+    import numpy as np
+
+    from squidxplorer import add_operator
+
+    def _stack(planes):
+        return np.asarray([np.asarray(p) for p in planes])
+
+    _stack.keeps_depth = True
+    add_operator("depthkeep_probe", _stack, consumes={"z"})
+    return "depthkeep_probe"
+
+
+def _z_reader(n_z=3):
+    import numpy as np
+
+    from tests.conftest import FakeReader
+
+    meta = {
+        "regions": ["A1"], "channels": [{"name": "488", "display_color": "#00FF00"}],
+        "z_levels": list(range(n_z)), "n_z": n_z, "n_t": 1, "dtype": "uint16",
+        "frame_shape": (4, 4), "pixel_size_um": 1.0, "dz_um": 1.0,
+        "fovs_per_region": {"A1": [0]},
+        "fov_positions_um": {("A1", 0): (0.0, 0.0)},
+    }
+    planes = lambda region, fov, ch, z, t: np.full((4, 4), 10 * z + 1, np.uint16)
+    return FakeReader(meta, planes)
+
+
+def test_a_2d_preview_solves_exactly_the_plane_in_view():
+    from squidxplorer._dispatch import run_operator_once
+
+    op = _depthkeep_operator()
+    reader = _z_reader()
+    got = []
+    result = run_operator_once(reader, operator=op, save=False, owed=1,
+                               regions=["A1"], n_fovs=None,
+                               on_well=lambda r, f, img: got.append(img),
+                               preview_z_level=1)
+    assert result.landed == 1
+    assert sorted({z for (_r, _f, _c, z, _t) in reader.reads}) == [1], (
+        f"a 2D preview must read ONLY the in-view plane; read z {sorted({k[3] for k in reader.reads})}")
+    assert got[0].shape[2] == 1, "the restricted preview must yield a 1-plane result"
+
+
+def test_a_3d_preview_and_a_reducer_preview_keep_the_full_stack():
+    from squidxplorer._dispatch import run_operator_once
+
+    op = _depthkeep_operator()
+    reader = _z_reader()
+    got = []
+    run_operator_once(reader, operator=op, save=False, owed=1, regions=["A1"], n_fovs=None,
+                      on_well=lambda r, f, img: got.append(img), preview_z_level=None)
+    assert sorted({k[3] for k in reader.reads}) == [0, 1, 2]
+    assert got[0].shape[2] == 3, "an unrestricted preview keeps every plane"
+
+    # A z-REDUCER ignores the restriction by declaration: the MIP of one plane is a
+    # different result, so the guard must never let preview_z_level reach it.
+    reducer_reader = _z_reader()
+    run_operator_once(reducer_reader, operator="mip", save=False, owed=1, regions=["A1"],
+                      n_fovs=None, on_well=lambda r, f, img: None, preview_z_level=1)
+    assert sorted({k[3] for k in reducer_reader.reads}) == [0, 1, 2], (
+        "a reducer's preview must still consume every plane")
+
+
+def test_a_save_always_runs_the_full_stack(tmp_path):
+    from squidxplorer._dispatch import run_operator_once
+
+    op = _depthkeep_operator()
+    reader = _z_reader()
+    run_operator_once(reader, operator=op, save=True, owed=1, regions=["A1"], n_fovs=None,
+                      out_dir=str(tmp_path), on_well=lambda r, f, img: None,
+                      preview_z_level=1)
+    assert sorted({k[3] for k in reader.reads}) == [0, 1, 2], (
+        "Run on plate must deconvolve the full stack whatever tab asked")
+
+
+def test_the_region_arm_refuses_a_z_restriction_by_name():
+    import pytest as _pytest
+
+    import squidxplorer
+
+    reader = _z_reader()
+    with _pytest.raises(ValueError, match="z_operator"):
+        list(squidxplorer.run_plate(reader, operator="stitch", z_level=1))
+
+
+def test_no_gui_string_says_2d_or_3d_decon():
+    """The operator is just "decon" everywhere a user reads (Julio, 2026-08-25); the mode is
+    how we VIEW it. Same sweep shape as the em-dash guard: non-docstring literals only."""
+    import ast
+    from pathlib import Path
+
+    import squidxplorer
+
+    banned = ("2d decon", "3d decon", "volume solve")
+    offenders: list[str] = []
+    for path in sorted(Path(squidxplorer.__file__).parent.glob("*.py")):
+        tree = ast.parse(path.read_text())
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+                body = getattr(node, "body", [])
+                if body and isinstance(body[0], ast.Expr) \
+                        and isinstance(body[0].value, ast.Constant) \
+                        and isinstance(body[0].value.value, str):
+                    docstrings.add(id(body[0].value))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                    and id(node) not in docstrings \
+                    and any(b in node.value.lower() for b in banned):
+                offenders.append(f"{path.name}:{node.lineno} {node.value!r:.80}")
+    assert not offenders, (
+        "user-facing strings must say just 'decon'; the 2D/3D words are how we view it:\n"
+        + "\n".join(offenders))
+
+
 # --- the log diet ---------------------------------------------------------------------------
 
 #: An ordinary open-and-preview session's ceiling of INFO lines. The point is a SHORT log:

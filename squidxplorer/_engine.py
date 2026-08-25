@@ -386,9 +386,9 @@ def _resolve_operator(name) -> Operator:
         return operator
     if name == "decon3d":
         raise KeyError(
-            "operator 'decon3d' was renamed to 'decon' (2026-08-24): 'decon' IS the volume "
-            "solve now - true 3-D RL over the whole stack, every plane kept, and on an n_z=1 "
-            "acquisition it equals the old per-plane result. Run operator='decon'.")
+            "operator 'decon3d' was renamed to 'decon' (2026-08-24): decon deconvolves the "
+            "whole z stack (every plane kept; on an n_z=1 acquisition it equals the old "
+            "per-plane result). Run operator='decon'.")
     if any(char in name for char in _CHAIN_CHARS):
         raise ValueError(
             f"{name!r} is a chain expression, and operator chaining was removed: an operator is "
@@ -425,6 +425,7 @@ def run_plate(
     workers: int | None = None,
     on_error=None,
     operator_kwargs: Optional[dict] = None,
+    z_level: Optional[int] = None,
 ) -> Iterator[tuple[str, int, np.ndarray]]:
     """Run *operator* over every selected well, streaming ``(region, fov, image)`` results.
 
@@ -433,8 +434,14 @@ def run_plate(
     else the per-FOV loop. ``n_fovs`` defaults to the LOOP's own default (1 per-FOV; every FOV
     for a region operator); an explicit int is the per-FOV loop's knob and is REFUSED on the
     region arm — a FOV subset of a region is spelled ``regions={region: [fov, ...]}``.
+    ``z_level=`` restricts the per-FOV loop to one acquisition plane (``project_well``'s own
+    knob: plane-ops and depth-keeping z-consumers only) and is refused on the region arm.
     """
     if is_region_operator(operator):
+        if z_level is not None:
+            raise ValueError(
+                f"a region operator's z handling is its z_operator: z_level={z_level!r} would "
+                "silently crop the fusion. Pass z_operator= in operator_kwargs instead.")
         from squidxplorer._stitch import _stitch_plate
 
         if n_fovs is not N_FOVS_LOOP_DEFAULT and n_fovs is not None:
@@ -449,7 +456,8 @@ def run_plate(
     return _project_plate(reader,
                           n_fovs=1 if n_fovs is N_FOVS_LOOP_DEFAULT else n_fovs,
                           workers=workers, operator=operator,
-                          on_error=on_error, regions=regions, operator_kwargs=operator_kwargs)
+                          on_error=on_error, regions=regions, operator_kwargs=operator_kwargs,
+                          z_level=z_level)
 
 
 def _project_plate(
@@ -461,6 +469,7 @@ def _project_plate(
     on_error=None,
     regions=None,
     operator_kwargs: Optional[dict] = None,
+    z_level: Optional[int] = None,
 ) -> Iterator[tuple[str, int, np.ndarray]]:
     """Project every selected well in parallel, streaming ``(region, fov, image)`` results.
 
@@ -497,7 +506,7 @@ def _project_plate(
             except StopIteration:
                 return False
             future = pool.submit(project_well, reader, region, fov,
-                                 reduce=fn, consumes=op.consumes)
+                                 reduce=fn, consumes=op.consumes, z_level=z_level)
             in_flight[future] = (region, fov)
             return True
 

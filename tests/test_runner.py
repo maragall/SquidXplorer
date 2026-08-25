@@ -95,7 +95,7 @@ class _RecordingRunner:
         return dict(self.manifest)
 
     def run_preview(self, reader, spec, *, workers=None, on_well=None,
-                    on_error=None, stop=None):
+                    on_error=None, stop=None, z_level=None):
         self.calls.append(("preview", reader, spec, None))
         return 1, False
 

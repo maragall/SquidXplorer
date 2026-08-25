@@ -31,8 +31,11 @@ class Runner(Protocol):
         ...  # pragma: no cover - protocol declaration
 
     def run_preview(self, reader, spec: RunSpec, *, workers=None, on_well=None,
-                    on_error=None, stop=None) -> "tuple[int, bool]":
-        """Stream the run to *on_well*, writing nothing; returns ``(landed, stopped)``."""
+                    on_error=None, stop=None, z_level=None) -> "tuple[int, bool]":
+        """Stream the run to *on_well*, writing nothing; returns ``(landed, stopped)``.
+
+        ``z_level=`` restricts a depth-keeping per-FOV preview to ONE acquisition plane (the
+        2D tab's sub-second preview, Julio 2026-08-25); a save never takes it."""
         ...  # pragma: no cover - protocol declaration
 
 
@@ -75,13 +78,14 @@ class InProcessRunner:
             operator_kwargs=operator_kwargs)
 
     def run_preview(self, reader, spec: RunSpec, *, workers=None, on_well=None,
-                    on_error=None, stop=None) -> "tuple[int, bool]":
+                    on_error=None, stop=None, z_level=None) -> "tuple[int, bool]":
         # PREVIEW: the same engine over the same arguments, writing nothing to disk.
         import squidxplorer
 
         stream = squidxplorer.run_plate(
             reader, operator=spec.operator, workers=workers, n_fovs=spec.n_fovs,
-            on_error=on_error, regions=spec.regions, operator_kwargs=spec.operator_kwargs)
+            on_error=on_error, regions=spec.regions, operator_kwargs=spec.operator_kwargs,
+            z_level=z_level)
         landed, stopped = 0, False
         try:
             for region, fov, image in stream:

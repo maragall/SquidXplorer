@@ -253,14 +253,22 @@ def project_well(
             raise ValueError(f"timepoint {time_point} out of range for an acquisition with n_t={n_t}")
         timepoints = (time_point,)
 
-    # One acquisition plane; refused for a z-consumer ("the MIP of one plane" is a different result).
+    # A z-consuming operator that DECLARES ``keeps_depth`` (on the callable) returns the whole
+    # PROCESSED stack — decon: true 3-D deconvolution whose every plane the user examines — so
+    # the output depth is the input's while the operator still sees all z in one call.
+    keeps_depth = bool(getattr(reduce, "keeps_depth", False)) and "z" in consumes
+
+    # One acquisition plane; refused for a z-REDUCER ("the MIP of one plane" is a different
+    # result). A keeps_depth z-consumer ACCEPTS it: the run is the same solve over a 1-plane
+    # stack, the pinned degenerate case (a 2D tab's preview, Julio 2026-08-25).
     if z_level is not None:
-        if "z" in consumes:
+        if "z" in consumes and not keeps_depth:
             raise ValueError(
                 f"z_level={z_level} selects ONE acquisition plane, which is only meaningful for a "
-                f"plane-op. {getattr(reduce, '__name__', reduce)!r} declares "
-                f"consumes={sorted(consumes)} - it REDUCES over z, so restricting it to one plane "
-                "would silently change what it computes. Drop z_level=, or use a plane-op."
+                f"plane-op or a depth-keeping z-consumer. {getattr(reduce, '__name__', reduce)!r} "
+                f"declares consumes={sorted(consumes)} - it REDUCES over z, so restricting it to "
+                "one plane would silently change what it computes. Drop z_level=, or use a "
+                "plane-op."
             )
         if z_level not in z_levels:
             raise ValueError(
@@ -269,10 +277,6 @@ def project_well(
 
     # z consumed -> one group per (t, c); z not consumed -> one group per (t, c, z).
     z_groups = [tuple(z_levels)] if "z" in consumes else [(z_level,) for z_level in z_levels]
-    # A z-consuming operator that DECLARES ``keeps_depth`` (on the callable) returns the whole
-    # PROCESSED stack — decon: true 3-D deconvolution whose every plane the user examines — so
-    # the output depth is the input's while the operator still sees all z in one call.
-    keeps_depth = bool(getattr(reduce, "keeps_depth", False)) and "z" in consumes
     out_depth = len(z_levels) if keeps_depth else len(z_groups)
     out = np.empty((len(timepoints), len(channels), out_depth, y, x), dtype=meta["dtype"])
     # One specialisation per channel for operators declaring `for_channel`.

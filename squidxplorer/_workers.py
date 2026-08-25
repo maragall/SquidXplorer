@@ -50,13 +50,16 @@ class _OperatorWorker(QThread):
 
     def __init__(self, operator: str, reader, meta, fov_index: dict, out_dir: str,
                  regions=None, save: bool = True, n_fovs=1, operator_kwargs=None,
-                 z_level: int = 0):
+                 z_level: int = 0, preview_z_level=None):
         super().__init__()
         self._operator = operator
         # The z plane the DISPLAY gets from a depth-keeping result: the requesting view's own
         # in-view z (Julio, 2026-08-25: "decon runs on a z-level that's not in view"). Clamped
         # per result in _result_pixels; 0 for a run no view asked for.
         self._z_level = max(0, int(z_level or 0))
+        # A 2D tab's preview COMPUTES only that plane too (None = full depth; dispatch
+        # applies it only to a depth-keeping per-FOV preview, by declaration).
+        self._preview_z = None if preview_z_level is None else int(preview_z_level)
         self._reader, self._meta = reader, meta
         self._fov_index = fov_index
         self._out_dir = out_dir
@@ -203,7 +206,8 @@ class _OperatorWorker(QThread):
                 # a region operator runs one well at a time: peak memory is workers x one fused mosaic
                 workers=1 if self._region_op else _VIEWER_WORKERS,
                 parameters=self._operator_kwargs, tiff=False,
-                on_well=self._on_well, on_error=self._on_error, stop=self._stop.is_set)
+                on_well=self._on_well, on_error=self._on_error, stop=self._stop.is_set,
+                preview_z_level=self._preview_z)
             if result.stopped:
                 _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
                 return  # window closing / re-opening; drop out cleanly (no final/written emit)

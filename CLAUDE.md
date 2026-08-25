@@ -1115,6 +1115,20 @@ operators hidden by default and summoned, never a separate window.
   stay hidden across 2D/3D flips and cover layers added after open (the container's
   currentChanged re-applies); verified on the real pane, pinned headless in
   tests/test_hero_declutter.py.
+- **Decon is just "decon", and the preview scope follows the TAB** (Julio, 2026-08-25: "2D
+  3D buttons are just how we view it"): no user-facing string says 2D decon, 3D decon or
+  volume solve (swept in tests/test_hero_declutter.py, same shape as the dash guard), and
+  the render-mode prefixes on the controls note and run echoes are gone. A 2D tab's
+  PREVIEW of a depth-keeping per-FOV operator computes ONLY the z plane in view - the same
+  solve over a 1-plane stack, the pinned degenerate case - via `preview_z_level`
+  (view -> `run_operator` -> `_OperatorWorker` -> `run_operator_once` -> `run_preview` ->
+  `run_plate(z_level=)` -> `project_well(z_level=)`, which now ACCEPTS one plane for a
+  keeps_depth z-consumer and still refuses it for a reducer). Declaration-driven at the
+  dispatch (`not is_region_operator and not operator_reduces_depth`), never a name match;
+  a 3D tab previews the full stack; a SAVE always runs full depth (the restriction is
+  computed before the copy arm flips `save`, so a copy-writing save can never be
+  z-cropped); the region arm refuses `z_level=` by name. The Preview tooltip carries the
+  one honesty caption: the saved run's mid stack planes also gain from their neighbors.
 - **The log diet**: INFO is for facts a user acts on; narration went to DEBUG (deep-zoom
   arming, preview cache/seed stats, bitdepth widening, cache pruning, measure_run's
   "starting" twin, 3D/gallery open+timing lines, well-image backfill skips). Kept INFO on

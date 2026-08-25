@@ -857,7 +857,9 @@ class RegionViewer(QMainWindow):
         # the right-edge dock). The save checkbox is gone.
         self._btn_preview = self._chip(
             "Preview", "Preview the selected operator on THIS view's regions; nothing is "
-            "written to disk.", self._preview_view_operator)
+            "written to disk. In a 2D tab a depth keeping operator previews only the z "
+            "plane in view; Run on plate processes the full stack, where mid stack planes "
+            "also gain from their neighbors.", self._preview_view_operator)
         opr.addWidget(self._btn_preview)
         self._btn_run_plate = self._chip(
             "Run on plate", self._RUN_PLATE_TIP, self._run_plate_operator)
@@ -1053,7 +1055,9 @@ class RegionViewer(QMainWindow):
         if not key:
             note.setText("")
             return
-        note.setText(f"{self._render_mode.upper()} · {self._params_summary(str(key))}")
+        # No 2D/3D mode prefix (Julio, 2026-08-25: "2D 3D buttons are just how we view
+        # it"): the operator is the same operator whatever the tab shows.
+        note.setText(self._params_summary(str(key)))
 
     def _iterations_param(self, key):
         """The integer ``iterations`` :class:`Param` the selected operator DECLARES, or None.
@@ -1183,7 +1187,7 @@ class RegionViewer(QMainWindow):
         self._insert_param_slot(op_key, panel)
         self._refresh_controls_note()
         self._say(f"controls: {combo.currentText()} - inserted below. This window will run it "
-                  f"{self._render_mode.upper()} with {self._params_summary(str(key))}.")
+                  f"with {self._params_summary(str(key))}.")
 
     def _refresh_record_chip(self) -> None:
         """Enable the record chip only when there is a movie to make, and SAY WHY when there is not."""
@@ -1470,15 +1474,22 @@ class RegionViewer(QMainWindow):
             log.info("view %s running %s on %s with %s", self.window_id, key,
                      ("the plate scope" if regions is None else
                       (regions if isinstance(regions, dict) else list(regions))), kwargs)
+            # A 2D tab's preview COMPUTES only the plane in view; a 3D tab's preview keeps
+            # the whole stack (Julio, 2026-08-25: "if it's on 3D mode it runs it on all
+            # panes, if it's on 2d mode it runs it only on that one"). A save always runs
+            # full depth; the dispatch applies the restriction by declaration only.
+            preview_z = (self._z_slider_index()
+                         if not save and self._render_mode != "3d" else None)
             self._run_operator(key, regions=regions, save=save, requester=requester,
                                operator_kwargs=kwargs,
                                # A depth-keeping preview must show THE PLANE THIS VIEW IS ON
                                # (Julio, 2026-08-25), so the run carries the view's own z.
-                               z_level=self._z_slider_index())
+                               z_level=self._z_slider_index(),
+                               preview_z_level=preview_z)
             mode = "saving" if save else "previewing"
             where = ("the plate scope" if regions is None else self._view_label(list(regions)))
             self._echo(f"{mode} {self._op_combo.currentText()} on {where} "
-                       f"[{self._render_mode.upper()}] · {self._params_summary(key)}.")
+                       f"· {self._params_summary(key)}.")
         except Exception as exc:                          # noqa: BLE001 - named to the window
             self._say(f"could not start {self._op_combo.currentText()}: {exc}")
 
