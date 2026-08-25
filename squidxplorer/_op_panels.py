@@ -700,11 +700,11 @@ class DeconQCPanel(_Panel):
     def __init__(self, host):
         super().__init__(
             host, "Deconvolution (Richardson-Lucy)",
-            "Richardson-Lucy is SEMI-CONVERGENT: the halo tightens for a few iterations and "
-            "then a disc around the core starts growing back as the algorithm fits noise. "
-            "There is no universally correct count, so sweep once, step the captured "
-            "iterations below by eye, and adopt the one that looks right for the run.")
-        from squidxplorer._decon import QC_START_ITERATIONS
+            "Semi-convergent: sweep once, step the captures, adopt the count that looks right.")
+        from squidxplorer._decon import (
+            DEFAULT_ITERATIONS, IMMERSION_MEDIA, QC_START_ITERATIONS,
+            session_ni, set_session_ni,
+        )
         from squidxplorer._decon_qc import DEFAULT_CROP_HALF, DEFAULT_VIEW_HALF
 
         self._crop_half = DEFAULT_CROP_HALF
@@ -714,56 +714,49 @@ class DeconQCPanel(_Panel):
         self._view_subject = None
         self._sweep_at = None            # (region, fov, channel) the captures belong to
 
-        self.v.addWidget(_head("WHERE TO MEASURE"))
-        self.region_combo = QComboBox()
-        for region in getattr(host, "_order", []):
-            self.region_combo.addItem(region)
-        self.fov_spin = QSpinBox()
-        self.fov_spin.setRange(0, 9999)
-        self.fov_spin.setToolTip(
-            "The QC runs on ONE FOV. A recommendation is for THIS sample at THIS exposure - "
-            "SNR and structure decide the answer, so it is never a global default.")
-        self.v.addLayout(_row(QLabel("Region:"), self.region_combo,
-                              QLabel("FOV:"), self.fov_spin))
+        # ── THE HEADLINE: iterations + NI + NA. Everything else stays at its default and
+        # hides (Julio, 2026-08-25: "There are so many parameters that should be default and
+        # our life science user should not want to see them"). ─────────────────────────────
+        self.run_iter_spin = QSpinBox()
+        self.run_iter_spin.setRange(1, 100)
+        self.run_iter_spin.setValue(DEFAULT_ITERATIONS)
+        self.run_iter_spin.setToolTip(
+            "The iteration count every decon run uses while this panel is open; the sweep's "
+            "'use k iterations' button writes here.")
+        self.v.addLayout(_row(QLabel("iterations:"), self.run_iter_spin))
 
-        self.channel_combo = QComboBox()
-        for name in _channel_names(host):
-            self.channel_combo.addItem(name)
-        self.channel_combo.setToolTip(
-            "The PREVIEW channel: the sweep solves this one channel only. The emission "
-            "wavelength of this channel sets its PSF; the kernel is a VECTORIAL PSF computed "
-            "from the acquisition's own optics, not a Gaussian.")
-        self.channel_combo.currentTextChanged.connect(
-            lambda *_: self._refresh_optics_note())
-        self.v.addLayout(_row(QLabel("Channel:"), self.channel_combo))
-        # The preview-vs-run contract, in plain words: Julio (2026-08-24) read a one-channel
-        # preview as "decon was running on only one channel".
-        self.preview_note = _wrapped("", _SUB)
-        self.v.addWidget(self.preview_note)
-
-        # -- optics: the immersion index is CHOSEN, never silently inferred off the NA
-        # (Julio, 2026-08-24: "Let it assume air, but user can then click water or oil").
-        # One source of truth: the choice lands in _decon's session state, which
-        # optics_for_channel applies to BOTH the QC solve and the real run's PSF. -----------
-        from squidxplorer._decon import IMMERSION_MEDIA, session_ni, set_session_ni
-
-        self.v.addWidget(_head("OPTICS"))
+        # The immersion index is CHOSEN, never inferred off the NA (Julio, 2026-08-24); the
+        # choice lands in _decon's session state, one source of truth for QC and runs alike.
         self.ni_combo = QComboBox()
         for value, medium in IMMERSION_MEDIA:
             self.ni_combo.addItem(f"{value:.3f} ({medium})", value)
+        self.ni_combo.addItem("custom", None)     # data None = read the spin beside it
+        self.ni_custom = QDoubleSpinBox()
+        self.ni_custom.setRange(1.0, 2.0)
+        self.ni_custom.setDecimals(3)
+        self.ni_custom.setSingleStep(0.01)
+        self.ni_custom.setToolTip("A custom immersion index for this session.")
+        self.ni_custom.setVisible(False)
         current_ni = session_ni()
         if current_ni is not None:            # the session already chose; a rebuild keeps it
+            matched = False
             for i in range(self.ni_combo.count()):
-                if abs(float(self.ni_combo.itemData(i)) - current_ni) < 5e-3:
+                data = self.ni_combo.itemData(i)
+                if data is not None and abs(float(data) - current_ni) < 5e-3:
                     self.ni_combo.setCurrentIndex(i)
+                    matched = True
                     break
+            if not matched:                   # a custom value survives the rebuild too
+                self.ni_combo.setCurrentIndex(self.ni_combo.count() - 1)
+                self.ni_custom.setValue(float(current_ni))
+                self.ni_custom.setVisible(True)
         self.ni_combo.setToolTip(
-            "The immersion medium's refractive index, which shapes the axial PSF. Assumed AIR "
-            "until you pick the objective's actual medium; the choice holds for this session "
-            "and reaches the QC preview and every decon run alike.")
+            "The immersion medium's refractive index (shapes the axial PSF). Holds for this "
+            "session, for the sweep and every decon run alike.")
         self.ni_combo.currentIndexChanged.connect(self._on_ni_changed)
-        set_session_ni(float(self.ni_combo.currentData()))
-        self.v.addLayout(_row(QLabel("Immersion (ni):"), self.ni_combo))
+        self.ni_custom.valueChanged.connect(self._on_ni_changed)
+        set_session_ni(self._current_ni())
+        self.v.addLayout(_row(QLabel("NI:"), self.ni_combo, self.ni_custom))
 
         self.na_spin = QDoubleSpinBox()
         self.na_spin.setRange(0.0, 1.7)
@@ -771,49 +764,86 @@ class DeconQCPanel(_Panel):
         self.na_spin.setSingleStep(0.05)
         self.na_spin.setSpecialValueText("recorded")
         self.na_spin.setToolTip(
-            "The objective NA the PSF is computed with. 'recorded' uses the acquisition's own "
-            "value (shown below); type a number to override a wrong rig profile for this "
-            "session.")
+            "The objective NA the PSF is computed with; 'recorded' uses the acquisition's "
+            "own value, printed beside.")
         self.na_spin.valueChanged.connect(self._on_na_changed)
-        self.v.addLayout(_row(QLabel("NA:"), self.na_spin))
-
-        # The auto-derived optics, VISIBLE before a run: a wrong rig profile (a 25x/NA 0.85
-        # set recorded as 20x/NA 0.8) should be caught by eye here, not discovered in a halo.
-        self.optics_note = _wrapped("", _SUB)
-        self.v.addWidget(self.optics_note)
-        # The FINAL values after the NI/NA choices above — what the PSF is actually built
-        # from (Julio, 2026-08-24: "the decon UI should show the final magnification / psf
-        # parameters"). Refreshed live by every NI, NA and channel change.
-        self.effective_note = _wrapped("", "color:#e6edf3;font-size:12px;font-weight:700;")
-        self.v.addWidget(self.effective_note)
-
-        self.v.addWidget(_head("QC SWEEP"))
-        self.iter_spin = QSpinBox()
-        self.iter_spin.setRange(1, 100)
-        self.iter_spin.setValue(QC_START_ITERATIONS)
-        self.iter_spin.setToolTip(
-            "The sweep's top count: ONE RL solve runs to this, capturing EVERY iteration on "
-            "the way, so the stepper below the picture revisits any of them instantly.")
-        self.iter_hint = QLabel(f"shipped default: {_shipped_iterations()}")
-        self.iter_hint.setStyleSheet(_SUB)
-        self.plus_btn = QPushButton("+1 iteration")
-        self.plus_btn.setToolTip(
-            "Extend the sweep by exactly one and re-run. The turn is judged by eye between "
-            "steps, and a jump of five hides where it happened.")
-        self.plus_btn.clicked.connect(
-            lambda: self.iter_spin.setValue(self.iter_spin.value() + 1))
-        self.v.addLayout(_row(QLabel("Sweep to:"), self.iter_spin, self.iter_hint,
-                              self.plus_btn))
-
-        self.cpu_cb = QCheckBox("Force CPU (disable GPU)")
-        self.cpu_cb.setToolTip(
-            "Selects a BACKEND, not an algorithm - the RL update is identical either way.")
-        self.v.addWidget(self.cpu_cb)
+        # "recorded NA should print the value to it's side" (Julio, 2026-08-25).
+        self.na_recorded = QLabel("")
+        self.na_recorded.setStyleSheet(_SUB)
+        self.v.addLayout(_row(QLabel("NA:"), self.na_spin, self.na_recorded))
 
         self.run_btn = QPushButton("Run the iteration sweep")
         self.run_btn.setCursor(Qt.PointingHandCursor)
+        self.run_btn.setToolTip(
+            "One RL solve to the sweep count, capturing every iteration; step them below "
+            "and adopt the one that looks right.")
         self.run_btn.clicked.connect(self.run)
         self.v.addWidget(self.run_btn)
+
+        # ── the two disclosures: 'more' (where to measure + sweep knobs) and 'PSF detail'.
+        self.more_btn = QPushButton("more…")
+        self.more_btn.setCheckable(True)
+        self.more_btn.setToolTip("Where the sweep measures, and its knobs.")
+        self.psf_btn = QPushButton("PSF detail")
+        self.psf_btn.setCheckable(True)
+        self.psf_btn.setToolTip("The recorded optics and the values the solve will use.")
+        self.v.addLayout(_row(self.more_btn, self.psf_btn))
+
+        self._more = QWidget()
+        mv = QVBoxLayout(self._more)
+        mv.setContentsMargins(0, 0, 0, 0)
+        mv.setSpacing(6)
+        self.region_combo = QComboBox()
+        for region in getattr(host, "_order", []):
+            self.region_combo.addItem(region)
+        self.fov_spin = QSpinBox()
+        self.fov_spin.setRange(0, 9999)
+        self.fov_spin.setToolTip("The sweep runs on this ONE FOV.")
+        mv.addLayout(_row(QLabel("Region:"), self.region_combo,
+                          QLabel("FOV:"), self.fov_spin))
+        self.channel_combo = QComboBox()
+        for name in _channel_names(host):
+            self.channel_combo.addItem(name)
+        self.channel_combo.setToolTip(
+            "The PREVIEW channel: the sweep solves this one only; a run covers every channel.")
+        self.channel_combo.currentTextChanged.connect(
+            lambda *_: self._refresh_optics_note())
+        mv.addLayout(_row(QLabel("Channel:"), self.channel_combo))
+        # The preview-vs-run contract: Julio (2026-08-24) read a one-channel preview as
+        # "decon was running on only one channel".
+        self.preview_note = _wrapped("", _SUB)
+        mv.addWidget(self.preview_note)
+        self.iter_spin = QSpinBox()
+        self.iter_spin.setRange(1, 100)
+        self.iter_spin.setValue(QC_START_ITERATIONS)
+        self.iter_spin.setToolTip("The sweep's top count; every iteration on the way is kept.")
+        self.iter_hint = QLabel(f"shipped default: {_shipped_iterations()}")
+        self.iter_hint.setStyleSheet(_SUB)
+        self.plus_btn = QPushButton("+1 iteration")
+        self.plus_btn.setToolTip("Extend the sweep by exactly one and re-run.")
+        self.plus_btn.clicked.connect(
+            lambda: self.iter_spin.setValue(self.iter_spin.value() + 1))
+        mv.addLayout(_row(QLabel("Sweep to:"), self.iter_spin, self.iter_hint, self.plus_btn))
+        self.cpu_cb = QCheckBox("Force CPU (disable GPU)")
+        self.cpu_cb.setToolTip("A backend choice, not an algorithm - the RL update is identical.")
+        mv.addWidget(self.cpu_cb)
+        self._more.setVisible(False)
+        self.more_btn.toggled.connect(self._more.setVisible)
+        self.v.addWidget(self._more)
+
+        # The recorded optics and the FINAL values the PSF is built from (Julio, 2026-08-24:
+        # "the decon UI should show the final magnification / psf parameters"), on demand.
+        self._psf = QWidget()
+        pv2 = QVBoxLayout(self._psf)
+        pv2.setContentsMargins(0, 0, 0, 0)
+        pv2.setSpacing(4)
+        self.optics_note = _wrapped("", _SUB)
+        pv2.addWidget(self.optics_note)
+        self.effective_note = _wrapped("", "color:#e6edf3;font-size:12px;font-weight:700;")
+        pv2.addWidget(self.effective_note)
+        self._psf.setVisible(False)
+        self.psf_btn.toggled.connect(self._psf.setVisible)
+        self.v.addWidget(self._psf)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
@@ -829,25 +859,14 @@ class DeconQCPanel(_Panel):
         self._view_slot.setContentsMargins(0, 0, 0, 0)
         self.v.addLayout(self._view_slot)
 
-        self.v.addWidget(_head("RUN ITERATIONS"))
-        from squidxplorer._decon import DEFAULT_ITERATIONS
-
-        self.run_iter_spin = QSpinBox()
-        self.run_iter_spin.setRange(1, 100)
-        self.run_iter_spin.setValue(DEFAULT_ITERATIONS)
-        self.run_iter_spin.setToolTip(
-            "THE iteration count a decon run uses while this panel is open - the run dispatch "
-            "reads it off this panel (operator_kwargs_for), so what you adopted from the sweep "
-            "is what the run gets. Closed panel = the declared default.")
-        self.v.addLayout(_row(QLabel("Runs use:"), self.run_iter_spin))
-        self.v.addWidget(_wrapped(
-            "Judge the sweep above, step to the iteration that looks right, and press its "
-            "'use k iterations' button - the count lands here and every decon run launched "
-            "from a view's Run button uses it. Nothing is written next to the acquisition; "
-            "the datasets are opened read only.", _SUB))
         self.v.addStretch(1)
         _apply_qss(self)
         self._refresh_optics_note()
+
+    def _current_ni(self) -> float:
+        """The NI the session gets: the combo's medium, or the custom spin's typed value."""
+        data = self.ni_combo.currentData()
+        return float(self.ni_custom.value()) if data is None else float(data)
 
     def _subject(self) -> str:
         return (f"{self.region_combo.currentText()}/{self.fov_spin.value()}/"
@@ -906,17 +925,22 @@ class DeconQCPanel(_Panel):
         optics, why = self._recorded_optics()
         if optics is None:
             self.optics_note.setText(f"recorded optics unreadable: {why}")
+            self.na_recorded.setText("recorded NA: ?")
         else:
             self.optics_note.setText(
                 f"recorded: NA {optics.na:.2f} · emission {optics.wavelength_um:.3f} µm · "
-                f"pixel {optics.dxy_um:.3f} µm · dz {optics.dz_um:.2f} µm. Check these "
-                "against the objective actually used; a wrong rig profile shows up here.")
+                f"pixel {optics.dxy_um:.3f} µm · dz {optics.dz_um:.2f} µm. A wrong rig "
+                "profile shows up here.")
+            # The value beside the control (Julio, 2026-08-25: "recorded NA should print
+            # the value to it's side").
+            self.na_recorded.setText(f"recorded NA: {optics.na:.2f}")
         effective, e_why = self._effective_optics()
         if effective is None:
             self.effective_note.setText("" if optics is None
                                         else f"the solve will refuse: {e_why}")
         else:
-            ni = effective.ni if effective.ni is not None else float(self.ni_combo.currentData())
+            ni = effective.ni if effective.ni is not None else self._current_ni()
+            # mag = sensor / dxy is GEOMETRY: NA and ni shape the PSF, never this number.
             sensor = self._sensor_pixel_um()
             mag = (f" · magnification {sensor / effective.dxy_um:.1f}x "
                    f"(sensor {sensor:g} µm / pixel)" if sensor else "")
@@ -926,7 +950,7 @@ class DeconQCPanel(_Panel):
                 f"({channel}) · pixel {effective.dxy_um:.3f} µm · dz {effective.dz_um:.2f} µm "
                 f"· nz {int(effective.nz)}{mag}")
         na = session_na() or (optics.na if optics is not None else None)
-        ni = float(self.ni_combo.currentData())
+        ni = self._current_ni()
         if na is not None and na > ni + 1e-9:
             self.say(f"NA {na:.2f} is impossible in {medium_for_ni(ni)} (ni {ni:.3f}): pick "
                      "the objective's actual immersion. The solve will refuse until they agree.")
@@ -934,7 +958,8 @@ class DeconQCPanel(_Panel):
     def _on_ni_changed(self, *_) -> None:
         from squidxplorer._decon import set_session_ni
 
-        set_session_ni(float(self.ni_combo.currentData()))
+        self.ni_custom.setVisible(self.ni_combo.currentData() is None)
+        set_session_ni(self._current_ni())
         self.say("")
         self._refresh_optics_note()
 

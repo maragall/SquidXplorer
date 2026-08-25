@@ -1033,3 +1033,77 @@ def test_a_sweep_with_no_view_over_the_region_still_shows_in_the_panel(qapp,
     panel._view.close()
 
 
+
+# ── the text diet + parameter hiding (Julio, 2026-08-25) ──────────────────────────────────────
+# "There is so much text in the operator UI. As if it was a book - that's crazy lol."
+# "There are so many parameters that should be default and our life science user should not
+# want to see them." "recorded NA should print the value to it's side."
+
+
+def test_the_decon_headline_is_iterations_ni_na_and_the_rest_hides(qapp, clean_decon_session):
+    """The panel shows the headline knobs; where-to-measure and the sweep knobs live behind
+    a 'more' disclosure, the PSF lines behind their own toggle - both closed by default."""
+    p = DeconQCPanel(_Host())
+    assert p._more.isHidden(), "the advanced knobs are on screen by default"
+    assert p._psf.isHidden(), "the PSF detail is on screen by default"
+    # the advanced knobs really moved INSIDE the disclosures
+    assert p.region_combo in p._more.findChildren(type(p.region_combo))
+    assert p.optics_note in p._psf.findChildren(type(p.optics_note))
+    # the headline stays out of them
+    assert p.run_iter_spin not in p._more.findChildren(type(p.run_iter_spin))
+    assert p.ni_combo not in p._more.findChildren(type(p.ni_combo))
+    p.more_btn.click()
+    assert not p._more.isHidden()
+    p.psf_btn.click()
+    assert not p._psf.isHidden()
+
+
+def test_ni_offers_custom_and_a_typed_value_reaches_the_session(qapp, clean_decon_session):
+    from squidxplorer._decon import session_ni
+
+    p = DeconQCPanel(_Host())
+    labels = [p.ni_combo.itemText(i) for i in range(p.ni_combo.count())]
+    assert "custom" in labels, "the NI dropdown offers no custom entry"
+    assert p.ni_custom.isHidden(), "the custom NI field shows while a standard medium is picked"
+    p.ni_combo.setCurrentText("custom")
+    assert not p.ni_custom.isHidden()
+    p.ni_custom.setValue(1.38)
+    assert session_ni() == pytest.approx(1.38), "the typed NI never reached the session"
+    p.ni_combo.setCurrentText("1.333 (water)")
+    assert p.ni_custom.isHidden()
+    assert session_ni() == pytest.approx(1.333)
+
+
+def test_recorded_na_prints_its_value_beside_the_control(qapp, clean_decon_session):
+    panel = _fixed_optics_panel(_Host())
+    panel._refresh_optics_note()
+    assert "recorded NA: 0.80" in panel.na_recorded.text(), (
+        f"the recorded NA is not printed beside the control: {panel.na_recorded.text()!r}")
+
+
+def test_magnification_stays_geometric_when_na_or_ni_change(qapp, clean_decon_session):
+    """mag = sensor / dxy. NA and ni shape the PSF, not the geometry; a magnification that
+    moved with them would be a fake dependence."""
+    panel = _fixed_optics_panel(_Host())
+    panel._sensor_pixel_um = lambda: 7.52
+    panel._refresh_optics_note()
+    assert "magnification 10.0x" in panel.effective_note.text()
+    panel.na_spin.setValue(0.95)
+    assert "magnification 10.0x" in panel.effective_note.text(), (
+        "the shown magnification moved with NA")
+    panel.ni_combo.setCurrentText("1.333 (water)")
+    assert "magnification 10.0x" in panel.effective_note.text(), (
+        "the shown magnification moved with ni")
+
+
+def test_the_decon_panel_carries_no_book_of_text(qapp, clean_decon_session):
+    """Every visible label is a line, not a paragraph (tooltips may keep a sentence; a
+    refusal quoting the loader's own error is exempt, so the panel gets readable optics)."""
+    from qtpy.QtWidgets import QLabel
+
+    p = _fixed_optics_panel(_Host())
+    p._sensor_pixel_um = lambda: 7.52
+    p._refresh_optics_note()
+    long_ones = [lab.text() for lab in p.findChildren(QLabel)
+                 if len(lab.text()) > 200]
+    assert not long_ones, f"paragraph-length label(s) in the panel: {long_ones}"
