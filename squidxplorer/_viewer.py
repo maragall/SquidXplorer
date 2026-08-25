@@ -528,9 +528,13 @@ class PlateWindow(QMainWindow):
         # docked, collapsed or floated. What changes is where it is, never whether it is. Floating
         # RELOCATES the console; nothing destroys it. That is why `_float_log`'s close handler
         # re-docks instead of routing through `_dispose_tab_widget` the way an operator float does.
-        self._log_panel = LogPanel(self._log_bus, self._activity)
+        # COLLAPSED BY DEFAULT (hero declutter, team feedback 2026-08-25: "There are too many
+        # controls and logs"): the log is a slot the user opens (its own toggle, View > Log),
+        # not a broadcast. Session-scoped; no prefs file.
+        self._log_panel = LogPanel(self._log_bus, self._activity, start_collapsed=True)
         self._log_panel.start()
         self._log_panel.float_requested.connect(self._float_log)
+        self._log_panel.collapsedChanged.connect(self._on_log_collapsed)
 
         # NO CENTRAL VIEWER (decentralized, 2026-07-23; the guards finally cut, 2026-08-06).
         # Viewing happens in INDEPENDENT windows spawned from the plate (see _region_viewer), each
@@ -1184,6 +1188,34 @@ class PlateWindow(QMainWindow):
             panel.set_collapsed(False)
         panel.setVisible(True)
 
+    def _on_log_collapsed(self, collapsed: bool) -> None:
+        """Summoning the log AT HOME must give it the band back: a splitter keeps its sizes
+        when a child's height cap lifts, so re-hand the starting split at BOTH levels (the
+        body gives the band its height, the band gives the log its share). Collapsing needs
+        no help: Qt's own maximum-size recalc hands the space to the plate, which is the
+        hero rule working. A hosted or floated panel is not the splitter's child and is
+        left alone."""
+        if collapsed:
+            return
+        col = getattr(self, "_right_col", None)
+        panel = getattr(self, "_log_panel", None)
+        if col is None or panel is None or panel.parentWidget() is not col:
+            return
+        body = getattr(self, "_body", None)
+        if body is not None:
+            total = sum(body.sizes())
+            if total > 0:
+                body.setSizes([max(160, total - _BAND_DEFAULT_PX), _BAND_DEFAULT_PX])
+        col.setSizes(list(_RIGHT_COL_SIZES))
+        # Once more after the band's own layout pass: the inner splitter is still at its
+        # collapsed height when the line above runs (measured 19 px), so the sizes it can
+        # apply are the old ones. Deferred and guarded: a zero-timer must never fire into a
+        # torn-down splitter.
+        def _rehand() -> None:
+            if _widget_alive(col):
+                col.setSizes(list(_RIGHT_COL_SIZES))
+        QTimer.singleShot(0, _rehand)
+
     # -- the console in a window of its own (Julio: "Log (option to open in a new window)") --------
     def _float_log(self):
         """Open the one global console in its own window, and give it back on Re-dock.
@@ -1804,7 +1836,9 @@ class PlateWindow(QMainWindow):
         self._plate_hosted = True
         self._mount_overview()
         # The log opens at 3/4 of the plate slot's height (the chart's rule); flexible below.
-        self._log_panel.setMaximumHeight(int(box.PLATE_SLOT_PX * 3 / 4))
+        # A CAP, not a bare setMaximumHeight: the panel starts collapsed and must keep this
+        # ceiling across its own collapse/expand cycles while hosted.
+        self._log_panel.set_expanded_cap(int(box.PLATE_SLOT_PX * 3 / 4))
         return box, self._log_panel
 
     def _mount_overview(self) -> None:
@@ -1833,7 +1867,7 @@ class PlateWindow(QMainWindow):
             self._mount_overview()
         log_panel = getattr(self, "_log_panel", None)
         if log_panel is not None and _widget_alive(log_panel):
-            log_panel.setMaximumHeight(16777215)
+            log_panel.set_expanded_cap(None)
             col = getattr(self, "_right_col", None)
             if col is not None and log_panel.parentWidget() is not col:
                 col.addWidget(log_panel)

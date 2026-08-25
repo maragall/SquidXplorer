@@ -103,7 +103,14 @@ def test_the_log_owns_the_band_and_the_navigator_is_gone(shown):
     assert not hasattr(win, "_band"), "the horizontal band splitter survived its left child"
 
     assert win._log_panel.isVisible(), "the log is not on screen"
+    # Hero declutter (2026-08-25): the log starts COLLAPSED (its header only); summoned, the
+    # band is still the log's and it gets usable height.
+    assert win._log_panel.collapsed, "the log must start collapsed (quiet by default)"
+    win._log_panel.set_collapsed(False)
+    for _ in range(5):                    # the re-hand is a zero-timer after the layout pass
+        QApplication.processEvents()
     assert _h(win._log_panel) > 100, f"the log has no usable height ({_h(win._log_panel)} px)"
+    win._log_panel.set_collapsed(True)
     # The operator-tab bar exists but costs no pixels until an operator panel opens.
     assert win._left_tabs.count() == 0
     assert not win._left_tabs.isVisible(), "an empty operator-tab bar is taking the log's space"

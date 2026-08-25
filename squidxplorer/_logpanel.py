@@ -65,6 +65,11 @@ class LogPanel(QWidget):
     #: The panel only notices the "open in new window" gesture; PlateWindow owns the window.
     float_requested = Signal()
 
+    #: Fired when the collapsed state actually changes. A host that stacks this panel in a
+    #: splitter listens: a splitter keeps its sizes when a child's height cap lifts, so the
+    #: host must re-hand the space itself on a summon.
+    collapsedChanged = Signal(bool)
+
     def __init__(self, bus: Optional[LogBus] = None, activity: Optional[ActivityLog] = None,
                  *, level: int = DEFAULT_LEVEL, max_lines: int = MAX_LINES,
                  start_collapsed: bool = False, parent=None) -> None:
@@ -240,18 +245,33 @@ class LogPanel(QWidget):
     def toggle(self) -> None:
         self.set_collapsed(not self._collapsed)
 
+    #: The expanded panel's height ceiling, or None for uncapped. Set while the panel is
+    #: HOSTED in a view's left column (the 3/4-of-plate-slot rule), cleared when it comes
+    #: home, so a collapse cycle cannot lose the cap.
+    _expanded_cap: Optional[int] = None
+
+    def set_expanded_cap(self, cap: "Optional[int]") -> None:
+        """Cap the panel's expanded height (None removes the cap); applies now if expanded."""
+        self._expanded_cap = int(cap) if cap else None
+        if not self._collapsed:
+            self.setMaximumHeight(self._expanded_cap or 16777215)
+
     def set_collapsed(self, collapsed: bool) -> None:
         """Collapsing drops the vertical size hint to the header's height so the splitter hands the
         space back to the panes, instead of leaving a grey gap."""
+        changed = self._collapsed != bool(collapsed)
         self._collapsed = bool(collapsed)
         self._view.setVisible(not self._collapsed)
         if self._collapsed:
             self.setMaximumHeight(self.sizeHint().height())
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         else:
-            self.setMaximumHeight(16777215)     # Qt's QWIDGETSIZE_MAX — no cap
+            # QWIDGETSIZE_MAX (no cap) unless a host installed one.
+            self.setMaximumHeight(self._expanded_cap or 16777215)
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._sync_toggle_text()
+        if changed:
+            self.collapsedChanged.emit(self._collapsed)
 
     def _sync_toggle_text(self) -> None:
         self._toggle.setText("▸ Log" if self._collapsed else "▾ Log")

@@ -68,8 +68,12 @@ def test_the_plate_slot_is_fixed_height_and_collapses_to_a_grip(qapp, napari_pan
         assert box is not None
         assert box.maximumHeight() == box.PLATE_SLOT_PX, "the plate slot is not FIXED height"
         assert box.minimumHeight() == box.PLATE_SLOT_PX
-        # the log opens at 3/4 of the plate slot's height
+        # Hero declutter (2026-08-25): the log starts COLLAPSED; summoned, it opens at
+        # 3/4 of the plate slot's height.
+        assert win._log_panel.collapsed, "the hosted log must start collapsed"
+        win._log_panel.set_collapsed(False)
         assert win._log_panel.maximumHeight() == int(box.PLATE_SLOT_PX * 3 / 4)
+        win._log_panel.set_collapsed(True)
         box.grip.click()
         assert box.collapsed
         assert box.maximumHeight() == box.GRIP_PX, "collapsed, the slot is not a grip"

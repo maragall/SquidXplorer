@@ -207,6 +207,53 @@ class ViewSettings:
         return {n: _copy_setting(v) for n, v in self._values.items()}
 
 
+class _FoldSection(QWidget):
+    """A collapsible section behind a thin summon affordance, the grip pattern the plate
+    slot and the log panel already use. Hero rule (team feedback 2026-08-25): sections
+    start collapsed, per view and session-scoped, so the canvas gets the pixels until the
+    user summons them. *header* widgets stay visible beside the grip while collapsed."""
+
+    _GRIP_QSS = (
+        "QPushButton{background:#161b22;color:#8b98ad;border:1px solid #232b3a;"
+        "border-radius:3px;font-size:10px;padding:1px 6px;text-align:left;}"
+        "QPushButton:hover{color:#c9d1d9;}")
+
+    def __init__(self, title: str, *, header: "Sequence[QWidget]" = (),
+                 collapsed: bool = True, parent=None) -> None:
+        super().__init__(parent)
+        self._title = str(title)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        for w in header:
+            row.addWidget(w, 1)
+        self.grip = QPushButton()
+        self.grip.setCursor(Qt.PointingHandCursor)
+        self.grip.setToolTip(f"Show or hide the {self._title}.")
+        self.grip.setStyleSheet(self._GRIP_QSS)
+        self.grip.clicked.connect(self.toggle)
+        row.addWidget(self.grip, 1)
+        v.addLayout(row)
+        self._body = QWidget()
+        self.body = QVBoxLayout(self._body)
+        self.body.setContentsMargins(0, 0, 0, 0)
+        self.body.setSpacing(4)
+        v.addWidget(self._body)
+        self.collapsed = False
+        self.set_collapsed(bool(collapsed))
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        self.collapsed = bool(collapsed)
+        self._body.setVisible(not self.collapsed)
+        self.grip.setText(("▸ " if self.collapsed else "▾ ") + self._title)
+
+    def toggle(self, *_) -> None:
+        self.set_collapsed(not self.collapsed)
+
+
 def _level_shape(level: Any) -> "Optional[tuple[int, int]]":
     """The (height, width) of one pyramid level, or None if it has no 2-D+ shape."""
     shp = getattr(level, "shape", None)
@@ -493,7 +540,12 @@ class RegionViewer(QMainWindow):
         lv.setContentsMargins(0, 0, 0, 0)
         lv.setSpacing(4)
         lv.addWidget(self._build_view_controls(), 0)
-        lv.addWidget(self.operator_panel(), 0)
+        # HERO DECLUTTER (team feedback 2026-08-25: "hiding all the 'Operator' controls"):
+        # the whole operator surface starts collapsed behind one thin summon bar. State is
+        # per view and session-scoped; `_insert_param_slot` summons before inserting.
+        self._operators_fold = _FoldSection("operators")
+        self._operators_fold.body.addWidget(self.operator_panel())
+        lv.addWidget(self._operators_fold, 0)
         # ONE WINDOW (Julio, 2026-08-25): the plate view and the log are SLOTS this column can
         # host; `adopt_plate_slots` fills this layout when the manager elects this view.
         self._plate_log_slot = QVBoxLayout()
@@ -558,7 +610,6 @@ class RegionViewer(QMainWindow):
             self._cursor.set_index(0)
 
     _BOX_QSS = "QFrame{background:#0d1117;border:1px solid #232b3a;border-radius:5px;}"
-    _TITLE_QSS = "color:#8b949e;font-size:10px;font-weight:700;border:none;"
     _CHIP_QSS = (
         "QPushButton{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
         "border-radius:4px;padding:3px 9px;font-size:11px;}"
@@ -575,17 +626,6 @@ class RegionViewer(QMainWindow):
         "selection-background-color:#1f6feb;selection-color:#ffffff;outline:none;}"
     )
 
-    def _titled_box(self, title: str) -> "tuple[QFrame, QVBoxLayout]":
-        box = QFrame(self)
-        box.setStyleSheet(self._BOX_QSS)
-        v = QVBoxLayout(box)
-        v.setContentsMargins(8, 5, 8, 6)
-        v.setSpacing(4)
-        lab = QLabel(title)
-        lab.setStyleSheet(self._TITLE_QSS)
-        v.addWidget(lab)
-        return box, v
-
     def _chip(self, text: str, tip: str, slot, *, checkable: bool = False) -> QPushButton:
         b = QPushButton(text)
         b.setToolTip(tip)
@@ -596,15 +636,23 @@ class RegionViewer(QMainWindow):
         return b
 
     def _build_view_controls(self) -> QWidget:
-        """The "2D / 3D · ROI" chip block: a compact wrapped column, NOT a full-width toolbar.
+        """The view chip block: the 2D/3D essentials plus a summon grip, everything else folded.
 
         `_build` docks it at the TOP of napari's left column, above the layer controls
         (`MosaicPane.dock_view_controls`), so the canvas gains the height the old horizontal
         top dock spent (UI feedback 2026-08-19: "Should be on the left column, where the
         controls are"). Chip attributes (`_btn_2d`, `_btn_3d`, `_btn_focus`, `_btn_record`,
         `_btn_fovs`) are pinned by tests and GATE 3; only the parenting and row wrapping moved.
+
+        HERO DECLUTTER (team feedback 2026-08-25: "minimize most of the... tools. They just
+        take up too much room"): only the 2D/3D essentials stay visible; the rest of the
+        chips fold behind the "controls" summon grip, collapsed by default, per view.
         """
-        view_box, vv = self._titled_box("2D / 3D · ROI")
+        view_box = QFrame(self)
+        view_box.setStyleSheet(self._BOX_QSS)
+        vv = QVBoxLayout(view_box)
+        vv.setContentsMargins(8, 5, 8, 6)
+        vv.setSpacing(4)
         self._btn_2d = self._chip("2D", "View the SELECTED ROI in 2D (opens it as a child window); "
                                   "with no ROI picked, just shows the mosaic in 2D.", self._view_roi_2d)
         self._btn_3d = self._chip("3D", "Open this view in 3D at NATIVE resolution (the region if it "
@@ -647,13 +695,14 @@ class RegionViewer(QMainWindow):
             "⇩ paste LUTs", "Paste the LUT clipboard onto this window's channels. The plate "
             "follows the same write, so plate and window contrast stay equal.", self._paste_luts)
         # One 3-column grid of equal-width chips: the ragged per-row HBoxes read as "poor
-        # distribution of buttons" (Julio, live GUI 2026-08-19).
+        # distribution of buttons" (Julio, live GUI 2026-08-19). The essentials (2D, 3D)
+        # ride the fold's header row and stay visible; everything else is in the folded grid.
         from qtpy.QtWidgets import QGridLayout
 
+        fold = _FoldSection("controls", header=(self._btn_2d, self._btn_3d))
         grid = QGridLayout(); grid.setSpacing(4)
         chips = [
-            self._btn_2d, self._btn_3d, self._btn_focus,
-            self._btn_record, self._btn_png,
+            self._btn_focus, self._btn_record, self._btn_png,
             self._chip("▭ new", "Draw an ROI rectangle inside the mosaic.", self._new_roi),
             self._chip("⊙ select", "Select ROIs: click one, then press Delete to remove it.",
                        self._select_rois),
@@ -668,7 +717,11 @@ class RegionViewer(QMainWindow):
             grid.addWidget(chip, i // 3, i % 3)
         for col in range(3):
             grid.setColumnStretch(col, 1)
-        vv.addLayout(grid)
+        for essential in (self._btn_2d, self._btn_3d):
+            essential.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        fold.body.addLayout(grid)
+        vv.addWidget(fold)
+        self._controls_fold = fold
         self._refresh_record_chip()
         self._refresh_fovs_chip()
         # THE PER-WINDOW OPERATOR SURFACE IS NOT IN THIS BLOCK. "Operators for this window" (the
@@ -680,6 +733,28 @@ class RegionViewer(QMainWindow):
         view_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self._view_controls = view_box
         return view_box
+
+    #: The two summonable sections, or None on a window whose pane never built.
+    _controls_fold = None
+    _operators_fold = None
+
+    def set_controls_collapsed(self, collapsed: bool) -> None:
+        """Fold or summon the non-essential view chips (per view, session-scoped)."""
+        fold = self._controls_fold
+        if fold is not None and _alive(fold):
+            fold.set_collapsed(collapsed)
+
+    def set_operators_collapsed(self, collapsed: bool) -> None:
+        """Fold or summon this view's whole operator surface (per view, session-scoped)."""
+        fold = self._operators_fold
+        if fold is not None and _alive(fold):
+            fold.set_collapsed(collapsed)
+
+    def summon_controls(self) -> None:
+        """Expand every collapsed control section. The one entry GATE 3 and any headless
+        driver use, so collapsed-by-default never makes a control unreachable."""
+        self.set_controls_collapsed(False)
+        self.set_operators_collapsed(False)
 
     _AT_DEFAULTS_QSS = "color:#8b949e;font-size:10px;border:none;"
     _PROGRESS_QSS = (
@@ -710,7 +785,13 @@ class RegionViewer(QMainWindow):
         pv.setContentsMargins(0, 0, 0, 0)
         pv.setSpacing(4)
 
-        op_box, ov = self._titled_box("Operators for this window")
+        # A plain box: the fold's own "operators" summon bar is the title (quiet by
+        # default, fewer words), so a second heading here would just repeat it.
+        op_box = QFrame(self)
+        op_box.setStyleSheet(self._BOX_QSS)
+        ov = QVBoxLayout(op_box)
+        ov.setContentsMargins(8, 5, 8, 6)
+        ov.setSpacing(4)
         opr = QHBoxLayout(); opr.setSpacing(4)
         self._op_combo = QComboBox()
         self._op_combo.setStyleSheet(self._COMBO_CHIP_QSS)
@@ -785,7 +866,11 @@ class RegionViewer(QMainWindow):
     _PARAM_SLOT_MAX_PX = 360
 
     def _insert_param_slot(self, key: str, panel) -> None:
-        """Insert *panel* under the operators row, releasing any previously inserted one."""
+        """Insert *panel* under the operators row, releasing any previously inserted one.
+
+        Summons the operator fold first: a panel inserted under a collapsed fold would be
+        an invisible insertion, which reads as a dead ⚙ controls chip."""
+        self.set_operators_collapsed(False)
         self._remove_param_slot()
         panel.setMaximumHeight(self._PARAM_SLOT_MAX_PX)
         self._param_slot.addWidget(panel)

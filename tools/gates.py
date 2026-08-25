@@ -1060,6 +1060,18 @@ def _watch_window_stacking(monkey, seen):
         monkey(V.PlateWindow, m, wrap(m))
 
 
+def _summon_view(view) -> None:
+    """Expand the view's collapsed control sections before (and between) actuations.
+
+    Hero declutter (2026-08-25): the chips and the operator surface start collapsed behind
+    summon grips, and the sweep itself clicks those grips (collapsing sections mid-sweep) -
+    summoning as the settle step keeps every control reachable, the way a user would reach it.
+    """
+    summon = getattr(view, "summon_controls", None)
+    if callable(summon):
+        summon()
+
+
 def _neutralise_view(monkey, called):
     """Stop a region window's chips from doing what this harness has no business doing.
 
@@ -1143,7 +1155,8 @@ def gate_no_dead_controls(dataset=PLATE, mutate_plate=None, mutate_view=None, ve
             # ONE recorder for both windows: a region chip that calls back into the plate (Run ->
             # PlateWindow.run_operator) has to be seen as reaching a neutralised entry point too.
             rows += [("view", *r) for r in sweep_controls(view, "view", app, watched=[win],
-                                                          recorder=recorded, observed=seen)]
+                                                          recorder=recorded, observed=seen,
+                                                          settle=_summon_view)]
             # The input controls the sweep skipped: proven by the arguments that arrive at the run.
             rows += prove_inputs_reach_the_run(view, detail, app)
     finally:
