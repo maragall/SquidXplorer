@@ -272,6 +272,22 @@ class StitcherPanel(_Panel):
         self.register_cb.toggled.connect(self._on_register_toggled)
         self.v.addWidget(self.register_cb)
 
+        # THE ADVANCED SLOT (Julio, 2026-08-25: "the user should only tweak what can't be
+        # deduced from acquisition filenames. I think that all the other knobs at the
+        # maragall/ repo implementations should be hidden in a 'advanced' slot"): the
+        # headline is z-handling + registration on/off; every other knob collapses here.
+        self.adv_btn = QPushButton("advanced")
+        self.adv_btn.setCheckable(True)
+        self.adv_btn.setToolTip("Registration and fusion knobs most runs leave at their defaults.")
+        self.v.addWidget(self.adv_btn)
+        self._advanced = QWidget()
+        av = QVBoxLayout(self._advanced)
+        av.setContentsMargins(0, 0, 0, 0)
+        av.setSpacing(8)
+        self._advanced.setVisible(False)
+        self.adv_btn.toggled.connect(self._advanced.setVisible)
+        self.v.addWidget(self._advanced)
+
         self.reg_channel_combo = QComboBox()
         for name in names:
             self.reg_channel_combo.addItem(name)
@@ -279,7 +295,7 @@ class StitcherPanel(_Panel):
             "ONE channel drives the geometry and every channel is then fused with that one "
             "solution - channels of a FOV share a sensor and must not get disagreeing "
             "placements.")
-        self.v.addLayout(_row(QLabel("Registration channel:"), self.reg_channel_combo))
+        av.addLayout(_row(QLabel("Registration channel:"), self.reg_channel_combo))
 
         # Hidden on a single-timepoint acquisition, where 0 is the only legal value.
         n_t = int(((getattr(host, "_meta", None) or {}).get("n_t")) or 1)
@@ -291,7 +307,7 @@ class StitcherPanel(_Panel):
             "placements.")
         self.reg_t_row = _row(QLabel("Registration timepoint:"), self.reg_t_spin)
         if n_t > 1:
-            self.v.addLayout(self.reg_t_row)
+            av.addLayout(self.reg_t_row)
 
         self.rel_spin = QSpinBox()
         self.rel_spin.setRange(1, 200)
@@ -308,7 +324,7 @@ class StitcherPanel(_Panel):
             "Blunder rejection, absolute term: a link must ALSO be off by at least this "
             "many pixels to be dropped. Both conditions have to hold, so a very clean plate "
             "does not start rejecting links that were off by a fraction of a pixel.")
-        self.v.addLayout(_row(QLabel("Outlier rel:"), self.rel_spin,
+        av.addLayout(_row(QLabel("Outlier rel:"), self.rel_spin,
                               QLabel("abs:"), self.abs_spin))
 
         # Unlike maragall/stitcher, where this checkbox is dead (created but never read), here
@@ -323,9 +339,9 @@ class StitcherPanel(_Panel):
             "Needs registration -- it corrects the residual left after the global solve.\n\n"
             "ON by default. Untick it to fuse on the rigid solve alone, which is faster and is "
             "the right control when you want to see what the elastic fit is actually buying.")
-        self.v.addWidget(self.distortion_cb)
+        av.addWidget(self.distortion_cb)
 
-        self.v.addWidget(_head("FUSION"))
+        av.addWidget(_head("FUSION"))
         self.blend_spin = QSpinBox()
         self.blend_spin.setRange(1, 2000)
         self.blend_spin.setValue(STITCH_DEFAULTS["blend_px"])
@@ -342,12 +358,12 @@ class StitcherPanel(_Panel):
             "overlap x 2), instead of the fixed default -- which is sized to ONE acquisition "
             "(~208 px on the 10x tissue set) and is wrong on a denser grid.")
         self.blend_auto_cb.toggled.connect(lambda on: self.blend_spin.setEnabled(not on))
-        self.v.addLayout(_row(QLabel("Blend width:"), self.blend_spin, self.blend_auto_cb))
+        av.addLayout(_row(QLabel("Blend width:"), self.blend_spin, self.blend_auto_cb))
 
         self.channel_boxes = []
         if names:
-            self.v.addWidget(_head("CHANNELS TO FUSE"))
-            self.v.addWidget(_wrapped(
+            av.addWidget(_head("CHANNELS TO FUSE"))
+            av.addWidget(_wrapped(
                 "Every channel is fused with the ONE geometry solved above. This is the "
                 "memory lever: a 27-FOV 10x region is ~0.2 GB at one channel and ~0.9 GB at "
                 "four.", _SUB))
@@ -359,7 +375,7 @@ class StitcherPanel(_Panel):
                 self.channel_boxes.append(cb)
                 box_row.addWidget(cb)
             box_row.addStretch(1)
-            self.v.addLayout(box_row)
+            av.addLayout(box_row)
 
         # NO run button and NO save checkbox here (one flow, Julio 2026-08-25): the view's
         # operators row launches every run — Preview (window scope) and Run on plate (the one
@@ -729,20 +745,12 @@ class DeconQCPanel(_Panel):
         set_session_ni(self._current_ni())
         self.v.addLayout(_row(QLabel("NI:"), self.ni_combo, self.ni_custom))
 
-        self.na_spin = QDoubleSpinBox()
-        self.na_spin.setRange(0.0, 1.7)
-        self.na_spin.setDecimals(2)
-        self.na_spin.setSingleStep(0.05)
-        self.na_spin.setSpecialValueText("recorded")
-        self.na_spin.setToolTip(
-            "The objective NA the PSF is computed with; 'recorded' uses the acquisition's "
-            "own value, printed beside.")
-        self.na_spin.valueChanged.connect(self._on_na_changed)
-        # "recorded NA should print the value to it's side" (Julio, 2026-08-25).
-        self.na_recorded = QLabel("")
-        self.na_recorded.setStyleSheet(_SUB)
-        self.v.addLayout(_row(QLabel("NA:"), self.na_spin, self.na_recorded))
-
+        # NO NA edit (Julio, 2026-08-25: "the user should only tweak what can't be deduced
+        # from acquisition filenames"): NA, magnification, dxy, dz, nz and the per-channel
+        # wavelength are all read off the sidecars and displayed READ-ONLY in the PSF slot.
+        # The immersion index is the ONE PSF input no Squid file records, so NI is the one
+        # optics knob. A wrong rig profile is handled by GUARDRAILS (rig_profile_notes and
+        # the named refusals), never by an override field.
         self.run_btn = QPushButton("Run the iteration sweep")
         self.run_btn.setCursor(Qt.PointingHandCursor)
         self.run_btn.setToolTip(
@@ -808,6 +816,10 @@ class DeconQCPanel(_Panel):
         pv2 = QVBoxLayout(self._psf)
         pv2.setContentsMargins(0, 0, 0, 0)
         pv2.setSpacing(4)
+        # "recorded NA should print the value to it's side" - read-only, in the PSF slot.
+        self.na_recorded = QLabel("")
+        self.na_recorded.setStyleSheet(_SUB)
+        pv2.addWidget(self.na_recorded)
         self.optics_note = _wrapped("", _SUB)
         pv2.addWidget(self.optics_note)
         self.effective_note = _wrapped("", "color:#e6edf3;font-size:12px;font-weight:700;")
@@ -893,6 +905,7 @@ class DeconQCPanel(_Panel):
         self.preview_note.setText(
             f"preview: {channel} only. Run deconvolves every channel, each with its own PSF "
             "(wavelength per channel)." if channel else "")
+        self._log_rig_notes()
         optics, why = self._recorded_optics()
         if optics is None:
             self.optics_note.setText(f"recorded optics unreadable: {why}")
@@ -934,13 +947,24 @@ class DeconQCPanel(_Panel):
         self.say("")
         self._refresh_optics_note()
 
-    def _on_na_changed(self, value: float) -> None:
-        # 0.00 shows as 'recorded' and clears the override; anything else installs it.
-        from squidxplorer._decon import set_session_na
+    #: The acquisition path the rig-profile guardrails last ran for; one log line each,
+    #: once per acquisition, never a block (Julio, 2026-08-25).
+    _rig_notes_for = None
 
-        set_session_na(float(value) if value > 0 else None)
-        self.say("")
-        self._refresh_optics_note()
+    def _log_rig_notes(self) -> None:
+        from squidxplorer._decon import rig_profile_notes
+        from squidxplorer._logpane import get_logger
+
+        dataset = getattr(self.host, "_acq_path", None)
+        if not dataset or self._rig_notes_for == str(dataset):
+            return
+        self._rig_notes_for = str(dataset)
+        logger = get_logger("decon")
+        try:
+            for note in rig_profile_notes(dataset):
+                logger.warning("%s", note)
+        except Exception:                      # noqa: BLE001 - a guardrail must never block
+            pass
 
     # -- the sweep ------------------------------------------------------------------------------
     def run(self) -> None:

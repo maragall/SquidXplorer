@@ -98,16 +98,41 @@ class GenericOperatorPanel(_Panel):
         if not params:
             self.v.addWidget(_wrapped(
                 f"{self.key!r} declares no parameters; it runs as it ships.", _SUB))
-        for param in params:
+        # THE ADVANCED SPLIT is DECLARATION-DRIVEN (Param.advanced), never a name match
+        # (Julio, 2026-08-25: "all the other knobs ... should be hidden in a 'advanced'
+        # slot"). Headline knobs stay visible; the rest collapse behind one toggle.
+        headline = [p for p in params if not getattr(p, "advanced", False)]
+        hidden = [p for p in params if getattr(p, "advanced", False)]
+        for param in headline:
             self._add_param(param)
+        self.adv_btn = None
+        self._advanced = None
+        if hidden:
+            from qtpy.QtWidgets import QPushButton, QVBoxLayout, QWidget
+
+            self.adv_btn = QPushButton("advanced")
+            self.adv_btn.setCheckable(True)
+            self.adv_btn.setToolTip("Knobs most runs leave at their defaults.")
+            self.v.addWidget(self.adv_btn)
+            self._advanced = QWidget()
+            av = QVBoxLayout(self._advanced)
+            av.setContentsMargins(0, 0, 0, 0)
+            av.setSpacing(6)
+            for param in hidden:
+                self._add_param(param, into=av)
+            self._advanced.setVisible(False)
+            self.adv_btn.toggled.connect(self._advanced.setVisible)
+            self.v.addWidget(self._advanced)
 
         self.v.addWidget(self.status)
         self.v.addStretch(1)
         _apply_qss(self)
 
     # -- building ------------------------------------------------------------------------
-    def _add_param(self, param) -> None:
-        """One :class:`Param` -> one labelled widget, with its ``blurb`` as the tooltip."""
+    def _add_param(self, param, into=None) -> None:
+        """One :class:`Param` -> one labelled widget, with its ``blurb`` as the tooltip.
+        *into* is the advanced section's layout; None means the headline."""
+        target = into if into is not None else self.v
         kind = widget_kind(param.default)
         leaf = param.name
         widget = _build_widget(kind, param.default)
@@ -122,9 +147,9 @@ class GenericOperatorPanel(_Panel):
         # in the operator UI. As if it was a book"); no wrapped paragraph under each widget.
         if isinstance(widget, QCheckBox):
             widget.setText(leaf)
-            self.v.addWidget(widget)
+            target.addWidget(widget)
         else:
-            self.v.addLayout(_row(label, widget))
+            target.addLayout(_row(label, widget))
 
     # -- reading back --------------------------------------------------------------------
     def kwargs(self) -> dict:

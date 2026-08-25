@@ -788,11 +788,13 @@ def test_a_rebuilt_panel_keeps_the_session_medium(qapp, clean_decon_session):
     assert p.ni_combo.currentText() == "1.515 (oil)"
 
 
-def test_an_impossible_na_is_flagged_by_name_in_the_panel(qapp, clean_decon_session):
-    p = DeconQCPanel(_Host())                      # air installed
-    p.na_spin.setValue(1.40)
+def test_an_impossible_recorded_na_is_flagged_by_name_in_the_panel(qapp, clean_decon_session):
+    """No NA knob any more (2026-08-25): the guardrail names a RECORDED NA the chosen
+    immersion cannot carry."""
+    p = _fixed_optics_panel(_Host(), na=1.40)      # air installed; NA 1.40 is oil territory
+    p._refresh_optics_note()
     assert any("impossible in air" in s for s in p.host.said), (
-        "NA 1.40 under air went unflagged")
+        "recorded NA 1.40 under air went unflagged")
 
 
 def test_the_worker_sweeps_a_real_stack_emitting_every_iteration(qapp, clean_decon_session,
@@ -844,7 +846,7 @@ def test_the_panel_states_the_preview_channel_vs_run_contract(qapp, clean_decon_
         "the caption did not follow the preview channel")
 
 
-def _fixed_optics_panel(host, wavelength_by=None):
+def _fixed_optics_panel(host, wavelength_by=None, na=0.80):
     """A panel whose recorded optics are injected, so the effective line is deterministic."""
     from squidxplorer._decon import OpticsParams
 
@@ -853,15 +855,16 @@ def _fixed_optics_panel(host, wavelength_by=None):
     def _recorded():
         ch = panel.channel_combo.currentText()
         wl = (wavelength_by or {}).get(ch, 0.525)
-        return OpticsParams(na=0.80, wavelength_um=wl, dxy_um=0.752, dz_um=1.5, nz=10), ""
+        return OpticsParams(na=na, wavelength_um=wl, dxy_um=0.752, dz_um=1.5, nz=10), ""
 
     panel._recorded_optics = _recorded
     return panel
 
 
 def test_the_effective_line_shows_what_the_solve_will_use(qapp, clean_decon_session):
-    """Item 4: the FINAL values the PSF is built from — session NI/NA applied, medium named,
-    magnification derived from the sensor pixel — live-updating with the optics row."""
+    """The FINAL values the PSF is built from — the session NI applied, medium named,
+    magnification derived from the sensor pixel — live-updating with the NI choice. NA is
+    the RECORDED value (there is no NA knob, 2026-08-25)."""
     panel = _fixed_optics_panel(_Host())
     panel._sensor_pixel_um = lambda: 7.52
     panel._refresh_optics_note()
@@ -874,8 +877,7 @@ def test_the_effective_line_shows_what_the_solve_will_use(qapp, clean_decon_sess
 
     panel.ni_combo.setCurrentIndex(1)              # water: the line must follow the session
     assert "water (ni 1.333)" in panel.effective_note.text()
-    panel.na_spin.setValue(0.95)
-    assert "NA 0.95" in panel.effective_note.text(), "the session NA override is not shown"
+    assert "NA 0.80" in panel.effective_note.text(), "the recorded NA must stay the NA"
 
 
 def test_the_effective_line_follows_the_preview_channel_s_own_wavelength(qapp,
@@ -890,10 +892,13 @@ def test_the_effective_line_follows_the_preview_channel_s_own_wavelength(qapp,
     assert "emission 0.670" in panel.effective_note.text()
 
 
-def test_an_impossible_session_na_turns_the_effective_line_into_the_refusal(qapp,
-                                                                            clean_decon_session):
-    panel = _fixed_optics_panel(_Host())
-    panel.na_spin.setValue(1.40)                   # impossible in air
+def test_an_impossible_recorded_na_turns_the_effective_line_into_the_refusal(
+        qapp, clean_decon_session):
+    from squidxplorer._decon import set_session_ni
+
+    panel = _fixed_optics_panel(_Host(), na=1.40)  # recorded NA 1.40, air chosen
+    set_session_ni(1.0)
+    panel._refresh_optics_note()
     assert "the solve will refuse" in panel.effective_note.text()
 
 
@@ -1047,16 +1052,13 @@ def test_recorded_na_prints_its_value_beside_the_control(qapp, clean_decon_sessi
         f"the recorded NA is not printed beside the control: {panel.na_recorded.text()!r}")
 
 
-def test_magnification_stays_geometric_when_na_or_ni_change(qapp, clean_decon_session):
-    """mag = sensor / dxy. NA and ni shape the PSF, not the geometry; a magnification that
-    moved with them would be a fake dependence."""
+def test_magnification_stays_geometric_when_ni_changes(qapp, clean_decon_session):
+    """mag = sensor / dxy. ni shapes the PSF, not the geometry; a magnification that moved
+    with it would be a fake dependence."""
     panel = _fixed_optics_panel(_Host())
     panel._sensor_pixel_um = lambda: 7.52
     panel._refresh_optics_note()
     assert "magnification 10.0x" in panel.effective_note.text()
-    panel.na_spin.setValue(0.95)
-    assert "magnification 10.0x" in panel.effective_note.text(), (
-        "the shown magnification moved with NA")
     panel.ni_combo.setCurrentText("1.333 (water)")
     assert "magnification 10.0x" in panel.effective_note.text(), (
         "the shown magnification moved with ni")
@@ -1073,3 +1075,101 @@ def test_the_decon_panel_carries_no_book_of_text(qapp, clean_decon_session):
     long_ones = [lab.text() for lab in p.findChildren(QLabel)
                  if len(lab.text()) > 200]
     assert not long_ones, f"paragraph-length label(s) in the panel: {long_ones}"
+
+# ── the knob principle (Julio, 2026-08-25): headline = only what the acquisition files
+# ── cannot express; everything else behind the collapsed "advanced" slot (Param.advanced) ──
+
+
+def test_the_decon_headline_is_iterations_and_ni_only_no_na_edit(qapp, clean_decon_session):
+    """"the user should only tweak what can't be deduced from acquisition filenames": the
+    NA edit is CUT; NA and the rest display READ-ONLY in the PSF slot; NI is the one optics
+    knob (no Squid file records the immersion medium)."""
+    p = DeconQCPanel(_Host())
+    assert not hasattr(p, "na_spin"), "the NA edit field is back"
+    assert p.na_recorded in p._psf.findChildren(type(p.na_recorded)), (
+        "the recorded NA line is not in the read-only PSF slot")
+    assert p.run_iter_spin is not None and p.ni_combo is not None
+
+
+def test_the_stitcher_headline_is_z_and_register_the_rest_is_advanced(qapp):
+    from qtpy.QtWidgets import QWidget
+
+    p = StitcherPanel(_Host())
+    assert p._advanced.isHidden(), "the advanced knobs are on screen by default"
+    adv = set(p._advanced.findChildren(QWidget))
+    assert p.reg_channel_combo in adv and p.blend_spin in adv and p.distortion_cb in adv
+    assert p.register_cb not in adv and p.z_operator_combo not in adv, (
+        "a headline knob fell into the advanced slot")
+    p.adv_btn.click()
+    assert not p._advanced.isHidden()
+
+
+def test_declared_advanced_params_hide_behind_the_advanced_slot(qapp):
+    """Declaration-driven: a Param(advanced=True) lands in the collapsed section, never by
+    a name match."""
+    from squidxplorer import add_operator, plane_op
+    from squidxplorer._engine import _OPERATORS, Param
+
+    def _factory(k=1, hidden_knob=2.0):
+        return plane_op(lambda plane: plane)
+
+    from qtpy.QtWidgets import QWidget
+
+    add_operator("advdemo_panel_test", _factory,
+                 params=(Param("k", 1, "headline"),
+                         Param("hidden_knob", 2.0, "advanced knob", advanced=True)))
+    try:
+        p = GenericOperatorPanel(_Host(), "advdemo_panel_test")
+        assert p._advanced is not None and p._advanced.isHidden()
+        assert p.widgets["hidden_knob"] in p._advanced.findChildren(QWidget)
+        assert p.widgets["k"] not in p._advanced.findChildren(QWidget)
+        # both still reach the run
+        assert p.kwargs() == {"k": 1, "hidden_knob": 2.0}
+        p.adv_btn.click()
+        assert not p._advanced.isHidden()
+    finally:
+        _OPERATORS.pop("advdemo_panel_test", None)
+
+
+def test_stitch_declares_its_registration_detail_advanced():
+    from squidxplorer._engine import operator_params
+
+    flags = {q.name: getattr(q, "advanced", False) for q in operator_params("stitch")}
+    assert flags["registration_channel"] and flags["registration_t"]
+    assert flags["correct_illumination"]
+    assert not flags["register"] and not flags["z_operator"]
+
+
+def test_rig_profile_notes_cross_check_the_sidecars(tmp_path):
+    """Guardrails, not knobs: each inconsistency is ONE advisory sentence."""
+    import json
+
+    from squidxplorer._decon import rig_profile_notes
+
+    root = tmp_path / "test_20x_stack"
+    root.mkdir()
+    (root / "acquisition.yaml").write_text(
+        "objective:\n  pixel_size_um: 0.752\nz_stack:\n  nz: 5\n  delta_z_mm: 0.02\n")
+    (root / "acquisition parameters.json").write_text(json.dumps(
+        {"sensor_pixel_size_um": 7.52, "objective": {"NA": 0.8, "magnification": 25.0}}))
+    notes = rig_profile_notes(root)
+    joined = " ".join(notes)
+    assert "pixel_size_um 0.752 disagrees" in joined, notes
+    assert "folder name says 20x" in joined and "25" in joined, notes
+    assert "undersamples the PSF" in joined, notes      # dz 20 um at NA 0.8
+    for note in notes:
+        assert "proceed" in note, f"a guardrail must say the run proceeds: {note!r}"
+
+
+def test_a_consistent_rig_profile_raises_no_notes(tmp_path):
+    import json
+
+    from squidxplorer._decon import rig_profile_notes
+
+    root = tmp_path / "test_10x_clean"
+    root.mkdir()
+    (root / "acquisition.yaml").write_text(
+        "objective:\n  pixel_size_um: 0.752\nz_stack:\n  nz: 5\n  delta_z_mm: 0.0015\n")
+    (root / "acquisition parameters.json").write_text(json.dumps(
+        {"sensor_pixel_size_um": 7.52, "objective": {"NA": 0.8, "magnification": 10.0}}))
+    assert rig_profile_notes(root) == []
