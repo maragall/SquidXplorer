@@ -126,8 +126,8 @@ def verify_napari_bindings(modules: Optional[dict] = None) -> None:
         raise NapariBindingError(
             "napari's API has moved under us; the mosaic view cannot be trusted to render.\n"
             "Missing or de-exported: " + ", ".join(missing) + "\n"
-            "This is a hard failure on purpose. The alternative — binding to whatever is there "
-            "and hoping — is how `_voxel_scale` ran every time and did nothing for its whole life."
+            "This is a hard failure on purpose. The alternative - binding to whatever is there "
+            "and hoping - is how `_voxel_scale` ran every time and did nothing for its whole life."
         )
 
 
@@ -1467,7 +1467,7 @@ def pyramid_levels(data: Any) -> Optional[list]:
     if isinstance(data, (str, bytes)) or not isinstance(data, _SequenceABC):
         return None
     if len(data) == 0:
-        raise ValueError("the layer holds an EMPTY multiscale pyramid — nothing to read.")
+        raise ValueError("the layer holds an EMPTY multiscale pyramid - nothing to read.")
     return list(data) if int(getattr(data[0], "ndim", 0)) >= 2 else None
 
 

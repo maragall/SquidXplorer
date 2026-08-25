@@ -104,7 +104,7 @@ def ensure_registered_copy(src) -> tuple[Path, int, int]:
     if first_refusal is not None:
         _log.info("registered copy: this filesystem refuses hardlinks (%s); image files were "
                   "copied in full.", first_refusal)
-    _log.info("registered copy: %s — %d file(s) hardlinked, %d copied.", dst.name, linked, copied)
+    _log.info("registered copy: %s - %d file(s) hardlinked, %d copied.", dst.name, linked, copied)
     return dst, linked, copied
 
 
@@ -221,7 +221,7 @@ def register_region(reader, region, fovs, *, registration_channel=0, registratio
                                registration_channel=0, timer=timer or _NullTimer())
         offsets[measured] = sub
     if len(measured) < len(fovs):
-        _log.info("register: region %s — %d of %d FOV(s) carry pixels; the %d blank (padded) "
+        _log.info("register: region %s - %d of %d FOV(s) carry pixels; the %d blank (padded) "
                   "FOV(s) keep their recorded positions.",
                   region, len(measured), len(fovs), len(fovs) - len(measured))
     del tiles
@@ -236,7 +236,7 @@ def register_region(reader, region, fovs, *, registration_channel=0, registratio
         # 5 px on a 1900 px frame, pasted at step 6).
         mags_um = [float(np.hypot(offsets[i][0] * pixel_size[0],
                                   offsets[i][1] * pixel_size[1])) for i in measured]
-        _log.info("register: region %s — %d FOV(s) solved; corrections median %.2f um, "
+        _log.info("register: region %s - %d FOV(s) solved; corrections median %.2f um, "
                   "max %.2f um (%.1f px max on a %d px frame).",
                   region, len(measured), float(np.median(mags_um)), max(mags_um),
                   max(float(np.hypot(*offsets[i])) for i in measured), tile_shape[0])
@@ -250,7 +250,7 @@ def register_region(reader, region, fovs, *, registration_channel=0, registratio
         dst, linked, copied = ensure_registered_copy(Path(str(src)))
         rows = write_registered_rows(
             dst, region, {fovs[i]: (registered[i][1], registered[i][0]) for i in measured})
-        _log.info("register: %s — %d row(s) of region %s now carry the registered positions%s.",
+        _log.info("register: %s - %d row(s) of region %s now carry the registered positions%s.",
                   dst.name, rows, region,
                   f" ({linked} file(s) hardlinked, {copied} copied)" if linked or copied else "")
 

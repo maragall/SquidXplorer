@@ -79,7 +79,7 @@ def allocate(shape: Sequence[int], dtype, *, threshold: Optional[int] = None,
         if not posix_unlinked:
             os.unlink(path)
         raise
-    _log.info("Fusion: %s is %.2f GB — backing it with a scratch file in %s (RAM limit %.2f GB); "
+    _log.info("Fusion: %s is %.2f GB - backing it with a scratch file in %s (RAM limit %.2f GB); "
               "resident pages are released after every z plane.",
               what, nbytes / 1024 ** 3, directory, limit / 1024 ** 3)
 

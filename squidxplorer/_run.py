@@ -83,6 +83,6 @@ class OperatorRun:
         if landed == 0:
             return _measure.FAILED, f"produced nothing after {elapsed:.1f} s"
         if stranded:
-            return _measure.FAILED, (f"{stranded} region(s) landed no layer — some of "
+            return _measure.FAILED, (f"{stranded} region(s) landed no layer - some of "
                                      f"their fields could not be read")
         return _measure.OK, ""

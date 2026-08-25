@@ -304,7 +304,7 @@ def apply_session_optics(optics: OpticsParams) -> OpticsParams:
     new_ni = float(ni) if ni is not None else optics.ni
     if new_ni is not None and new_na > new_ni + 1e-9:
         raise ValueError(
-            f"NA {new_na:.2f} is impossible in {medium_for_ni(new_ni)} (ni {new_ni:.3f}) — "
+            f"NA {new_na:.2f} is impossible in {medium_for_ni(new_ni)} (ni {new_ni:.3f}) - "
             "pick the objective's actual immersion in the decon panel's optics row.")
     return OpticsParams(new_na, optics.wavelength_um, optics.dxy_um,
                         optics.dz_um, optics.nz, new_ni)

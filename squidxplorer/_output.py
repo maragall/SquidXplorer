@@ -189,7 +189,7 @@ def incomplete_reason(plate_dir) -> Optional[str]:
         return (f"the write that produced this plate {how}: {wrote} of {owed} field(s) landed, "
                 f"so wells its own metadata promises are not on disk")
     # No counts means the marker was never replaced, i.e. the process died mid-run.
-    return (f"the write that produced this plate {how} — it was still running when it ended, so "
+    return (f"the write that produced this plate {how} - it was still running when it ended, so "
             f"an unknown number of the wells its metadata promises are not on disk")
 
 
@@ -398,18 +398,18 @@ def _validate_image(image: np.ndarray, channels: list[dict]) -> None:
     if image.ndim != 5:
         raise ValueError(
             f"expected a 5-D (T, C, Z, Y, X) operator result, got shape {image.shape} "
-            f"({image.ndim}-D). Every operator output is TCZYX — z-reducers give Z=1, plane-ops "
+            f"({image.ndim}-D). Every operator output is TCZYX - z-reducers give Z=1, plane-ops "
             "give the acquisition's full depth; anything else is a seam bug."
         )
     if any(int(s) < 1 for s in image.shape):
         raise ValueError(
             f"(T, C, Z, Y, X) array has an empty axis: shape {image.shape}. Every axis must have "
-            "at least one element — a zero-sized field is not a field."
+            "at least one element - a zero-sized field is not a field."
         )
     if image.shape[1] != len(channels):
         raise ValueError(
             f"image has C={image.shape[1]} channels but metadata lists {len(channels)} "
-            f"({[c['name'] for c in channels]}); channel/axis mismatch — refusing to mislabel omero."
+            f"({[c['name'] for c in channels]}); channel/axis mismatch - refusing to mislabel omero."
         )
 
 
@@ -536,7 +536,7 @@ def _check_roi_micrometres(records: list[dict], frame_extent_um: float) -> None:
     gaps = [b - a for v in (xs, ys) for a, b in zip(v, v[1:]) if b > a]
     if gaps and min(gaps) < frame_extent_um / 100.0:
         raise ValueError(
-            f"FOV pitch is {min(gaps):.4g} µm for a {frame_extent_um:.4g} µm frame — that is "
+            f"FOV pitch is {min(gaps):.4g} µm for a {frame_extent_um:.4g} µm frame - that is "
             "millimetres in a `_um` key (1000x). Refusing to write an FOV_ROI_table that would "
             "put every downstream tool 1000x off; positions come from metadata['fov_positions_um']."
         )

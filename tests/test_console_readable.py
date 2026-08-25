@@ -77,3 +77,35 @@ def test_no_height_is_swapped_in_and_out_behind_the_users_back():
         "the band opens at its ceiling, so the cap is sizing it again rather than bounding it")
     assert V._BAND_DEFAULT_PX >= 300, (
         "the band holds Operator AND Log; split two ways, less than this is a five-line log")
+
+
+def test_no_gui_string_carries_an_em_or_en_dash():
+    """Julio (2026-08-24): "there should be no em dashes in GUI". A dash in a Python string
+    literal is prose bound for a human surface (a widget, a tooltip, the log panel, a refusal),
+    so every non-docstring literal is swept; commas, colons, periods and hyphens replace them.
+    Docstrings and comments are documentation and stay out of scope."""
+    import ast
+    from pathlib import Path
+
+    import squidxplorer
+
+    offenders: list[str] = []
+    for path in sorted(Path(squidxplorer.__file__).parent.glob("*.py")):
+        tree = ast.parse(path.read_text())
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+                body = getattr(node, "body", [])
+                if body and isinstance(body[0], ast.Expr) \
+                        and isinstance(body[0].value, ast.Constant) \
+                        and isinstance(body[0].value.value, str):
+                    docstrings.add(id(body[0].value))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                    and id(node) not in docstrings \
+                    and ("—" in node.value or "–" in node.value):
+                offenders.append(f"{path.name}:{node.lineno} {node.value!r:.80}")
+    assert not offenders, (
+        "em/en dashes in string literals reach the GUI; use commas, colons, periods or "
+        "hyphens instead:\n" + "\n".join(offenders))

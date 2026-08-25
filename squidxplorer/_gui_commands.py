@@ -65,7 +65,7 @@ class WindowExecutor:
         meta = self._meta()
         if not self._has_acquisition():
             return _refuse(cmd.kind, NO_ACQUISITION,
-                           "no acquisition is open in the window — drop one, or run "
+                           "no acquisition is open in the window - drop one, or run "
                            "open_acquisition")
         regions = list(meta["regions"])
         return _done(cmd.kind, f"{len(regions)} region(s) open in the window",
@@ -90,7 +90,7 @@ class WindowExecutor:
             return _refuse(cmd.kind, NO_ACQUISITION,
                            (msg.text() if msg is not None else "the window did not open that path"))
         regions = list(self._meta()["regions"])
-        return _done(cmd.kind, f"opened {cmd.path} — {len(regions)} region(s)",
+        return _done(cmd.kind, f"opened {cmd.path} - {len(regions)} region(s)",
                      path=cmd.path, n_regions=len(regions), regions=regions)
 
     def _busy(self) -> bool:
@@ -102,10 +102,10 @@ class WindowExecutor:
         w = self._window
         if not self._has_acquisition():
             return _refuse(cmd.kind, NO_ACQUISITION,
-                           "no acquisition is open in the window — open one first")
+                           "no acquisition is open in the window - open one first")
         if cmd.operator not in runnable_operators():
             return _refuse(cmd.kind, UNKNOWN_OPERATOR,
-                           f"{cmd.operator!r} is not a runnable operator — this window can run: "
+                           f"{cmd.operator!r} is not a runnable operator - this window can run: "
                            f"{', '.join(runnable_operators())}", available=runnable_operators())
         # Registered but not installable: refuse the same way the headless executor does.
         from squidxplorer import operator_available
@@ -115,7 +115,7 @@ class WindowExecutor:
             return _refuse(cmd.kind, UNAVAILABLE_OPERATOR, avail_why, operator=cmd.operator)
         if self._busy():
             return _refuse(cmd.kind, BUSY,
-                           "a run is already in flight — stop it or let it finish first")
+                           "a run is already in flight - stop it or let it finish first")
 
         # One resolution, by the shared helper, against the window's live state.
         all_regions = list(self._meta()["regions"])

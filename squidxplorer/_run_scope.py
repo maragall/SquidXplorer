@@ -37,7 +37,7 @@ def describe_run_target(regions, *, total: int, head: int = 6) -> "Optional[str]
     ``regions is None`` is the plate-wide path, so the sentence carries *total* instead.
     """
     if regions is None:
-        return (f"this will run on the whole dataset — {int(total)} region"
+        return (f"this will run on the whole dataset - {int(total)} region"
                 f"{'' if int(total) == 1 else 's'}")
     regions = [str(r) for r in regions]
     if not regions:
@@ -144,7 +144,7 @@ def resolve_run_scope(scope: str, *, selection=None,
     quietly widened to the whole plate.
     """
     if scope not in RUN_SCOPES:
-        return None, (f"{scope!r} is not a run scope — this viewer can aim a run at: "
+        return None, (f"{scope!r} is not a run scope - this viewer can aim a run at: "
                       f"{', '.join(RUN_SCOPES)}")
     if scope == SCOPE_PLATE:
         return None, None
@@ -153,7 +153,7 @@ def resolve_run_scope(scope: str, *, selection=None,
         return (picked or None), None
     if not current_region:
         return None, ("no region is open in the viewer, so there is no 'current region' to "
-                      "run on — double-click a well first, or pick another scope")
+                      "run on - double-click a well first, or pick another scope")
     return [str(current_region)], None
 
 

@@ -250,7 +250,7 @@ class ViewDeck(QMainWindow):
             # NAMED, NOT REFUSED. Nothing here stops the user; a cap that blocked work would be
             # worse than the memory. What the tab strip hides is that each of these holds its own
             # napari viewer and GL context, so the number is what the strip cannot show.
-            text += (f" · about {n * _MB_PER_VIEW} MB — each view holds its own napari viewer; "
+            text += (f" · about {n * _MB_PER_VIEW} MB - each view holds its own napari viewer; "
                      f"close the ones you are done with")
         bar.showMessage(text)
 

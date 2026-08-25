@@ -90,7 +90,7 @@ def open_native_3d(win) -> None:
     ``RegionViewer``, which has the layers.
     """
     if win._reader is None or win._meta is None:
-        win._readout.setText("No acquisition open — drop one before opening the 3D view.")
+        win._readout.setText("No acquisition open - drop one before opening the 3D view.")
         return
     region = getattr(win, "_mosaic_region", None) or win._cursor.region
     if region is None:

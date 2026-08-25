@@ -79,7 +79,7 @@ class _FloatWindow(QWidget):
 
     def __init__(self, title, content, on_close, on_redock):
         super().__init__()
-        self.setWindowTitle(f"{title} — SquidXplorer")
+        self.setWindowTitle(f"{title} - SquidXplorer")
         self._content = content
         self._on_close = on_close
         # scoped dark chrome only, never app-wide: no per-widget Fusion style here, since a

@@ -185,7 +185,7 @@ class MosaicPane(QWidget):
         except Exception as exc:                 # noqa: BLE001 - reported, never swallowed
             self.failure = f"{type(exc).__name__}: {exc}"
             msg = QLabel(
-                "napari viewer unavailable — falling back to ndviewer_light.\n"
+                "napari viewer unavailable - falling back to ndviewer_light.\n"
                 f"{self.failure}"
             )
             msg.setAlignment(Qt.AlignCenter)
@@ -295,7 +295,7 @@ class MosaicPane(QWidget):
         if qt_window is None or not hasattr(qt_window, "setParent"):
             self.say(
                 "napari's native window could not be embedded (napari changed _qt_window); "
-                "showing the bare canvas instead — controls will look wrong."
+                "showing the bare canvas instead - controls will look wrong."
             )
             if self.canvas is not None:
                 lay.addWidget(self.canvas, 1)

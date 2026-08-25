@@ -35,7 +35,7 @@ def ingest(win, path: str) -> None:
     win._refresh_acq_cycle()
     p, is_plate = resolve_plate_root(path)
     if is_plate:
-        win._readout.setText("this is already a written plate — drop a raw Squid acquisition")
+        win._readout.setText("this is already a written plate - drop a raw Squid acquisition")
         return
     # stop any in-flight run/preview and clear prior state before opening a new acquisition:
     # a worker left running holds the OLD reader against an acquisition the window no longer shows.
@@ -106,7 +106,7 @@ def ingest(win, path: str) -> None:
                  len(g), g.levels[0].scale_um_per_px, g.levels[-1].scale_um_per_px,
                  g.worst_case_tiles)
     else:
-        log.info("deep zoom not armed (no usable stage positions) — montage only")
+        log.info("deep zoom not armed (no usable stage positions) - montage only")
     win._selected_regions = []                  # a new acquisition starts with nothing picked
     win._overview.hovered.connect(win._on_hover)
     win._overview.wellActivated.connect(win.activate_well)

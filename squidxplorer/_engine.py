@@ -166,7 +166,7 @@ def _declare(name: str, fn, *, consumes, produces, params, requires, extra,
         raise ValueError(
             f"{kind} name {name!r} contains {reserved[0]!r}: '{_CHAIN_CHARS}' are expression "
             "punctuation in a recipe label ('spot(min_area_px=80)'), so a name carrying one "
-            "would not round-trip through RecipeChain.parse — it is refused here rather than "
+            "would not round-trip through RecipeChain.parse - it is refused here rather than "
             "left to be ambiguous everywhere a recipe is written down.")
     if not callable(fn):
         raise ValueError(f"{kind} for {name!r} is not callable: {fn!r}")
@@ -382,17 +382,17 @@ def _resolve_operator(name) -> Operator:
     if name == "decon3d":
         raise KeyError(
             "operator 'decon3d' was renamed to 'decon' (2026-08-24): 'decon' IS the volume "
-            "solve now — true 3-D RL over the whole stack, every plane kept, and on an n_z=1 "
+            "solve now - true 3-D RL over the whole stack, every plane kept, and on an n_z=1 "
             "acquisition it equals the old per-plane result. Run operator='decon'.")
     if any(char in name for char in _CHAIN_CHARS):
         raise ValueError(
             f"{name!r} is a chain expression, and operator chaining was removed: an operator is "
-            "ONE registered name. Compose in Python instead — wrap the steps in one callable and "
+            "ONE registered name. Compose in Python instead - wrap the steps in one callable and "
             "register it (squidxplorer.projection.plane_op + squidxplorer.add_operator, a few "
             "lines).")
     raise KeyError(
         f"unknown operator {name!r}; available: {runnable_operators()}. "
-        "Add new modes with squidxplorer.add_operator(name, fn) — or "
+        "Add new modes with squidxplorer.add_operator(name, fn) - or "
         "squidxplorer.add_region_operator(name, fn) for one that fuses a whole well."
     )
 
@@ -436,8 +436,8 @@ def run_plate(
             raise ValueError(
                 f"a region operator fuses whole wells: n_fovs={n_fovs!r} would silently crop "
                 f"each well to its first {n_fovs} FOV(s) in row-major order, which is not a "
-                "thing anyone draws. Select FOVs with regions={region: [fov, ...]} — the one "
-                "spelling of a FOV subset — or pass n_fovs=None for every FOV.")
+                "thing anyone draws. Select FOVs with regions={region: [fov, ...]} - the one "
+                "spelling of a FOV subset - or pass n_fovs=None for every FOV.")
         return _stitch_plate(reader, n_fovs=None, workers=1 if workers is None else workers,
                              operator=operator, on_error=on_error, regions=regions,
                              **(operator_kwargs or {}))
@@ -470,7 +470,7 @@ def _project_plate(
     # A region operator is a whole-well callable; this loop hands out planes.
     if "fov" in op.consumes:
         raise ValueError(
-            f"{operator!r} consumes fov — it fuses a whole well's FOVs and takes "
+            f"{operator!r} consumes fov - it fuses a whole well's FOVs and takes "
             "(reader, region, fovs), which is not what the per-FOV loop hands an operator. Run "
             f"it with squidxplorer.run_plate(reader, operator={operator!r}).")
     fn = bind_operator(operator, operator_kwargs)

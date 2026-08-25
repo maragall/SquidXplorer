@@ -73,7 +73,7 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
         "Operator to run over every well. A z-reduction ('mip' = maximum intensity projection), a "
         "plane operator, or a REGION operator ('stitch' fuses a well's FOVs into one mosaic). "
         "Anything the engine can run is accepted, including an operator installed from another "
-        "package — see --param for the full table."))
+        "package - see --param for the full table."))
 
     param: list[str] = Field(default_factory=list, description=(
         "Operator parameter, name=value, repeatable: --param min_area_px=80 --param "
@@ -97,7 +97,7 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
     """Run only these wells, comma-separated and in this order: --wells B2,B3."""
 
     limit: Optional[int] = None
-    """Process only the first N wells — a quick SLICE of the plate (subset preview) so you can test
+    """Process only the first N wells - a quick SLICE of the plate (subset preview) so you can test
     the operator without committing the whole plate's compute + disk."""
 
     overwrite: bool = False
@@ -206,7 +206,7 @@ def _check_output(out_dir: Path, overwrite: bool) -> None:
     plate = out_dir / "plate.ome.zarr"
     if not plate.exists() or overwrite:
         return
-    state = ("an INTERRUPTED plate (nothing here resumes it — the run starts over)"
+    state = ("an INTERRUPTED plate (nothing here resumes it - the run starts over)"
              if is_incomplete(plate) else "a finished plate")
     raise SystemExit(
         f"{plate} already holds {state}.\n"
@@ -273,7 +273,7 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
         n_fovs = None
     multi = sum(1 for r in fpr if len(fpr[r]) > 1)
     if multi and n_fovs is not None:
-        logger.warning("%d well(s) have >1 FOV — projecting %d per well; pass --n-fovs 0 to "
+        logger.warning("%d well(s) have >1 FOV - projecting %d per well; pass --n-fovs 0 to "
                        "project every FOV.", multi, n_fovs)
     elif n_fovs is None:
         total = sum(len(v) for v in fpr.values())
@@ -338,9 +338,9 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
     if outcome == "ok":
         logger.info("done: %s", line)
     else:
-        logger.error("%s — %s: %s", outcome.upper(), detail, line)
+        logger.error("%s - %s: %s", outcome.upper(), detail, line)
     if skipped:
-        logger.warning("%d well(s) SKIPPED — see the SKIP line for each: %s",
+        logger.warning("%d well(s) SKIPPED - see the SKIP line for each: %s",
                        len(skipped), ", ".join(skipped[:15]) + (" …" if len(skipped) > 15 else ""))
 
 
@@ -367,7 +367,7 @@ def interrupt_stop():
             signal.signal(signal.SIGINT, signal.SIG_DFL)
             raise KeyboardInterrupt
         stopping.set()
-        logger.warning("interrupted — stopping after the wells already in flight "
+        logger.warning("interrupted - stopping after the wells already in flight "
                        "(Ctrl-C again to abort now)")
 
     try:

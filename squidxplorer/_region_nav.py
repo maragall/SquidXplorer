@@ -78,7 +78,7 @@ class RegionCursor:
                 failures.append(f"{type(exc).__name__}: {exc}")
         for text in failures:
             # never log-and-continue: a failed subscriber must not silently desync the UI
-            self._problem(f"region navigation: a subscriber failed — {text}")   # type: ignore[misc]
+            self._problem(f"region navigation: a subscriber failed - {text}")   # type: ignore[misc]
 
     # -- moving -------------------------------------------------------------------------
     def set_order(self, order: Sequence[str]) -> None:
@@ -172,7 +172,7 @@ def verify_playback_bindings(modules: Optional[dict] = None) -> None:
         raise NapariPlaybackError(
             "napari's playback machinery has moved under us, so the region slider cannot "
             "play. Missing: " + ", ".join(missing) + "\n"
-            "This is a hard failure on purpose — a play button that silently does nothing is "
+            "This is a hard failure on purpose - a play button that silently does nothing is "
             "the failure mode this control was built to replace."
         )
 
@@ -453,7 +453,7 @@ class RegionSlider(AxisPlayback):
         the dims range."""
         n = self._cursor.count if self._cursor is not None else 0
         if n == 0:
-            return "no regions loaded — open an acquisition before playing through regions."
+            return "no regions loaded - open an acquisition before playing through regions."
         if n == 1:
             return "this acquisition has one region; there is nothing to play through."
         return None

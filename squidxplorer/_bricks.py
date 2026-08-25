@@ -184,7 +184,7 @@ def ceiling_line(limit: int, px_um: float, *, measured: bool) -> str:
     *px_um* is the ACQUISITION pitch (``AcqPitchUm`` or float; ``DisplayPitchUm`` refused by
     name), the same unit :func:`clamp_bbox_um` counts in, or the two sentences disagree.
     """
-    where = "measured on this GPU" if measured else "ASSUMED — the canvas could not be asked"
+    where = "measured on this GPU" if measured else "ASSUMED - the canvas could not be asked"
     p = acq_um(px_um)
     one = float(limit) * p
     return (f"3D ceiling: GL_MAX_3D_TEXTURE_SIZE = {int(limit)} px ({where}). One texture holds "

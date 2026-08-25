@@ -76,7 +76,7 @@ def _connect_synonym(worker, synonyms: tuple, callback: _Callback, what: str) ->
             _connect(sig, callback)
             return
     raise AttributeError(
-        f"{type(worker).__name__} declares no {what} signal — expected one of "
+        f"{type(worker).__name__} declares no {what} signal - expected one of "
         f"{'/'.join(synonyms)}. Wire it by its exact name via signals={{...}} if it uses "
         f"another word, or declare the standard one on the worker.")
 
@@ -107,7 +107,7 @@ def launch(owner, worker, *, slot: str,
             sig = _connectable(worker, name)
             if sig is None:
                 raise AttributeError(
-                    f"{type(worker).__name__} declares no signal named '{name}' — refusing to "
+                    f"{type(worker).__name__} declares no signal named '{name}' - refusing to "
                     f"guess. Declared: {', '.join(signal_names(type(worker))) or '(none found)'}.")
             _connect(sig, callback)
     if on_done is not None:
@@ -121,7 +121,7 @@ def launch(owner, worker, *, slot: str,
         if finished is None:
             raise AttributeError(
                 f"{type(worker).__name__} has no 'finished' signal to carry teardown "
-                f"bookkeeping — is it a QThread?")
+                f"bookkeeping - is it a QThread?")
         _connect(finished, on_finished)
     setattr(owner, slot, worker)
     worker.start()

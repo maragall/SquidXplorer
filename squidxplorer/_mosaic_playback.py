@@ -116,7 +116,7 @@ def on_plane(win, region: str, channel: str, levels, bbox_um, window=None,
             add_levels, add_bbox = cropped
             add_window = None
         else:
-            win._say("ROI does not overlap this region — showing the whole region.")
+            win._say("ROI does not overlap this region - showing the whole region.")
 
     pane.mosaic.add_mosaic(
         _RAW_OP, channel, add_levels,
