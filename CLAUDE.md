@@ -1064,6 +1064,47 @@ Julio's declutter directive (chart: `~/Downloads/napari dock all states.png`; pl
   single-shot fired into a torn-down window during the deleteLater drain (deterministic
   segfault at PYTHONHASHSEED=0, gone with the disarm).
 
+## Hero declutter (2026-08-25, branch hero-declutter, team feedback + DESIGN-PRINCIPLES.md)
+
+Team thread verbatim: "hiding all the 'Operator' controls"; "minimize most of the Napari-Native
+tools"; "The plate view and the image should be the 'hero' features"; "'Let's fill the screen
+with verbose notifications about everything'". Julio's reconciliation stands: ONE window,
+operators hidden by default and summoned, never a separate window.
+
+- **Sections fold behind summon grips** (`_region_viewer._FoldSection`, the plate-slot/log
+  grip pattern): the operator surface folds WHOLE behind "▸ operators"; the chip block keeps
+  only the 2D/3D essentials beside "▸ controls". Collapsed by default, state per VIEW,
+  session-scoped, no prefs file. `_insert_param_slot` summons before inserting (an insertion
+  under a collapsed fold reads as a dead ⚙ chip). `RegionViewer.summon_controls()` is the one
+  entry that expands everything; GATE 3's view sweep calls it as its settle step, because the
+  sweep itself clicks the grips - collapsed-by-default never hides a control from the gate.
+- **The log starts COLLAPSED** (`LogPanel(start_collapsed=True)`), summoned by its own toggle
+  or View > Log. Expanding at home re-hands the splitter split at BOTH levels
+  (`PlateWindow._on_log_collapsed`, once more on a zero-timer after the layout pass - a
+  splitter keeps its sizes when a child's height cap lifts, measured 19 px); collapsing needs
+  no help, Qt's own maximum-size recalc gives the space to the plate. While HOSTED the
+  expanded height keeps the 3/4-of-plate-slot cap across collapse cycles
+  (`LogPanel.set_expanded_cap`). The plate slot's fixed 240 px is unchanged.
+- **napari chrome is hidden, NAMED, and stays hidden** (`_napari_pane.minimize_native_chrome`,
+  inventory on `MosaicPane.native_chrome_hidden`): the embedded status bar (27 px, a second
+  status surface), every dock title bar (20 px each, zero-height replacement - one window,
+  docks neither float nor close; napari re-installs its QtCustomTitleBar on every
+  visibilityChanged(True), so `keep_dock_slim` re-applies after napari's own handler), and
+  the layer-controls rows in `NATIVE_HIDDEN_ROWS` (`blending:`, `projection mode:`,
+  `interpolation:` - matched by the form's own LABEL TEXT, never napari attribute names).
+  Contrast, gamma, colormap, opacity rows stay: they are the IDENTITY_PROPS surface. Rows
+  stay hidden across 2D/3D flips and cover layers added after open (the container's
+  currentChanged re-applies); verified on the real pane, pinned headless in
+  tests/test_hero_declutter.py.
+- **The log diet**: INFO is for facts a user acts on; narration went to DEBUG (deep-zoom
+  arming, preview cache/seed stats, bitdepth widening, cache pruning, measure_run's
+  "starting" twin, 3D/gallery open+timing lines, well-image backfill skips). Kept INFO on
+  purpose: every refusal/limitation line, the write/delete lines (`mosaic_view/wells`), the
+  measured outcome lines (`done in`, `window open`), `ViewLog.started` (the "started and
+  then went quiet" diagnosis depends on it), the GPU-ceiling line (once per change).
+  `tests/test_hero_declutter.py` pins an ordinary open-and-preview session at <= 8 INFO
+  lines (measured 3 on the fixture); raise the cap only with a written reason.
+
 ## Agent skills
 
 ### Issue tracker
