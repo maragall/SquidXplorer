@@ -3719,9 +3719,12 @@ def test_gallery_view_is_a_view_menu_command_and_not_an_operator(qapp):
 
 #: Runnable operators that deliberately have no GUI card, and why — adding one without listing it here (or giving it a card) fails the test below.
 CLI_ONLY_OPERATORS = {
-    # EMPTY since 2026-08-24: every surviving operator (mip, decon, stitch, register) has a
-    # card. spot/cellpose/decon3d/coordinate/keepz left this dict by being shelved, not by
-    # gaining cards; the dict stays so a future CLI-only operator declares its reason here.
+    # (2026-08-24: every then-surviving operator — mip, decon, stitch, register — has a card.
+    # spot/cellpose/decon3d/coordinate/keepz left this dict by being shelved, not by gaining
+    # cards.)
+    # fstack (2026-08-25): deliberately cardless while one-window-dock reshapes the operator
+    # rows; it reaches the GUI through Process well-plates -> From their declaration.
+    "fstack": "the declaration-built panel serves it; a bespoke card waits on the dock refactor",
 }
 
 
