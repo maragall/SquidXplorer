@@ -1151,8 +1151,16 @@ class PlateWindow(QMainWindow):
     def _sync_left_tabs_visible(self) -> None:
         """The operator-tab bar exists only while it holds a tab; the log owns the band otherwise."""
         tabs = getattr(self, "_left_tabs", None)
-        if tabs is not None:
-            tabs.setVisible(tabs.count() > 0)
+        if tabs is None:
+            return
+        show = tabs.count() > 0
+        was = not tabs.isHidden()
+        tabs.setVisible(show)
+        if show and not was:
+            # With the log collapsed by default the band sits at its minimum; a first tab
+            # published into it would get ZERO height (measured: the QC result view was
+            # 898 x 0 px). Opening a tab summons the band the way summoning the log does.
+            self._rehand_band()
 
     #: Registry key for the floated log in `_floating`. Not an entry in `_op_tabs`: the log is not
     #: an operator UI and must never be routed through `_dispose_tab_widget`, which deletes.
@@ -1188,33 +1196,52 @@ class PlateWindow(QMainWindow):
             panel.set_collapsed(False)
         panel.setVisible(True)
 
+    def _rehand_band(self) -> None:
+        """Give the band its default height back, at BOTH splitters. A splitter keeps its
+        sizes when a child's height cap lifts, so any path that makes the band's content
+        taller (summoning the log, opening the first operator tab) must re-hand this. The
+        inner split runs once more on a zero-timer: the inner splitter is still at its
+        squeezed height when the first pass runs (measured 19 px), so the sizes it can
+        apply are the old ones. Guarded: a zero-timer must never fire into a torn-down
+        splitter."""
+        body = getattr(self, "_body", None)
+        if body is not None:
+            total = sum(body.sizes())
+            if total > 0:
+                body.setSizes([max(160, total - _BAND_DEFAULT_PX), _BAND_DEFAULT_PX])
+        # The queued half, run NOW: while the log was collapsed (and the tab bar empty) the
+        # inner splitter's own maximum height was recalced down to the header (measured 19
+        # px, QSplitterPrivate::recalc off its children's maximums), and both the recalc and
+        # the band host's layout normally wait for queued events, so the setSizes below
+        # would apply to the old squeezed space. refresh() re-runs the splitter's recalc,
+        # invalidate()+activate() re-runs the host layout with the lifted constraint.
+        col = getattr(self, "_right_col", None)
+        if col is None:
+            return
+        col.refresh()
+        host = getattr(self, "_band_host", None)
+        if host is not None and host.layout() is not None:
+            host.layout().invalidate()
+            host.layout().activate()
+        col.setSizes(list(_RIGHT_COL_SIZES))
+
+        def _rehand_inner() -> None:
+            if _widget_alive(col):
+                col.setSizes(list(_RIGHT_COL_SIZES))
+        QTimer.singleShot(0, _rehand_inner)
+
     def _on_log_collapsed(self, collapsed: bool) -> None:
-        """Summoning the log AT HOME must give it the band back: a splitter keeps its sizes
-        when a child's height cap lifts, so re-hand the starting split at BOTH levels (the
-        body gives the band its height, the band gives the log its share). Collapsing needs
-        no help: Qt's own maximum-size recalc hands the space to the plate, which is the
-        hero rule working. A hosted or floated panel is not the splitter's child and is
-        left alone."""
+        """Summoning the log AT HOME must give it the band back (`_rehand_band`).
+        Collapsing needs no help: Qt's own maximum-size recalc hands the space to the
+        plate, which is the hero rule working. A hosted or floated panel is not the
+        splitter's child and is left alone."""
         if collapsed:
             return
         col = getattr(self, "_right_col", None)
         panel = getattr(self, "_log_panel", None)
         if col is None or panel is None or panel.parentWidget() is not col:
             return
-        body = getattr(self, "_body", None)
-        if body is not None:
-            total = sum(body.sizes())
-            if total > 0:
-                body.setSizes([max(160, total - _BAND_DEFAULT_PX), _BAND_DEFAULT_PX])
-        col.setSizes(list(_RIGHT_COL_SIZES))
-        # Once more after the band's own layout pass: the inner splitter is still at its
-        # collapsed height when the line above runs (measured 19 px), so the sizes it can
-        # apply are the old ones. Deferred and guarded: a zero-timer must never fire into a
-        # torn-down splitter.
-        def _rehand() -> None:
-            if _widget_alive(col):
-                col.setSizes(list(_RIGHT_COL_SIZES))
-        QTimer.singleShot(0, _rehand)
+        self._rehand_band()
 
     # -- the console in a window of its own (Julio: "Log (option to open in a new window)") --------
     def _float_log(self):
