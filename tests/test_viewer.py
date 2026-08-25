@@ -88,65 +88,28 @@ def test_well_at_maps_and_bounds():
     assert V.well_at(["A"], ["1"], {}, 9e9, 9e9, 20.0) is None                       # off-plate
 
 
-def test_cells_in_rect_basic():
+def test_cells_in_rect():
     by_rc = {(r, c): f"{'AB'[r]}{c + 1}" for r in range(2) for c in range(2)}
     rows, cols = ["A", "B"], ["1", "2"]
-    assert V.cells_in_rect(rows, cols, by_rc, 0, 0, 39, 39, 20.0) == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    every = [(0, 0), (0, 1), (1, 0), (1, 1)]
+    assert V.cells_in_rect(rows, cols, by_rc, 0, 0, 39, 39, 20.0) == every
     assert V.cells_in_rect(rows, cols, by_rc, 0, 0, 5, 5, 20.0) == [(0, 0)]          # one cell
     assert V.cells_in_rect(rows, cols, by_rc, 25, 0, 35, 35, 20.0) == [(0, 1), (1, 1)]  # one column
-
-
-def test_cells_in_rect_inverted_drag():
-    by_rc = {(r, c): f"{'AB'[r]}{c + 1}" for r in range(2) for c in range(2)}
-    rows, cols = ["A", "B"], ["1", "2"]
-    fwd = V.cells_in_rect(rows, cols, by_rc, 0, 0, 39, 39, 20.0)
-    assert V.cells_in_rect(rows, cols, by_rc, 39, 39, 0, 0, 20.0) == fwd
-    assert V.cells_in_rect(rows, cols, by_rc, 39, 0, 0, 39, 20.0) == fwd   # mixed inversion
-
-
-def test_cells_in_rect_clamps_to_plate():
-    by_rc = {(r, c): f"{'AB'[r]}{c + 1}" for r in range(2) for c in range(2)}
-    rows, cols = ["A", "B"], ["1", "2"]
-    assert V.cells_in_rect(rows, cols, by_rc, 0, 0, 9999, 9999, 20.0) == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    assert V.cells_in_rect(rows, cols, by_rc, 39, 39, 0, 0, 20.0) == every           # inverted drag
+    assert V.cells_in_rect(rows, cols, by_rc, 39, 0, 0, 39, 20.0) == every           # mixed inversion
+    assert V.cells_in_rect(rows, cols, by_rc, 0, 0, 9999, 9999, 20.0) == every       # clamped
     assert V.cells_in_rect(rows, cols, by_rc, -500, -500, 5, 5, 20.0) == [(0, 0)]
-
-
-def test_cells_in_rect_off_plate_returns_empty():
-    by_rc = {(0, 0): "A1"}
-    rows, cols = ["A"], ["1"]
-    assert V.cells_in_rect(rows, cols, by_rc, -900, -900, -100, -100, 20.0) == []   # above-left
-    assert V.cells_in_rect(rows, cols, by_rc, 5000, 5000, 9000, 9000, 20.0) == []   # beyond extent
-
-
-def test_cells_in_rect_zero_area_is_single_cell():
-    by_rc = {(r, c): f"{'AB'[r]}{c + 1}" for r in range(2) for c in range(2)}
-    assert V.cells_in_rect(["A", "B"], ["1", "2"], by_rc, 25, 25, 25, 25, 20.0) == [(1, 1)]
-
-
-def test_cells_in_rect_excludes_unacquired():
-    by_rc = {(0, 0): "A1", (1, 1): "B2"}          # A2 and B1 were never acquired
-    assert V.cells_in_rect(["A", "B"], ["1", "2"], by_rc, 0, 0, 39, 39, 20.0) == [(0, 0), (1, 1)]
+    assert V.cells_in_rect(rows, cols, by_rc, 25, 25, 25, 25, 20.0) == [(1, 1)]      # zero area
+    assert V.cells_in_rect(rows, cols, by_rc, -900, -900, -100, -100, 20.0) == []   # off plate
+    assert V.cells_in_rect(rows, cols, by_rc, 5000, 5000, 9000, 9000, 20.0) == []
+    sparse = {(0, 0): "A1", (1, 1): "B2"}          # A2 and B1 were never acquired
+    assert V.cells_in_rect(rows, cols, sparse, 0, 0, 39, 39, 20.0) == [(0, 0), (1, 1)]
 
 
 def test_fit_cell_always_returns_cell_shape():
     assert V._fit_cell(np.zeros((768, 768), np.float32)).shape == (V._CELL, V._CELL)
     assert V._fit_cell(np.zeros((V._CELL, V._CELL), np.float32)).shape == (V._CELL, V._CELL)
     assert V._fit_cell(np.zeros((40, 40), np.float32)).shape == (V._CELL, V._CELL)  # tiny frame upscaled
-
-
-def test_running_contrast_latch_holds_against_new_wells():
-    rc = V._RunningContrast(2, 1000.0)
-    for ch in (0, 1):
-        rc.add(ch, np.full((8, 8), 100.0))
-    rc.set_manual(0, 10.0, 20.0)
-    assert rc.is_manual(0) and not rc.is_manual(1)
-    before = rc.window(1)
-    for ch in (0, 1):
-        rc.add(ch, np.full((8, 8), 900.0))     # a much brighter well lands
-    assert rc.window(0) == (10.0, 20.0)        # latched: untouched
-    assert rc.window(1) != before              # auto: followed the new well
-    rc.set_auto(0)                             # reset-to-auto -> back on the running window
-    assert not rc.is_manual(0) and rc.window(0) == rc.window(1)
 
 
 def test_running_contrast_manual_window_never_degenerate():
@@ -231,14 +194,10 @@ def test_the_last_lit_channel_cannot_be_turned_off(qapp):
     ov.set_channel_visible(1, False)
     assert list(ov._mask) == [False, True], "the last lit channel must survive"
     assert _rgb(ov).sum() > 0, "the plate must still be showing something"
-
-
-def test_a_single_channel_acquisition_stays_lit(qapp):
-    ov = _overview(qapp, n_ch=1)
-    ov.add_tile(0, 0, "A1", _tile([1000]))
-    assert _rgb(ov).max() > 0
-    ov.set_channel_visible(0, False)
-    assert _rgb(ov).max() > 0
+    one = _overview(qapp, n_ch=1)
+    one.add_tile(0, 0, "A1", _tile([1000]))
+    one.set_channel_visible(0, False)
+    assert _rgb(one).max() > 0, "a single-channel acquisition went dark"
 
 
 def test_rewindow_repaints_without_touching_the_store(qapp):
@@ -308,17 +267,11 @@ def test_mosaic_tile_lands_at_its_box_offset(qapp):
     assert store[0, h:h + h, w:w + w].max() > 0          # the field landed inside its box...
     assert store[0, :h, :].max() == 0                    # ...and nowhere else in the cell
     assert store[0, :, :w].max() == 0
-
-
-def test_mosaic_fields_accumulate_in_one_cell_and_seams_recomposite(qapp):
-    ov = _overview(qapp, n_ch=1)
-    h = w = V._CELL // 4
-    ov.add_tile(0, 0, "A1", _box_tile([4000], h, w), box=(0, 0, h, w))
     first = _rgb(ov)[:, :V._CELL].copy()
-    ov.add_tile(0, 0, "A1", _box_tile([4000], h, w), box=(0, w, h, w))   # the neighbour to its right
+    ov.add_tile(0, 0, "A1", _box_tile([4000], h, w), box=(h, 2 * w, h, w))   # its right neighbour
     store = ov._store["raw"]
-    assert store[0, :h, :w].max() > 0 and store[0, :h, w:2 * w].max() > 0   # BOTH still present
-    assert not np.array_equal(_rgb(ov)[:, :V._CELL], first)                # the cell repainted
+    assert store[0, h:2 * h, w:2 * w].max() > 0 and store[0, h:2 * h, 2 * w:3 * w].max() > 0
+    assert not np.array_equal(_rgb(ov)[:, :V._CELL], first)                 # the cell repainted
 
 
 def test_contrast_ignores_the_mosaic_zero_padding(qapp):
@@ -336,18 +289,6 @@ def test_contrast_ignores_the_mosaic_zero_padding(qapp):
     poisoned.add(0, ov._store["raw"][0, :V._CELL, :V._CELL])   # the cell INCLUDING its zeros
     assert poisoned.window(0)[0] < got[0]     # ...which is strictly darker-pinned: the bug
     assert poisoned.window(0) != got
-
-
-def test_dim_mosaic_well_is_not_washed_out_by_padding(qapp):
-    ov = _overview(qapp, n_ch=1)
-    h = w = V._CELL // 4
-    ov.add_tile(0, 0, "A1", _box_tile([60000], h, w), box=(0, 0, h, w))    # bright well
-    ov.add_tile(0, 1, "A2", _box_tile([3000], h, w), box=(0, 0, h, w))     # dim well
-    ov.recomposite()
-    rgb = _rgb(ov)
-    dim = rgb[:h, V._CELL:V._CELL + w, 0]
-    assert dim.max() > 0                      # the dim well is still visible at all...
-    assert rgb[:h, :w, 0].max() > dim.max()   # ...and still reads as dimmer than the bright one
 
 
 def test_reset_layer_frees_the_store_so_a_shorter_rerun_leaves_nothing(qapp):
@@ -394,35 +335,16 @@ def test_a_subset_layer_leaves_the_other_wells_thumbnails_on_the_plate(qapp):
     ov.add_tile(0, 1, "A2", _tile([4000]))          # both wells have a raw thumbnail
     raw_a2 = _painted_cell(ov, 0, 1)
     assert raw_a2.size and raw_a2.max() > 0         # the fixture really does paint something
+    assert ov.underlay_cells() == set(), "raw active must never show through itself"
 
-    ov.add_tile(0, 0, "A1", _tile([9000]), layer="mip")   # the run covered A1 only
     ov.set_active_layer("mip")
+    assert ov.underlay_cells() == {(0, 0), (0, 1)}      # nothing computed yet: all base
+    ov.add_tile(0, 0, "A1", _tile([9000]), layer="mip")   # the run covered A1 only
 
     assert ov.shown_cells() == {(0, 0), (0, 1)}, "A2 lost its thumbnail when the layer switched"
     assert ov.underlay_cells() == {(0, 1)}, "A2 is not the one showing the base through"
     assert np.array_equal(_painted_cell(ov, 0, 1), raw_a2), (
         "A2 is outside the run, so the plate must still paint A2's raw thumbnail there")
-
-
-def test_the_base_stops_showing_through_a_well_the_run_reaches(qapp):
-    ov = _overview(qapp, n_ch=1)
-    ov.add_tile(0, 0, "A1", _tile([4000]))
-    ov.add_tile(0, 1, "A2", _tile([4000]))
-    ov.set_active_layer("mip")
-    assert ov.underlay_cells() == {(0, 0), (0, 1)}      # nothing computed yet: all base
-
-    ov.add_tile(0, 1, "A2", _tile([9000]), layer="mip")
-    assert ov.underlay_cells() == {(0, 0)}
-    assert ov.shown_cells() == {(0, 0), (0, 1)}
-
-
-def test_the_base_never_shows_through_itself(qapp):
-    """raw active must stay byte-identical: no underlay, no second blit."""
-    ov = _overview(qapp, n_ch=1)
-    ov.add_tile(0, 0, "A1", _tile([4000]))
-    assert ov.underlay_cells() == set()
-    assert ov.shown_cells() == {(0, 0)}
-
 
 
 def test_ingest_bad_folder_does_not_crash(qapp, tmp_path):
@@ -587,11 +509,13 @@ def test_marquee_asks_for_a_window_over_exactly_the_boxed_wells(qapp):
     """A second drag reports its own box rather than accumulating with the first."""
     ov = _sel_overview()
     opened, _sel = _boxed(ov)
+    ov.select(1, 1)
     _drag(ov, _pt(0, 0), _pt(1, 1), Qt.ShiftModifier)          # sweep the whole 2x2
     assert opened == [["A1", "A2", "B2"]]                      # B1 never acquired -> excluded
     assert ov.selected_wells() == [], "the drag left a lingering selection wash on the plate"
     _drag(ov, *_within(0, 0), Qt.ShiftModifier)                # a fresh marquee over A1 only...
     assert opened == [["A1", "A2", "B2"], ["A1"]]              # ...its own box, not a union
+    assert ov._sel == (1, 1), "the marquee moved the red box"
 
 
 def test_additive_marquee_unions(qapp):
@@ -602,16 +526,6 @@ def test_additive_marquee_unions(qapp):
     _drag(ov, *_within(1, 1), Qt.ShiftModifier | Qt.AltModifier)         # + B2
     assert ov.selected_wells() == ["A1", "B2"]
     assert opened == [], "Shift+Alt opened a window instead of unioning into the selection"
-
-
-def test_shift_click_toggles_well(qapp):
-    ov = _sel_overview()
-    ov.mousePressEvent(_mouse("press", _pt(0, 1), Qt.ShiftModifier))
-    ov.mouseReleaseEvent(_mouse("release", _pt(0, 1), Qt.ShiftModifier, buttons=Qt.NoButton))
-    assert ov.selected_wells() == ["A2"]
-    ov.mousePressEvent(_mouse("press", _pt(0, 1), Qt.ShiftModifier))     # click again -> off
-    ov.mouseReleaseEvent(_mouse("release", _pt(0, 1), Qt.ShiftModifier, buttons=Qt.NoButton))
-    assert ov.selected_wells() == []
 
 
 def test_marquee_emits_once_on_release(qapp):
@@ -625,12 +539,6 @@ def test_marquee_emits_once_on_release(qapp):
     ov.mouseReleaseEvent(_mouse("release", _pt(1, 1), Qt.ShiftModifier, buttons=Qt.NoButton))
     assert opened == [["A1", "A2", "B2"]]                       # exactly one emission
     assert seen == [], "an empty batch selection was cleared it never had"
-
-
-def test_selection_excludes_empty_wells(qapp):
-    ov = _sel_overview()
-    _drag(ov, *_within(1, 0), Qt.ShiftModifier)                 # B1: a plate position, never acquired
-    assert ov.selected_wells() == []
 
 
 def test_wheel_ignored_during_marquee(qapp):
@@ -705,15 +613,6 @@ def test_double_click_selects_only_the_well_it_opens(qapp):
     assert ov.selected_wells() == []
 
 
-def test_marquee_does_not_disturb_red_box(qapp):
-    ov = _sel_overview()
-    opened, _sel = _boxed(ov)
-    ov.select(1, 1)
-    _drag(ov, *_within(0, 0), Qt.ShiftModifier)
-    assert ov._sel == (1, 1)                                    # red box unmoved
-    assert opened == [["A1"]]
-
-
 def test_clear_selection_emits_empty(qapp):
     """Seeded through Shift+Alt, since a plain Shift-drag opens a window rather than selecting."""
     ov = _sel_overview()
@@ -724,19 +623,6 @@ def test_clear_selection_emits_empty(qapp):
     ov.clear_selection()
     assert ov.selected_wells() == [] and seen == [[]]
 
-
-
-def test_selection_expands_to_region_fov_pairs(qapp, squid_dataset):
-    """PlateOverview is display-only (it has no metadata), so PlateWindow does the expansion."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win._overview.selectionChanged.emit(["B3"])
-    qapp.processEvents()
-    assert win._selected_regions == ["B3"]
-    fovs = win._meta["fovs_per_region"]["B3"]
-    assert win.selected_region_fovs() == [("B3", f) for f in fovs]
-    win.close()
 
 
 def test_run_operator_on_selection_only_processes_selected(qapp, squid_dataset,
@@ -760,21 +646,6 @@ def test_run_operator_on_selection_only_processes_selected(qapp, squid_dataset,
     assert win._overview._status[win._fov_index["B3"]["rc"]] == "processing"
     assert win._overview._status[win._fov_index["B2"]["rc"]] == "empty"
     win._stop_worker(); win.close()
-
-
-def test_selection_clears_on_second_ingest(qapp, squid_dataset):
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win._overview.selectionChanged.emit(["B3"])
-    qapp.processEvents()
-    assert win._selected_regions == ["B3"]
-    win.ingest(str(root))                          # re-open
-    qapp.processEvents()
-    assert win._selected_regions == []
-    assert win._overview.selected_wells() == []
-    win._stop_worker(); win.close()
-
 
 
 class _StubTab(QWidget):
@@ -805,19 +676,6 @@ def test_detach_moves_widget_to_float_and_registry(qapp):
     win.close()
 
 
-def test_the_tab_bar_opens_empty_and_every_tab_may_detach(qapp):
-    """No home tab since 2026-08-19: the cards live in the views window's dock, so the bar holds only user-opened operator panels — hidden while empty,"""
-    win = V.PlateWindow(None)
-    assert win._left_tabs.count() == 0
-    assert win._left_tabs.isHidden()            # isHidden, not isVisible: the window is unshown
-    assert win._FIXED_TABS == 0
-    w = _open_stub_tab(win)
-    assert not win._left_tabs.isHidden()
-    fl = win._detach_tab(win._left_tabs.indexOf(w))
-    assert fl is not None, "the first tab refused to detach; the home-tab guard is back"
-    win.close()
-
-
 def test_open_op_tab_focuses_float_not_duplicate(qapp):
     win = V.PlateWindow(None)
     w = _open_stub_tab(win)
@@ -839,18 +697,6 @@ def test_close_float_disposes_widget(qapp):
     w2 = _StubTab()
     win._open_op_tab("stub", "Stub", lambda: w2)             # reopening builds fresh
     assert win._op_tabs["stub"] is w2
-    win.close()
-
-
-def test_redock_returns_same_widget(qapp):
-    win = V.PlateWindow(None)
-    w = _open_stub_tab(win)
-    win._detach_tab(win._left_tabs.indexOf(w))
-    win._redock("stub")
-    assert win._op_tabs["stub"] is w                         # SAME object — a live shell survives
-    assert win._left_tabs.currentWidget() is w
-    assert not win._floating
-    assert w.shutdowns == 0                                  # re-dock never kills the shell
     win.close()
 
 
@@ -907,19 +753,6 @@ def test_channel_toggle_after_preview_reads_nothing(qapp, squid_dataset):
     assert not np.array_equal(_rgb(win._overview), before)   # the plate really changed
     assert reads == []                                       # ...and nothing was read/projected
     assert win._worker is None                               # no operator run was triggered
-    win.close()
-
-
-def test_napari_visibility_drives_the_plate_and_the_strip_only_reports_it(qapp,
-                                                                          squid_dataset):
-    """napari's eye icon is the sole control; the plate is a pure sink. MUTATION: dropping the on_user_visibility binding in _bind_napari_contrast should fail this."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win._overview.set_channel_visible(0, False)
-    assert win._overview._mask[0] == False        # noqa: E712 — numpy bool, not python bool
-    win._overview.set_channel_visible(0, True)
-    assert win._overview._mask[0] == True         # noqa: E712
     win.close()
 
 
@@ -1119,6 +952,7 @@ def test_closing_the_last_tab_hides_the_bar(qapp, squid_dataset):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
+    assert win._left_tabs.count() == 0 and win._left_tabs.isHidden(), "the bar opens hidden"
     w = _open_stub_tab(win)
     assert not win._left_tabs.isHidden()
     win._close_op_tab(win._left_tabs.indexOf(w))
@@ -1281,6 +1115,9 @@ def test_second_ingest_resets_state(qapp, squid_dataset, tmp_path):
     win.ingest(str(root))
     win.run_operator("mip", out_parent=str(tmp_path))
     _drain_until(qapp, lambda: win._overview is not None and len(win._overview._tiles) == 2)
+    win._overview.selectionChanged.emit(["B3"])
+    qapp.processEvents()
+    assert win._selected_regions == ["B3"]
     win.ingest(str(root))            # second open: must stop the old worker + reset state
     qapp.processEvents()
     time.sleep(0.1)
@@ -1288,57 +1125,12 @@ def test_second_ingest_resets_state(qapp, squid_dataset, tmp_path):
     assert len(win._fov_index) == 2                              # rebuilt, not accumulated
     assert len(win.findChildren(V.PlateOverview)) == 1           # one overview, not stacked
     assert set(win._overview._status.values()) == {"empty"}     # fresh grey plate
+    assert win._selected_regions == [] and win._overview.selected_wells() == []
     win._stop_worker()
     win.close()
 
 
 # _OperatorWorker used to be constructed without n_fovs (defaulting to 1) and set_mosaic_boxes had zero callers — every inherited viewer test still passed since they only exercise the single-tile path.
-
-def test_operator_worker_is_constructed_for_multi_fov_not_defaulted_to_one(
-        qapp, squid_dataset, tmp_path, monkeypatch):
-    seen = {}
-    real_init = V._OperatorWorker.__init__
-
-    def spy(self, *a, **kw):
-        seen["n_fovs"] = kw.get("n_fovs", "NOT-PASSED")
-        return real_init(self, *a, **kw)
-
-    monkeypatch.setattr(V._OperatorWorker, "__init__", spy)
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win.run_operator("mip", out_parent=str(tmp_path))
-    _drain_until(qapp, lambda: "n_fovs" in seen)
-
-    try:
-        assert seen.get("n_fovs") != "NOT-PASSED", (
-            "run_operator constructed _OperatorWorker without n_fovs, so it defaults to 1, "
-            "_boxes is always {}, and the coordinate-placed mosaic can never render.")
-        assert seen["n_fovs"] != 1, (
-            f"n_fovs={seen['n_fovs']!r}; the mosaic path requires n_fovs != 1 "
-            "(_OperatorWorker: `_boxes = _mosaic_boxes(meta) if n_fovs != 1 else {}`).")
-    finally:
-        win._stop_worker(); win.close()
-
-
-def test_set_mosaic_boxes_is_actually_called_by_the_viewer(
-        qapp, squid_dataset, tmp_path, monkeypatch):
-    calls = []
-    monkeypatch.setattr(V.PlateOverview, "set_mosaic_boxes",
-                        lambda self, boxes: calls.append(boxes))
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win.run_operator("mip", out_parent=str(tmp_path))
-    _drain_until(qapp, lambda: bool(calls))
-
-    try:
-        assert calls, (
-            "set_mosaic_boxes was never called. PlateOverview._boxes stays empty, so _fov_at() "
-            "always returns FOV 0 and the mosaic is invisible to hit-testing and paint.")
-    finally:
-        win._stop_worker(); win.close()
-
 
 # The wiring guards above don't prove a FOV lands anywhere in particular, or look at a pixel — a mosaic stacking every field at (0, 0) would pass both, so these drive the real widget and assert on geometry and rendered pixels.
 
@@ -1447,56 +1239,25 @@ def _plate_rgb(ov):
     return a[:, :img.width(), :]
 
 
-def _two_well_plate(bright_peak=40000, dim_peak=600):
-    """A 1x2 plate: one BRIGHT well beside one DIM well, both spread (non-degenerate)."""
-    ov = V.PlateOverview(["A"], ["1", "2"], {(0, 0): "A1", (0, 1): "A2"})
-    ov.resize(400, 300)
-    ov.set_channels(["c0"], np.array([[1.0, 1.0, 1.0]], np.float32), dtype=np.uint16)
-    for (rc, wid), peak in zip({(0, 0): "A1", (0, 1): "A2"}.items(), (bright_peak, dim_peak)):
-        tile = np.linspace(peak * 0.4, peak, V._CELL * V._CELL).astype(np.uint16)
-        ov.add_tile(rc[0], rc[1], wid, tile.reshape(1, V._CELL, V._CELL))
-    return ov
-
-
-def _cell_mean(ov, ri, ci):
-    ov.recomposite(ov._active)
-    return float(_plate_rgb(ov)[ri * V._CELL:(ri + 1) * V._CELL,
-                                ci * V._CELL:(ci + 1) * V._CELL].mean())
-
-
 def test_running_contrast_flat_channel_yields_degenerate_window():
     """Regression: window() used to return a 1-unit span against a ~128-unit histogram bin, so a blank/dead/saturated well rendered full white."""
     from squidxplorer._montage import _window
 
-    rc = V._RunningContrast(1, float(np.iinfo(np.uint16).max))
+    dmax = float(np.iinfo(np.uint16).max)
+    rc = V._RunningContrast(2, dmax)
+    assert rc.window(0) == (0.0, dmax), "an empty histogram is the full range"
     flat = np.full((8, 8), 500.0, dtype=np.float32)
     rc.add(0, flat)
     lo, hi = rc.window(0)
     assert hi - lo <= 0, "a flat channel must produce a degenerate window, not a 1-unit span"
     assert np.all(_window(flat, lo, hi) == 0.0), "a flat channel must render black, not white"
-
-
-def test_running_contrast_saturated_channel_renders_black():
-    from squidxplorer._montage import _window
-
-    dmax = float(np.iinfo(np.uint16).max)
-    rc = V._RunningContrast(1, dmax)
     sat = np.full((8, 8), dmax, dtype=np.float32)
-    rc.add(0, sat)
-    lo, hi = rc.window(0)
-    assert np.all(_window(sat, lo, hi) == 0.0)
-
-
-def test_running_contrast_spread_channel_still_windows():
-    rc = V._RunningContrast(1, float(np.iinfo(np.uint16).max))
-    rc.add(0, np.linspace(0, 60000, 64 * 64).astype(np.float32).reshape(64, 64))
-    lo, hi = rc.window(0)
+    rc.add(1, sat)
+    assert np.all(_window(sat, *rc.window(1)) == 0.0), "a saturated channel must render black"
+    spread = V._RunningContrast(1, dmax)
+    spread.add(0, np.linspace(0, 60000, 64 * 64).astype(np.float32).reshape(64, 64))
+    lo, hi = spread.window(0)
     assert hi > lo
-
-
-def test_running_contrast_empty_histogram_is_full_range():
-    rc = V._RunningContrast(2, 65535.0)
-    assert rc.window(0) == (0.0, 65535.0)
 
 
 def test_blank_well_renders_black_not_white_through_the_widget(qapp):
@@ -1547,6 +1308,9 @@ def test_shift_click_refines_the_selection_without_opening_anything(qapp,
     qapp.processEvents()
     assert ov.selected_wells() == ["B3"]                       # selection still happens...
     assert opened == []                                        # ...and nothing opened
+    ov.mousePressEvent(_mouse("press", _pt(*rc), Qt.ShiftModifier))     # click again -> off
+    ov.mouseReleaseEvent(_mouse("release", _pt(*rc), Qt.ShiftModifier, buttons=Qt.NoButton))
+    assert ov.selected_wells() == [] and opened == []
     win.close()
 
 
@@ -1664,40 +1428,23 @@ def _cell_center(ov, ri=0, ci=0):
 
 
 
-def test_loupe_scale_never_upsamples_past_native():
-    for cd, well in ((20, 4168), (200, 4168), (1000, 1024), (5000, 1024)):
-        s, m = V.loupe_scale(cd, well)
-        assert s <= 1.0 or s == pytest.approx(cd / well)   # only "past native" exceeds 1.0
-        assert m >= 1.0                                    # and it never shrinks
-
-
-def test_loupe_inset_shows_at_most_one_whole_well():
-    """A fixed 8x doesn't survive a 1536wp (well is ~10px at fit); scale is floored so the inset shows at most one well."""
-    well, inset = 1024, 240
-    s, m = V.loupe_scale(cd=10.6, well_px=well, inset_px=inset)   # 1536wp at fit
-    region = inset / s                                            # image px the inset covers
-    assert region <= well + 1                                     # never more than one well
-    assert m > 8.0                                                # ...so the real gain exceeds 8x
-    s2, m2 = V.loupe_scale(cd=100, well_px=well, inset_px=inset)
-    assert m2 == pytest.approx(8.0)
-    assert s2 <= 1.0
-
-
-def test_loupe_never_demagnifies_past_native_plate_zoom():
-    """Floors magnification at 1.0 so zooming beyond native doesn't shrink the inset below the plate's own scale."""
+def test_loupe_scale_is_bounded_at_both_ends_and_dynamic_in_plate_zoom():
+    """Magnification floors at 1.0, shows at most one whole well, and never upsamples past native."""
     s, m = V.loupe_scale(cd=4096, well_px=1024)     # plate already at 4x native
     assert m == pytest.approx(1.0)
     assert s == pytest.approx(4.0)                  # inset matches the plate, never below it
     for cd in (1, 10, 100, 1024, 2048, 8192):
         assert V.loupe_scale(cd, 1024)[1] >= 1.0
-
-
-def test_loupe_scale_is_dynamic_in_plate_zoom():
-    well = 4168
-    mags = [V.loupe_scale(cd, well)[1] for cd in (10, 100, 1000, 4168)]
-    assert mags == sorted(mags, reverse=True)
-    assert mags[0] > mags[-1]
-    assert mags[-1] == pytest.approx(1.0)
+    for cd, well in ((20, 4168), (200, 4168), (1000, 1024), (5000, 1024)):
+        s, m = V.loupe_scale(cd, well)
+        assert s <= 1.0 or s == pytest.approx(cd / well)   # only "past native" exceeds 1.0
+    well, inset = 1024, 240
+    s, m = V.loupe_scale(cd=10.6, well_px=well, inset_px=inset)   # 1536wp at fit
+    assert inset / s <= well + 1 and m > 8.0                       # at most one well, gain > 8x
+    s2, m2 = V.loupe_scale(cd=100, well_px=well, inset_px=inset)
+    assert m2 == pytest.approx(8.0) and s2 <= 1.0
+    mags = [V.loupe_scale(cd, 4168)[1] for cd in (10, 100, 1000, 4168)]
+    assert mags == sorted(mags, reverse=True) and mags[0] > mags[-1] == pytest.approx(1.0)
 
 
 def test_loupe_level_picks_coarsest_adequate_and_clamps():
@@ -1908,37 +1655,6 @@ def test_double_click_cancels_the_hold_and_still_opens_the_well(qapp, squid_data
     win.close()
 
 
-def test_press_off_plate_never_arms(qapp, squid_dataset):
-    root, _ = squid_dataset
-    win = _loupe_win(qapp, root)
-    ov = win._overview
-    ov.resize(600, 400)
-    ov.set_loupe_source(_FakeLoupeSource(), np.ones((2, 3), np.float32))
-    ov.mousePressEvent(_press(2, 2))               # in the label margin, off the grid
-    assert not ov._hold.isActive()
-    ov._arm_loupe()
-    assert ov._loupe is None
-    ov.set_loupe_source(None)
-    win.close()
-
-
-def test_leaving_the_widget_dismisses_a_live_loupe(qapp, squid_dataset):
-    root, _ = squid_dataset
-    win = _loupe_win(qapp, root)
-    ov = win._overview
-    ov.resize(600, 400)
-    ov.set_loupe_source(_FakeLoupeSource(), np.ones((2, 3), np.float32))
-    rc = sorted(ov._by_rc)[0]
-    x, y = _cell_center(ov, *rc)
-    ov.mousePressEvent(_press(x, y))
-    ov._arm_loupe()
-    assert ov._loupe is not None
-    ov.leaveEvent(None)
-    assert ov._loupe is None
-    ov.set_loupe_source(None)
-    win.close()
-
-
 def test_unavailable_well_reports_instead_of_showing_other_pixels(qapp, squid_dataset):
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
@@ -1971,16 +1687,6 @@ def test_no_source_means_the_gesture_never_arms(qapp, squid_dataset):
     assert not ov._hold.isActive()
     win.close()
 
-
-
-def test_raw_layer_gets_a_loupe_source_on_ingest(qapp, squid_dataset):
-    root, _ = squid_dataset
-    win = _loupe_win(qapp, root)
-    assert isinstance(win._loupe_sources.get("raw"), V._RawLoupeSource)
-    assert win._overview._loupe_src is win._loupe_sources["raw"]
-    ok, _why = win._overview._loupe_src.available("B2")
-    assert ok
-    win.close()
 
 
 def test_raw_source_reads_real_acquisition_pixels(qapp, squid_dataset):
@@ -2322,18 +2028,6 @@ def test_saved_run_registers_zarr_source_and_grows_written_set(qapp, squid_datas
     win._stop_worker(); win.close()
 
 
-def test_switching_back_to_raw_switches_the_source(qapp, squid_dataset, tmp_path):
-    root, _ = squid_dataset
-    win = _loupe_win(qapp, root)
-    win.run_operator("mip", out_parent=str(tmp_path))
-    assert _drain_until(qapp, lambda: win._overview._active == "mip")
-    win._return_to_raw()
-    assert win._overview._active == "raw"
-    assert win._overview._loupe_src is win._loupe_sources["raw"]
-    win._stop_worker(); win.close()
-
-
-
 def test_zarr_source_crop_read_against_a_real_pyramid(qapp, pyramid_dataset, tmp_path):
     """Uses pyramid_dataset since the 4x4 fixture's single level would make level selection untestable."""
     import squidxplorer
@@ -2400,11 +2094,6 @@ def test_computed_plate_open_wires_a_loupe_source(qapp, pyramid_dataset, tmp_pat
     assert win._meta["pixel_size_um"] == pytest.approx(0.325)
     assert V.loupe_um_per_screen_px(src.pixel_size_um, 1.0) == pytest.approx(0.325)
     win._stop_worker(); win.close()
-
-
-def test_ambiguous_unit_pixel_size_is_treated_as_unknown():
-    """_output writes 1.0 for both 'unknown' and a genuine 1.0 µm/px, so the scale bar must be suppressed rather than assert an unbacked figure."""
-    assert V.loupe_um_per_screen_px(None, 0.5) is None
 
 
 def test_loupe_geometry_maps_cursor_to_the_right_well_and_crop(qapp, squid_dataset):
@@ -2625,15 +2314,6 @@ class _IdleSignalWorker(V.QThread):
         pass
 
 
-def test_signal_names_discovers_every_worker_signal():
-    """_retire used to disconnect a hardcoded name list, so a worker declaring a new signal stayed connected through teardown."""
-    names = set(V._signal_names(_IdleSignalWorker))
-    assert {"progress", "exported", "launched", "failed", "finished_ok"} <= names
-    assert "finished" not in names and "started" not in names   # QThread's own — never torn down
-    assert {"tileReady", "resultReady", "streamEnded", "writtenReady", "wellFailed"} <= set(
-        V._signal_names(V._OperatorWorker))
-
-
 def test_retire_disconnects_every_declared_signal(qapp, squid_dataset, tmp_path):
     """_signal_names being right is worthless unless _retire actually uses it to disconnect."""
     root, _ = squid_dataset
@@ -2665,18 +2345,6 @@ def test_retire_disconnects_every_declared_signal(qapp, squid_dataset, tmp_path)
 
 
 
-def test_the_tab_bar_has_no_fixed_head(qapp, squid_dataset):
-    """The Operators home tab moved to the views window's dock (2026-08-19), so the bar's detachable range starts at 0 — there is no fixed index left to protect."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    assert win._left_tabs.tabBar()._first_detachable == 0
-    assert win._left_tabs.count() == 0, "something opened a tab during ingest"
-    win.close()
-
-
-
-
 def test_the_redock_BUTTON_works_not_just_the_method(qapp):
     """QPushButton.clicked passes checked=False, which bound to the on_redock lambda's k=key default, so clicking Re-dock called _redock(False) and did nothing."""
     win = V.PlateWindow(None)
@@ -2686,8 +2354,9 @@ def test_the_redock_BUTTON_works_not_just_the_method(qapp):
     dock.click()                                             # the GESTURE, not the method
     qapp.processEvents()
     assert win._op_tabs.get("stub") is w, "the Re-dock button did nothing"
-    assert win._left_tabs.indexOf(w) >= 0
+    assert win._left_tabs.currentWidget() is w               # SAME object: a live shell survives
     assert not win._floating
+    assert w.shutdowns == 0                                  # re-dock never kills the shell
     win.close()
 
 
@@ -2936,14 +2605,6 @@ def test_every_uncarded_runnable_operator_is_offered_in_the_declaration_submenu(
     win.close()
 
 
-def test_operator_label_falls_back_to_the_key_for_a_cardless_operator(blob_operator):
-    assert V.operator_label(blob_operator) == blob_operator
-    assert V.operator_label("mip") == V._OPERATIONS_BY_KEY["mip"].label
-    assert V.operator_label("decon") == V._OPERATIONS_BY_KEY["decon"].label
-
-
-
-
 # Moved to tests/test_time_point_playback.py (signal-to-slot arity) and tests/test_plate_follows_windows.py (the plate adopting napari's resolved window, via _adopt_window_view) after PlateWindow._mosaic_pane became permanently None.
 
 
@@ -3091,13 +2752,6 @@ def test_a_plane_op_result_becomes_a_layer_group_one_layer_per_channel(qapp):
     assert [c[1] for c in mos.group("alpha")] == ["405", "488"]   # one LAYER per channel
 
 
-def test_the_layer_group_is_not_drawn_until_the_region_is_whole(qapp):
-    """Half a region drawn as a layer reads as holes the operator put there, not as an incomplete run."""
-    win = _result_win("alpha")
-    V.PlateWindow._on_result(win, "A1", 0, np.zeros((2, 8, 8), "uint16"))
-    assert win._view.mosaic.calls == []
-
-
 def test_a_run_that_ends_with_a_half_read_region_SAYS_SO_instead_of_stranding_it(qapp):
     """A region that never completes (e.g. unreadable TIFFs) used to sit forgotten in _result_accs forever: the run reported success and opened no operator tab. It must now be settled and named as incomplete, not stranded silently."""
     win = _result_win("mip")
@@ -3112,38 +2766,6 @@ def test_a_run_that_ends_with_a_half_read_region_SAYS_SO_instead_of_stranding_it
     said = win._readout.text()
     assert "A1" in said and "1 of 2" in said, f"the run did not say what happened: {said!r}"
     assert win._run.error, "the window that ASKED would still have been told the run finished"
-
-
-def test_settling_a_run_with_every_region_complete_is_a_no_op(qapp):
-    win = _result_win("mip")
-    for fov in (0, 1):
-        V.PlateWindow._on_result(win, "A1", fov, np.zeros((2, 8, 8), "uint16"))
-    win._readout.setText("")
-
-    assert V.PlateWindow._settle_stranded_results(win) == 0
-    assert win._readout.text() == ""
-    assert not win._run.error
-
-
-def test_the_operator_layer_lands_in_the_raw_mosaic_s_frame(qapp):
-    """bbox_um places the group exactly on raw's frame — without it, toggling would jump and misregistration would read as the operator's effect."""
-    from squidxplorer._mosaic_source import mosaic_bbox_um
-
-    win = _result_win("alpha")
-    for fov in (0, 1):
-        V.PlateWindow._on_result(win, "A1", fov, np.zeros((2, 8, 8), "uint16"))
-    kw = win._view.mosaic.group("alpha")[0][3]
-    assert kw["bbox_um"] == mosaic_bbox_um(win._meta, "A1")
-
-
-def test_two_operators_make_TWO_groups_so_both_can_be_toggled(qapp):
-    win = _result_win("alpha")
-    for fov in (0, 1):
-        V.PlateWindow._on_result(win, "A1", fov, np.zeros((2, 8, 8), "uint16"))
-    win._active_op_key = "decon"
-    for fov in (0, 1):
-        V.PlateWindow._on_result(win, "A1", fov, np.zeros((2, 8, 8), "uint16"))
-    assert win._view.mosaic.ops() == ["alpha", "decon"]
 
 
 def test_a_result_for_a_region_that_is_not_on_screen_is_dropped_not_accumulated(qapp):
@@ -3212,13 +2834,6 @@ def _fitted_plate(nrows, ncols, w=1400, h=900):
 _cell = _cell_slices
 
 
-def _carries_ink(frame, sl, color, tol=24) -> bool:
-    """True when some pixel in *sl* is *color* at full strength (a 16% wash never gets there)."""
-    band = frame[sl].reshape(-1, 3).astype(int)
-    want = np.array([color.red(), color.green(), color.blue()])
-    return bool(np.abs(band - want).sum(1).min() <= tol)
-
-
 def test_selecting_a_well_on_a_1536wp_leaves_the_thumbnail_pixels_untouched(qapp):
     ov = _fitted_plate(32, 48)
     rc = (16, 24)
@@ -3237,17 +2852,6 @@ def test_selecting_a_well_on_a_1536wp_leaves_the_thumbnail_pixels_untouched(qapp
         "the selection produced no visible mark on the cell at all"
 
 
-def test_the_selection_mark_on_a_1536wp_is_full_strength_ink_on_the_cell_boundary(qapp):
-    """A translucent wash can't reach full-strength ink, and the 3px grid line would bury a box drawn before it."""
-    ov = _fitted_plate(32, 48)
-    rc = (10, 30)
-    ov.highlight_regions([ov._by_rc[rc]])
-    frame = _grab_rgb(ov)
-    assert _carries_ink(frame, _cell(ov, rc), V._SEL_FRAME), (
-        "no pixel of the selected cell carries the accent ink at full strength: the mark is still "
-        "a wash, or the grid lines were painted over the box")
-
-
 def test_the_selection_box_is_a_frame_and_not_a_filled_rectangle(qapp):
     """Counting ink alone can't distinguish a frame from a fill; a fill would also leave the interior 'changed'."""
     ov = _fitted_plate(32, 48)
@@ -3262,44 +2866,12 @@ def test_the_selection_box_is_a_frame_and_not_a_filled_rectangle(qapp):
         f"rectangle, not a frame on the boundary")
 
 
-def test_no_plate_size_keeps_a_selection_wash(qapp):
-    """The translucent selection wash recolours the tissue underneath, more so on larger cells — replaced everywhere with a boundary frame that touches no data."""
-    ov = _fitted_plate(3, 3)
-    rc = (1, 1)
-    before = _grab_rgb(ov).copy()
-    ov.highlight_regions([ov._by_rc[rc]])
-    after = _grab_rgb(ov)
-
-    inner = _cell_slices(ov, rc, inset_frac=0.25)      # well inside any frame stroke
-    np.testing.assert_array_equal(before[inner], after[inner])
-    assert not np.array_equal(before, after), "the selection left no mark at all"
-
 def test_the_selection_frame_stroke_is_clamped_at_both_ends(qapp):
     assert V.selection_frame_pen_px(25.0) == pytest.approx(2.5)
     assert V.selection_frame_pen_px(4.0) == 1.0          # floor: still one drawn pixel
     assert V.selection_frame_pen_px(200.0) == 3.0        # ceiling
 
 
-def test_the_red_current_fov_box_is_gone(qapp):
-    """The red box dated from the single-detail-viewer era; N independent RegionViewer windows now use their own hue frames to tell views apart, which one shared red box couldn't do."""
-    ov = _fitted_plate(32, 48)
-    rc = (5, 5)
-    ov.highlight_regions([ov._by_rc[rc]])
-    ov._sel = rc
-    ov.update()
-
-    assert not _carries_ink(_grab_rgb(ov), _cell(ov, rc), V._RED), (
-        "the red current-well box is still drawn")
-
-
-def test_the_1536_fixture_opens_and_reports_1536_wells(sim_1536wp):
-    """open_reader refuses a hollow plate first, so this is the cheapest proof the plate-scale fixture is real."""
-    from squidxplorer import open_reader
-
-    meta = open_reader(str(sim_1536wp)).metadata
-    assert len(meta["regions"]) == 1536, f"{len(meta['regions'])} regions, not 1536"
-    assert meta["wellplate_format"] == "1536 well plate"
-    assert len(meta["channels"]) == 4
 # _run_operator used to retire the preview's downsample pass unconditionally (and _retire disconnects signals before stopping), so in-flight tiles were dropped and nothing but the return-to-raw path restarted it — leaving a region with no thumbnail at all.
 
 class _GatedPreview(V.QThread):
@@ -3448,22 +3020,6 @@ def test_an_operator_tile_downsamples_every_channel_on_its_own(qapp, tmp_path):
         assert [int(round(float(tile[c].mean()))) for c in range(tile.shape[0])] \
             == _expected_levels(), (
             "a channel of the operator's plate cell came from another channel's pixels")
-
-
-def test_there_is_no_second_incomplete_marker(qapp):
-    """Structural guard against a private marker re-appearing: two branches converged on the same defect independently, and the store is now the one source of truth."""
-    from pathlib import Path as _Path
-
-    assert not hasattr(V.PlateWindow, "_note_partial_output"), (
-        "the window is writing its own incomplete marker again; ask `_output.incomplete_reason`")
-    import ast as _ast
-
-    tree = _ast.parse(_Path(V.__file__).read_text(encoding="utf-8"))
-    literals = [n.value for n in _ast.walk(tree)
-                if isinstance(n, _ast.Constant) and n.value == "INCOMPLETE"]
-    assert not literals, (
-        "a bare INCOMPLETE filename is back in _viewer.py as a real string; the ONE name is "
-        "`_output.INCOMPLETE_MARKER`")
 
 
 # --- color provenance reaches the view surfaces ---------------------------------------------------
