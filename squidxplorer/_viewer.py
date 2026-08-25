@@ -2070,12 +2070,7 @@ class PlateWindow(QMainWindow):
         v.addWidget(est_btn)
         v.addWidget(prof_lbl)
 
-        note = QLabel("Profiles installed here are what a stitch run's illumination correction "
-                      "uses when it covers every channel of the run; otherwise stitch estimates "
-                      "its own from the tiles. The raw acquisition is never modified.")
-        note.setWordWrap(True)
-        note.setStyleSheet("color:#8b98ad;font-size:11px;")
-        v.addWidget(note)
+        # No explanatory paragraph (Julio, 2026-08-25): the loader's controls are the tab.
         v.addStretch(1)
         return w
 

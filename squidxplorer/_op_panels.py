@@ -104,10 +104,13 @@ class _Panel(QWidget):
         scroll.setWidget(body)
         outer.addWidget(scroll)
 
+        # A data holder for tests and the host route below; NEVER drawn (Julio, 2026-08-25:
+        # the slot holds controls only; a refusal is a log line at launch).
         self.status = _wrapped("", "color:#d29922;font-size:11px;")
+        self.status.hide()
 
     def say(self, text: str) -> None:
-        """Put a sentence in front of the user; also routed to the host's own readout."""
+        """Route a sentence to the host's log (the status label is never shown)."""
         self.status.setText(text)
         say = getattr(self.host, "say", None)
         if callable(say):

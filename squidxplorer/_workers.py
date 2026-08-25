@@ -357,6 +357,32 @@ class _FocusWorker(QThread):
 # shelved 2026-08-24 with the spot/cellpose operators. Git history reinstates.)
 
 
+class _AutoContrastWorker(QThread):
+    """OUR auto-contrast over the pixels ON SCREEN, off the Qt thread (the worker rule):
+    ``samples`` is ``{channel: lazy_or_array}``; ``done`` carries ``{channel: (lo, hi)}``."""
+
+    done = Signal(object)
+    problem = Signal(str)
+
+    def __init__(self, samples: dict, parent=None) -> None:
+        super().__init__(parent)
+        self._samples = dict(samples)
+
+    def run(self) -> None:                             # pragma: no cover - Qt thread
+        from squidxplorer._contrast import auto_contrast
+
+        out = {}
+        try:
+            for channel, sample in self._samples.items():
+                window = auto_contrast(np.asarray(sample))
+                if window is not None:
+                    out[str(channel)] = window
+        except Exception as exc:                       # noqa: BLE001 - named to the window
+            self.problem.emit(f"{type(exc).__name__}: {exc}")
+            return
+        self.done.emit(out)
+
+
 class _FlatfieldWorker(QThread):
     """Estimate an illumination profile from a spread sample of plate tiles, off the GUI thread."""
 

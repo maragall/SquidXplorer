@@ -1437,11 +1437,11 @@ class MosaicLayers:
 
 def _auto_window_for(data: Any, multiscale: bool) -> Optional[tuple[float, float]]:
     """The seed contrast window for *data*, or None to let napari autoscale."""
-    from squidxplorer._contrast import auto_contrast, sample_plane
+    from squidxplorer._contrast import SEED_MAX_PX, auto_contrast, sample_plane
 
     try:
         levels = data if multiscale else [data]
-        plane = sample_plane(levels)
+        plane = sample_plane(levels, max_px=SEED_MAX_PX)   # the finest rung the budget allows
         return None if plane is None else auto_contrast(plane)
     except Exception:                       # noqa: BLE001 - seeding is cosmetic, never fatal
         return None

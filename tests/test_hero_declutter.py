@@ -324,7 +324,8 @@ def test_native_chrome_is_minimized(qapp):
 
 def test_the_layer_controls_diet_keeps_at_most_the_three_touched_rows(qapp):
     """Julio, live 2026-08-25: "Layer controls, too much height." The resting blade shows
-    ONLY what a life-science user touches: contrast limits, auto-contrast, colormap. The
+    ONLY what a life-science user touches: contrast limits and colormap (napari's autoscale
+    row is chrome since ruling s: the app's ◐ auto chip is the window rule). The
     pin is a row-count budget over napari 0.6.6's real image-controls labels, never a
     pixel number."""
     from qtpy.QtWidgets import QComboBox, QFormLayout, QLabel, QWidget
@@ -346,8 +347,8 @@ def test_the_layer_controls_diet_keeps_at_most_the_three_touched_rows(qapp):
     controls.show()
     qapp.processEvents()
     visible = sorted(t for t, lab in rows.items() if lab.isVisibleTo(controls))
-    assert visible == ["auto-contrast:", "colormap:", "contrast limits:"], (
-        f"the resting blade must keep ONLY contrast limits, auto-contrast and colormap; "
+    assert visible == ["colormap:", "contrast limits:"], (
+        f"the resting blade must keep ONLY contrast limits and colormap; "
         f"it shows {visible}")
 
 
@@ -1258,5 +1259,124 @@ def test_a_mosaic_tab_preview_covers_the_whole_mosaic(qapp, napari_pane_stub, sq
         px = float(meta["pixel_size_um"])
         for got, w in zip(bbox, want):
             assert abs(got - w) <= px, f"mosaic-tab layer bbox {bbox} != mosaic {want}"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+# --- ruling s: "auto-contrast" is OUR window rule on the pixels on screen --------------------
+# Julio: "the napari autocontrast SUCKS for the G7 dataset". Measured on G7 488 / FOV 1 / z 7:
+# napari min/max (6416, 65520), clipped 0; auto_contrast on the coarsest rung (18451, 63849),
+# clipped 0.14%; auto_contrast full-res (18296, 65520), clipped 0; _pct_window full-res
+# (9120, 58384), clipped 0.2%; mode 15888, p99 30000, p99.9 = 65520 (the plane saturates).
+
+
+def _sparse_plane(seed=0):
+    rng = np.random.default_rng(seed)
+    plane = rng.normal(100.0, 5.0, (1024, 1024)).clip(0, 65535).astype(np.uint16)
+    spots = []
+    for _ in range(20):
+        y, x = rng.integers(20, 1000, 2)
+        plane[y:y + 5, x:x + 5] = rng.integers(2800, 3200)
+        spots.append(plane[y:y + 5, x:x + 5].copy())
+    plane[512, 512] = 65535                      # one hot pixel
+    return plane, np.concatenate([s.ravel() for s in spots])
+
+
+def test_our_auto_contrast_windows_a_sparse_field_on_its_objects_where_min_max_cannot():
+    from squidxplorer._contrast import auto_contrast
+
+    plane, spot_px = _sparse_plane()
+    p99 = float(np.percentile(spot_px, 99))
+    lo, hi = auto_contrast(plane)
+    clipped = float((plane > hi).mean())
+    assert hi >= 0.98 * p99, f"the ceiling {hi} sits below the objects' p99 {p99} (2% subsample tolerance)"
+    assert hi <= 1.2 * p99, f"the ceiling {hi} follows the lone hot pixel, not the objects"
+    assert clipped < 0.005, f"{clipped:.2%} of pixels clipped"
+    assert lo > 100.0, "the floor must clear the background"
+    napari_hi = float(plane.max())                # napari's once/continuous: the slice's max
+    assert napari_hi > 1.2 * p99, "the pin would not distinguish our rule from min/max"
+
+
+def test_the_seed_reads_the_finest_rung_its_budget_allows():
+    from squidxplorer._contrast import SEED_MAX_PX, sample_plane
+
+    fine = np.zeros((4000, 4000), np.uint16)     # 16 Mpx: over budget
+    mid = np.zeros((2000, 2000), np.uint16)      # 4 Mpx: fits
+    coarse = np.zeros((500, 500), np.uint16)
+    assert sample_plane([fine, mid, coarse]).shape == coarse.shape, "no budget: the coarsest"
+    assert sample_plane([fine, mid, coarse], max_px=SEED_MAX_PX).shape == mid.shape
+    assert sample_plane([fine, mid, coarse], max_px=10).shape == coarse.shape
+
+
+def test_napari_s_autoscale_row_is_chrome_and_the_auto_chip_lands_through_set_contrast(
+        qapp, napari_pane_stub, squid_dataset):
+    from squidxplorer._contrast import auto_contrast
+    from squidxplorer._napari_pane import NATIVE_HIDDEN_ROWS
+
+    assert "auto-contrast:" in NATIVE_HIDDEN_ROWS
+    root, _ = squid_dataset
+    win, (v,) = _open_view(qapp, root)
+    try:
+        assert v._btn_auto.text() == "◐ auto"
+        mosaic = v._pane.mosaic
+        _drain_until(qapp, lambda: bool(mosaic.channels(mosaic.visible_op() or "raw")), timeout=10)
+        channel = mosaic.channels(mosaic.visible_op())[0]
+        before = tuple(mosaic.find(mosaic.visible_op(), channel).contrast_limits)
+        samples = v._on_screen_samples()
+        assert channel in samples
+        want = auto_contrast(np.asarray(samples[channel]))
+        seen = []
+        mosaic.on_user_contrast(lambda ch, lo, hi: seen.append(ch)) \
+            if hasattr(mosaic, "on_user_contrast") else None
+        v._btn_auto.click()
+        layer = mosaic.find(mosaic.visible_op(), channel)
+        _drain_until(qapp, lambda: tuple(layer.contrast_limits) == tuple(want), timeout=20)
+        assert tuple(layer.contrast_limits) == pytest.approx(tuple(want)), (
+            f"the chip did not land our window {want}; layer holds {tuple(layer.contrast_limits)} "
+            f"(was {before})")
+        assert not seen, "an app write must not read as a user gesture"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+# --- ruling t: the param slot holds CONTROLS only, never a sentence -------------------------
+# Julio: "The operators still have like a 'controls' page that it just has like BS AI text".
+
+
+def _is_sentence(text: str) -> bool:
+    t = text.strip()
+    return bool(t) and (t.endswith(".") or len(t.split()) > 6)
+
+
+def test_the_param_slot_holds_controls_only_and_mip_s_chip_is_disabled(qapp, napari_pane_stub,
+                                                                       squid_dataset):
+    from qtpy.QtWidgets import QLabel, QTextEdit
+
+    from squidxplorer import operator_params
+
+    root, _ = squid_dataset
+    win, (v,) = _open_view(qapp, root)
+    try:
+        combo = v._op_combo
+        keys = [combo.itemData(i) for i in range(combo.count()) if combo.itemData(i)]
+        assert "mip" in keys and "fstack" in keys
+        for key in keys:
+            v.show_operator_controls_for(key)
+            _settle(qapp, 5)
+            if not operator_params(key):
+                assert not v._btn_controls.isEnabled(), f"{key}: chip enabled with no parameters"
+                assert v._btn_controls.toolTip() == "no parameters"
+                assert v._inserted_panel is None, f"{key}: something inserted for no parameters"
+                continue
+            assert v._btn_controls.isEnabled()
+            panel = v._inserted_panel
+            assert panel is not None, f"{key}: no panel inserted"
+            prose = [w.text() if isinstance(w, QLabel) else w.toPlainText()
+                     for w in panel.findChildren((QLabel, QTextEdit))
+                     if not w.isHidden() and _is_sentence(
+                         w.text() if isinstance(w, QLabel) else w.toPlainText())]
+            assert not prose, f"{key}: prose in the param slot: {prose}"
+            v._show_operator_controls()          # remove before the next
+            _settle(qapp, 5)
     finally:
         shutdown_plate_window(qapp, win)

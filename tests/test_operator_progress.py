@@ -224,8 +224,9 @@ def test_the_plate_stops_talking_to_a_requester_once_its_run_has_drained(qapp, p
 
 
 def test_only_the_window_that_ASKED_gets_the_result_visible(qapp, plate):
-    """``_deliver_to_views`` passes ``visible=(win is requester)``; a result the window did not
-    ask for arrives dark, and the one that asked gets it visible."""
+    """Ruling r (Julio, 2026-08-25, "decon layer is != raw view"): a preview's result lands
+    ONLY in the view that asked, visible; a view that did not ask receives nothing (the dark
+    fan-out survives only for a run no view asked for)."""
     seen = {}
 
     class _Win:
@@ -252,8 +253,8 @@ def test_only_the_window_that_ASKED_gets_the_result_visible(qapp, plate):
         plate._viewer_manager = saved
         plate._run = None
 
-    assert added == 2, added
-    assert seen == {"asked": True, "other": False}, seen
+    assert added == 1, added
+    assert seen == {"asked": True}, seen           # the view that did not ask gets nothing
 
 
 @pytest.fixture

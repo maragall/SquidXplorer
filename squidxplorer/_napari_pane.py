@@ -146,6 +146,9 @@ def _say_max_3d_texture(value: int, *, measured: bool) -> int:
 #: the model still mirrors them; only their napari rows are gone.
 NATIVE_HIDDEN_ROWS = ("blending:", "projection mode:", "interpolation:",
                       "gamma:", "opacity:", "depiction:",
+                      # napari's once/continuous autoscale is the min/max of the current
+                      # slice; the app's "auto" chip is the window rule (Julio, 2026-08-25).
+                      "auto-contrast:",
                       # A Shapes layer's styling: the ROI rectangle's look is the app's, not
                       # the user's (Julio, 2026-08-25, "realstate not being allocated").
                       "edge width:", "edge color:", "face color:", "display text:")

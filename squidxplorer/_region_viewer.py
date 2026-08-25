@@ -722,7 +722,12 @@ class RegionViewer(QMainWindow):
         # the go to roi arrow so that I don't have to open the controls to go to the ROI"):
         # draw, then, once a box exists and has not been used, open it. See _refresh_roi_chip.
         self._btn_roi = self._chip(self._ROI_DRAW[0], self._ROI_DRAW[1], self._roi_chip_clicked)
-        fold = _FoldSection("controls", header=(self._btn_3d, self._btn_roi))
+        # OUR auto-contrast (Julio, 2026-08-25: "the napari autocontrast SUCKS for the G7
+        # dataset"): the window rule over the pixels on screen, off the Qt thread; napari's
+        # once/continuous row (a slice's min/max) is hidden chrome.
+        self._btn_auto = self._chip("◐ auto", "Window the visible channels on the pixels on screen.",
+                                    self._auto_contrast_on_screen)
+        fold = _FoldSection("controls", header=(self._btn_3d, self._btn_roi, self._btn_auto))
         grid = QGridLayout(); grid.setSpacing(4)
         chips = [
             self._btn_focus, self._btn_record, self._btn_png,
@@ -997,6 +1002,17 @@ class RegionViewer(QMainWindow):
                         self.window_id, key, type(exc).__name__, exc)
             return {}
 
+    @staticmethod
+    def _declared_params(key: str) -> tuple:
+        """The Params *key* declares (headline + advanced), or () when it declares none."""
+        from squidxplorer import operator_params
+        from squidxplorer._operations import operator_name
+
+        try:
+            return tuple(operator_params(operator_name(str(key))))
+        except Exception:                        # noqa: BLE001 - an unknown key has none
+            return ()
+
     def _params_summary(self, key: str) -> str:
         """One line of what *key* is set to, for the chip's side text and the run echo."""
         plate = self._plate()
@@ -1053,6 +1069,12 @@ class RegionViewer(QMainWindow):
         key = combo.currentData() if combo is not None else None
         self._refresh_save_tooltip(key)
         self._refresh_quick_iterations(key)
+        chip = getattr(self, "_btn_controls", None)
+        if chip is not None and _alive(chip):
+            has_params = bool(key) and bool(self._declared_params(str(key)))
+            chip.setEnabled(has_params)
+            chip.setToolTip("Insert the selected operator's parameters below."
+                            if has_params else "no parameters")
         if not key:
             note.setText("")
             note.setVisible(False)
@@ -1192,6 +1214,8 @@ class RegionViewer(QMainWindow):
         if self._inserted_key == op_key and self._inserted_panel is not None:
             self._remove_param_slot()                    # a toggle: the second click removes
             return
+        if not self._declared_params(op_key):
+            return                                       # nothing to insert: the chip is disabled
         plate = self._plate()
         release = getattr(plate, "release_operator_panel", None)
         if not callable(release):
@@ -2038,6 +2062,77 @@ class RegionViewer(QMainWindow):
         slider = self._fov_slider
         if slider is not None:
             slider.frame_done()
+
+    _auto_worker = None
+
+    def _on_screen_samples(self) -> dict:
+        """``{channel: lazy slice}`` of the displayed rung under the viewport, for the visible
+        op's channels; a channel with no viewport window yet samples its whole rung."""
+        from squidxplorer._napari_view import pyramid_levels
+
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
+        if mosaic is None:
+            return {}
+        op = mosaic.visible_op()
+        if not op:
+            return {}
+        samples = {}
+        for channel in mosaic.channels(op):
+            layer = mosaic.find(op, channel)
+            if layer is None or not getattr(layer, "visible", True):
+                continue
+            levels = pyramid_levels(layer.data)
+            level_i = int(getattr(layer, "data_level", 0) or 0)
+            rung = levels[min(level_i, len(levels) - 1)] if levels else layer.data
+            try:
+                corners = np.asarray(layer.corner_pixels, dtype=int)
+                (y0, x0), (y1, x1) = corners[0, -2:], corners[1, -2:]
+                z = int(corners[0, 0]) if corners.shape[1] >= 3 else None
+            except Exception:                    # noqa: BLE001 - no viewport yet: whole rung
+                y0 = x0 = y1 = x1 = 0
+                z = None
+            plane = rung[z] if (z is not None and getattr(rung, "ndim", 2) >= 3) else rung
+            if getattr(plane, "ndim", 2) >= 3:
+                plane = plane[int(getattr(plane, "shape", [1])[0]) // 2]
+            if y1 > y0 and x1 > x0:
+                plane = plane[y0:y1, x0:x1]
+            samples[str(channel)] = plane
+        return samples
+
+    def _auto_contrast_on_screen(self) -> None:
+        """The ◐ auto chip: compute the window rule on the pixels on screen, off-thread,
+        and land it through MosaicLayers.set_contrast so every surface agrees."""
+        from squidxplorer._qthread_life import detach
+        from squidxplorer._workers import _AutoContrastWorker
+
+        samples = self._on_screen_samples()
+        if not samples:
+            self._say("auto: no visible channel to window.")
+            return
+        old = self._auto_worker
+        if old is not None and old.isRunning():
+            detach(old)
+        worker = _AutoContrastWorker(samples, parent=self)
+        worker.done.connect(self._apply_auto_contrast)
+        worker.problem.connect(lambda why: self._say(f"auto: {why}"))
+        self._auto_worker = worker
+        worker.start()
+
+    def _apply_auto_contrast(self, windows) -> None:
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
+        if mosaic is None or not windows:
+            return
+        landed = 0
+        with mosaic.programmatic():
+            for channel, (lo, hi) in dict(windows).items():
+                try:
+                    mosaic.set_contrast(channel, lo, hi)
+                    landed += 1
+                except KeyError:
+                    continue
+        self._say(f"auto: {landed} channel(s) windowed on the pixels on screen.")
 
     #: The ROI chip's two faces: draw a box, or go to the box just drawn.
     _ROI_DRAW = ("▭ ROI", "Draw an ROI rectangle inside the mosaic.")

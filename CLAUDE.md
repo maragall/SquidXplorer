@@ -1237,6 +1237,22 @@ operators hidden by default and summoned, never a separate window.
   `_deliver_to_views` delivers to `OperatorRun.requester` alone when a view asked (the dark
   fan-out survives only for a run no view asked for), and a scoped result is never filed in
   the cross-window cache. The solve stays whole-FOV; the save path never crops.
+- **Auto-contrast is OUR window rule on the pixels on screen** (Julio: "the napari
+  autocontrast SUCKS for the G7 dataset"; measured on G7 488/FOV 1/z 7: napari min/max
+  (6416, 65520) against a 15888 mode renders the field washed; `auto_contrast` full-res
+  (18296, 65520), 0 clipped). napari's once/continuous row (a slice's min/max) is hidden
+  chrome; the "◐ auto" chip samples the displayed rung under the viewport per visible
+  channel (`RegionViewer._on_screen_samples`), computes `_contrast.auto_contrast` on
+  `_workers._AutoContrastWorker` (off the Qt thread) and lands through
+  `MosaicLayers.set_contrast` inside `programmatic()`. The ceiling is foreground-aware
+  (max of the pmax percentile and the 99th percentile of pixels above the floor: a lone hot
+  pixel cannot carry it, an object population can); the raw-mosaic SEED reads the finest
+  rung within `SEED_MAX_PX` (4.2 Mpx), not the coarsest.
+- **The param slot holds controls only** (Julio: "just has like BS AI text"): no sentence in
+  a panel (the "runs as it ships" line, the illumination paragraph and the panel shell's
+  status label are gone or never drawn; `_Panel.say` is the host's log line); a
+  parameter-less operator's ⚙ chip is DISABLED ("no parameters") and inserts nothing;
+  all-advanced operators insert only the collapsed "advanced parameters" disclosure.
 - **Verbosity strip, measured** (labels + tooltips in a view's left column, folds summoned,
   via a scratch probe at f063f55 vs bf982a2): resting column 33 elements both before and
   after but 431 -> 207 words; with every operator's inline panel inserted once, 108 -> 64

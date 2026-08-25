@@ -113,9 +113,8 @@ class GenericOperatorPanel(_Panel):
 
         self.widgets: dict = {}
         self._defaults = {p.name: p.default for p in params}
-        if not params:
-            self.v.addWidget(_wrapped(
-                f"{self.key!r} declares no parameters; it runs as it ships.", _SUB))
+        # No sentence for a parameter-less operator (Julio, 2026-08-25: the slot "just has
+        # like BS AI text"): its ⚙ chip is disabled and nothing inserts.
         # THE ADVANCED SPLIT is DECLARATION-DRIVEN (Param.advanced), never a name match
         # (Julio, 2026-08-25: "all the other knobs ... should be hidden in a 'advanced'
         # slot"). Headline knobs stay visible; the rest collapse behind one toggle.
