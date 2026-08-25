@@ -84,7 +84,72 @@ class ViewDeck(QMainWindow):
         self._tabs.currentChanged.connect(self._on_current_changed)
         self.setCentralWidget(self._tabs)
         self.setStatusBar(QStatusBar())
+        #: The plate window this deck fronts for while it is the ONE window, or None.
+        self._plate = None
         self._refresh_status()
+
+    # -- the app surface while the plate window hides (one window, 2026-08-25) -------------
+    def bind_plate(self, plate) -> None:
+        """Make this deck an app surface for *plate*: drop-to-open and the essential menu
+        actions forward to the plate's own methods (the books stay there)."""
+        if plate is None or self._plate is plate:
+            return
+        self._plate = plate
+        self.setAcceptDrops(True)
+        bar = self.menuBar()
+        file_menu = bar.addMenu("&File")
+        act_open = file_menu.addAction("&Open Acquisition…")
+        act_open.triggered.connect(lambda *_: self._plate_call("_open_acquisition_dialog"))
+        view_menu = bar.addMenu("&View")
+        act_log = view_menu.addAction("&Log")
+        act_log.triggered.connect(lambda *_: self._plate_call("show_log"))
+        act_all = view_menu.addAction("Select &All Wells")
+        act_all.triggered.connect(lambda *_: self._plate_call("_select_all_wells"))
+        act_close = view_menu.addAction("Close All Vie&ws")
+        act_close.triggered.connect(lambda *_: self._plate_call("_close_all_views"))
+        act_plate = view_menu.addAction("&Plate Window")
+        act_plate.setToolTip("Bring the (hidden) plate window back on screen.")
+        act_plate.triggered.connect(lambda *_: self._show_plate())
+
+    def _plate_call(self, name: str) -> None:
+        plate = self._plate
+        fn = getattr(plate, name, None) if plate is not None else None
+        if callable(fn):
+            try:
+                fn()
+            except RuntimeError:
+                self._plate = None               # the plate's C++ half is gone
+
+    def _show_plate(self) -> None:
+        plate = self._plate
+        if plate is None:
+            return
+        try:
+            plate._hidden_for_one_window = False
+            plate.show()
+            plate.raise_()
+        except RuntimeError:
+            self._plate = None
+
+    def dragEnterEvent(self, event):             # noqa: N802 - Qt naming
+        if self._plate is not None and event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self, event):                  # noqa: N802 - Qt naming
+        plate = self._plate
+        urls = event.mimeData().urls() if event.mimeData() is not None else []
+        if plate is not None and urls:
+            path = urls[0].toLocalFile()
+            if path:
+                event.acceptProposedAction()
+                try:
+                    plate.ingest(path)
+                except RuntimeError:
+                    self._plate = None
+                return
+        super().dropEvent(event)
 
     # -- what it is holding ---------------------------------------------------------------
     def count(self) -> int:

@@ -201,6 +201,57 @@ class _LogReadout:
 _RIGHT_COL_SIZES = [215, 165]
 
 
+class _PlateSlotBox(QWidget):
+    """THE PLATE SLOT: a fixed-height box the plate view renders in when it is hosted
+    inside the view window's left column (one window, Julio 2026-08-25), collapsible to a
+    grip. Fixed on purpose: inserting a slot shrinks the FLEXIBLE neighbours (layer
+    controls, toggles, log), never this one.
+    """
+
+    #: The slot's fixed height while open, and the grip's height while collapsed.
+    PLATE_SLOT_PX = 240
+    GRIP_PX = 18
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.collapsed = False
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        self.grip = QPushButton("▾ plate")
+        self.grip.setCursor(Qt.PointingHandCursor)
+        self.grip.setToolTip("Collapse or expand the plate view.")
+        self.grip.setStyleSheet(
+            "QPushButton{background:#161b22;color:#8b98ad;border:1px solid #232b3a;"
+            "border-radius:3px;font-size:10px;padding:1px 6px;text-align:left;}"
+            "QPushButton:hover{color:#c9d1d9;}")
+        self.grip.setFixedHeight(self.GRIP_PX - 4)
+        self.grip.clicked.connect(self.toggle)
+        v.addWidget(self.grip, 0)
+        self._body = QWidget()
+        self._bv = QVBoxLayout(self._body)
+        self._bv.setContentsMargins(0, 0, 0, 0)
+        self._bv.setSpacing(0)
+        v.addWidget(self._body, 1)
+        self._apply_height()
+
+    def set_view(self, widget: QWidget) -> None:
+        """Mount the plate view (rebuilt per ingest) as the slot's body content."""
+        self._bv.addWidget(widget, 1)
+        widget.setVisible(not self.collapsed)
+
+    def toggle(self, *_) -> None:
+        self.collapsed = not self.collapsed
+        self._body.setVisible(not self.collapsed)
+        self.grip.setText("▸ plate" if self.collapsed else "▾ plate")
+        self._apply_height()
+
+    def _apply_height(self) -> None:
+        h = self.GRIP_PX if self.collapsed else self.PLATE_SLOT_PX
+        self.setMinimumHeight(h)
+        self.setMaximumHeight(h)
+
+
 # --- the main window: the plate on top, the Open View list and the console below --------------
 
 
@@ -1730,6 +1781,89 @@ class PlateWindow(QMainWindow):
             self._left_tabs.addTab(panel, operator_label(str(key)))
             panel.setVisible(True)
         self._sync_left_tabs_visible()
+
+    # -- ONE WINDOW: the plate VIEW and the LOG render as slots in the view window ---------------
+    # Julio (2026-08-25): "this refactor enables us to have only one window." The books stay
+    # here; only WHERE the two widgets render moves. The manager drives hosting; these are the
+    # two halves of the seam, and `adopt_plate_slots_home` is the never-an-orphan guarantee.
+
+    #: The fixed-height collapsible box the plate view rides in while hosted, or None.
+    _plate_slot_box = None
+    #: Whether the plate view + log are currently hosted by a view.
+    _plate_hosted = False
+    #: Whether the working layout hid this window because a view hosts its slots.
+    _hidden_for_one_window = False
+
+    def plate_slot_widgets(self):
+        """``(plate_slot_box, log_panel)`` for a view to host, or ``None`` before an ingest."""
+        if self._overview is None or not _widget_alive(self._overview):
+            return None
+        box = self._plate_slot_box
+        if box is None or not _widget_alive(box):
+            box = self._plate_slot_box = _PlateSlotBox()
+        self._plate_hosted = True
+        self._mount_overview()
+        # The log opens at 3/4 of the plate slot's height (the chart's rule); flexible below.
+        self._log_panel.setMaximumHeight(int(box.PLATE_SLOT_PX * 3 / 4))
+        return box, self._log_panel
+
+    def _mount_overview(self) -> None:
+        """The ONE place the (per-ingest rebuilt) overview lands: the hosted slot, else home."""
+        if self._overview is None or not _widget_alive(self._overview):
+            return
+        if self._plate_hosted and self._plate_slot_box is not None \
+                and _widget_alive(self._plate_slot_box):
+            self._plate_slot_box.set_view(self._overview)
+        else:
+            self._left_l.addWidget(self._overview, 1)
+            self._overview.show()
+
+    def adopt_plate_slots_home(self) -> None:
+        """Take the plate view and the log BACK into this window (idempotent).
+
+        Called when the hosting view goes away — the widgets must never be orphans, and with
+        no view left the plate window is the app's only surface, so it shows again.
+        """
+        self._plate_hosted = False
+        box = self._plate_slot_box
+        if box is not None and _widget_alive(box):
+            box.hide()
+            box.setParent(self)                  # parked, never parentless
+        if self._overview is not None and _widget_alive(self._overview):
+            self._mount_overview()
+        log_panel = getattr(self, "_log_panel", None)
+        if log_panel is not None and _widget_alive(log_panel):
+            log_panel.setMaximumHeight(16777215)
+            col = getattr(self, "_right_col", None)
+            if col is not None and log_panel.parentWidget() is not col:
+                col.addWidget(log_panel)
+                col.setSizes(list(_RIGHT_COL_SIZES))
+            log_panel.setVisible(True)
+        if self._hidden_for_one_window:
+            self._hidden_for_one_window = False
+            self.show()
+
+    def maybe_hide_for_one_window(self, deck=None) -> None:
+        """In the WORKING LAYOUT, a hosted plate means ONE window: hide this one and give the
+        deck the whole work area. A library caller's plate (no default layout) stays visible."""
+        if not (self.default_layout and self._plate_hosted) or self._hidden_for_one_window:
+            return
+        screen = window_screen(self)
+        self._hidden_for_one_window = True
+        self.hide()
+        if deck is None or screen is None:
+            return
+        try:
+            avail = screen.availableGeometry()
+            frame, client = deck.frameGeometry(), deck.geometry()
+            deck.setGeometry(
+                avail.left() + (client.left() - frame.left()),
+                avail.top() + (client.top() - frame.top()),
+                avail.width() - (frame.width() - client.width()),
+                avail.height() - (frame.height() - client.height()),
+            )
+        except Exception:                        # noqa: BLE001 - geometry is never worth a crash
+            pass
 
     def _op_tab_shell(self, title: str, blurb: str) -> tuple:
         """A standard operator-UI tab body: title + blurb, returns (widget, vbox) to fill."""

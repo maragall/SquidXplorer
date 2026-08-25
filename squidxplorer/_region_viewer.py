@@ -494,6 +494,11 @@ class RegionViewer(QMainWindow):
         lv.setSpacing(4)
         lv.addWidget(self._build_view_controls(), 0)
         lv.addWidget(self.operator_panel(), 0)
+        # ONE WINDOW (Julio, 2026-08-25): the plate view and the log are SLOTS this column can
+        # host; `adopt_plate_slots` fills this layout when the manager elects this view.
+        self._plate_log_slot = QVBoxLayout()
+        self._plate_log_slot.setContentsMargins(0, 0, 0, 0)
+        lv.addLayout(self._plate_log_slot)
         dock_controls = getattr(pane, "dock_view_controls", None)
         if not (callable(dock_controls) and dock_controls(left_col)):
             lay.addWidget(left_col, 0)
@@ -811,6 +816,37 @@ class RegionViewer(QMainWindow):
     def _plate(self):
         """The plate window, or None. The plate owns every operator panel; this window borrows."""
         return None if self._manager is None else self._manager.parent()
+
+    # -- ONE WINDOW: this view can host the plate view + log as slots (2026-08-25) --------------
+
+    #: Whether this view currently hosts the plate view + log slots.
+    _hosts_plate_slots = False
+
+    def adopt_plate_slots(self, plate_box, log_panel) -> bool:
+        """Host the plate's two slot widgets in this view's left column. Qt reparents them
+        out of any previous holder; returns whether the column exists to host in."""
+        slot = getattr(self, "_plate_log_slot", None)
+        if slot is None:
+            return False
+        slot.addWidget(plate_box)
+        slot.addWidget(log_panel)
+        plate_box.setVisible(True)
+        log_panel.setVisible(True)
+        self._hosts_plate_slots = True
+        return True
+
+    def release_plate_slots(self) -> None:
+        """Stop hosting: the plate ADOPTS its widgets home (they are never orphans)."""
+        if not self._hosts_plate_slots:
+            return
+        self._hosts_plate_slots = False
+        adopt = getattr(self._plate(), "adopt_plate_slots_home", None)
+        if callable(adopt):
+            try:
+                adopt()
+            except Exception as exc:             # noqa: BLE001 - a re-home must never block
+                log.warning("view %s could not return the plate slots: %s: %s",
+                            self.window_id, type(exc).__name__, exc)
 
     def _run_scope(self):
         """WHERE a run from this window goes: its regions, narrowed to the ROI's own FOVs."""
@@ -2421,10 +2457,14 @@ class RegionViewer(QMainWindow):
                     timer.timeout.disconnect()
                 except (TypeError, RuntimeError):
                     pass
-        # RELEASE, never dispose: the inserted parameter panel is the PLATE's live widget
-        # (the run's single source of truth); dying with this view would lose it for good.
+        # RELEASE, never dispose: the inserted parameter panel and the hosted plate/log slots
+        # are the PLATE's live widgets; dying with this view would lose them for good.
         try:
             self._remove_param_slot()
+        except Exception:                            # noqa: BLE001 - teardown must continue
+            pass
+        try:
+            self.release_plate_slots()
         except Exception:                            # noqa: BLE001 - teardown must continue
             pass
         panel = self._op_panel
@@ -2767,7 +2807,40 @@ class ViewerManager(QObject):
         self.windowOpened.emit(win)
         self.windowsChanged.emit()
         self.viewFocused.emit(list(win._regions))
+        self._sync_plate_slots()
         return win
+
+    def _sync_plate_slots(self, *_args) -> None:
+        """Host the plate view + log in the DECK's current view (one window, 2026-08-25).
+
+        The plate keeps its books; only where the two widgets render moves. With no view to
+        host (deck empty, or free-standing windows), the plate ADOPTS them home and shows
+        itself again - the app always has a surface.
+        """
+        plate = self.parent()
+        take = getattr(plate, "plate_slot_widgets", None)
+        if not callable(take):
+            return
+        deck = self.deck(create=False) if self.tabbed_views else None
+        view = deck.current_page() if deck is not None else None
+        if view is None or not hasattr(view, "adopt_plate_slots"):
+            adopt = getattr(plate, "adopt_plate_slots_home", None)
+            if callable(adopt):
+                adopt()
+            return
+        if getattr(view, "_hosts_plate_slots", False):
+            return                               # already the host; nothing to move
+        widgets = take()
+        if widgets is None:
+            return                               # nothing to host before an ingest
+        for w in self._windows.values():
+            w._hosts_plate_slots = False
+        if not view.adopt_plate_slots(*widgets):
+            plate.adopt_plate_slots_home()
+            return
+        hide = getattr(plate, "maybe_hide_for_one_window", None)
+        if callable(hide):
+            hide(deck)
 
     def _replay_cached_results(self, win: RegionViewer) -> int:
         """Give a NEWLY OPENED window every operator result already computed for its region."""
@@ -2834,6 +2907,13 @@ class ViewerManager(QObject):
 
         deck = ViewDeck(index=len(self._decks) + 1)
         deck.pageActivated.connect(self.note_focus)
+        # ONE WINDOW: the current tab hosts the plate view + log; a tab switch re-homes them.
+        deck.pageActivated.connect(self._sync_plate_slots)
+        # ...and the deck is the app surface while the plate window hides: drop-to-open and
+        # the essential menu actions forward to the plate.
+        bind = getattr(deck, "bind_plate", None)
+        if callable(bind):
+            bind(self.parent())
         # NO right-edge operator dock (retired 2026-08-25): a view's Run on plate is the bulk
         # path, and each view's operator panel lives in that view's own LEFT column.
         # A BOUND METHOD, NEVER A SELF-CAPTURING LAMBDA. PyQt keeps a lambda alive in a slot proxy
@@ -2943,6 +3023,12 @@ class ViewerManager(QObject):
         if self._focused_id == wid:
             self._focused_id = None
         self.windowsChanged.emit()
+        # ONE WINDOW: the closed view may have hosted the plate view + log. Re-home them into
+        # the deck's current page, or back into the plate window when no view is left.
+        try:
+            self._sync_plate_slots()
+        except Exception as exc:                 # noqa: BLE001 - a re-home must not block a close
+            log.warning("could not re-home the plate slots: %s: %s", type(exc).__name__, exc)
 
     def _poll_memory(self) -> None:
         frac = _process_memory_fraction()
@@ -2993,35 +3079,55 @@ class StatusRow(QObject):
 
     def _on_run_progress(self, report) -> None:
         """Draw (or take down) the work bar. ``report`` is a ``ProgressReport``, or None for idle."""
-        if report is None:
-            self._work_label.hide()
-            self._work_bar.hide()
-            return
         try:
-            sentence, percent = report.sentence(), report.percent
-        except Exception:                            # noqa: BLE001 - a bad report is not a crash
-            self._work_label.hide()
-            self._work_bar.hide()
-            return
-        self._work_label.setText(sentence)
-        if percent is None:
-            self._work_bar.setRange(0, 0)
-        else:
-            self._work_bar.setRange(0, 100)
-            self._work_bar.setValue(int(percent))
-        self._work_label.show()
-        self._work_bar.show()
+            if report is None:
+                self._work_label.hide()
+                self._work_bar.hide()
+                return
+            try:
+                sentence, percent = report.sentence(), report.percent
+            except Exception:                        # noqa: BLE001 - a bad report is not a crash
+                self._work_label.hide()
+                self._work_bar.hide()
+                return
+            self._work_label.setText(sentence)
+            if percent is None:
+                self._work_bar.setRange(0, 0)
+            else:
+                self._work_bar.setRange(0, 100)
+                self._work_bar.setValue(int(percent))
+            self._work_label.show()
+            self._work_bar.show()
+        except RuntimeError:
+            # Adopted by the log panel, which can die inside a hosting view (one window,
+            # 2026-08-25): a dead bar unhooks this slot for good.
+            sender = self.sender()
+            try:
+                if sender is not None:
+                    sender.runProgressChanged.disconnect(self._on_run_progress)
+            except (AttributeError, TypeError, RuntimeError):
+                pass
 
     def _on_memory(self, frac: float) -> None:
         pct = max(0, min(100, int(round(frac * 100))))
-        self._mem_bar.setValue(pct)
-        warn = pct >= 85
-        self._mem_label.setText("Memory - HIGH, close a view" if warn else "Memory")
-        color = "#f85149" if warn else "#3fb950"
-        self._mem_bar.setStyleSheet(
-            "QProgressBar{background:#161b22;border:1px solid #30363d;border-radius:3px;}"
-            f"QProgressBar::chunk{{background:{color};border-radius:3px;}}"
-        )
+        try:
+            self._mem_bar.setValue(pct)
+            warn = pct >= 85
+            self._mem_label.setText("Memory - HIGH, close a view" if warn else "Memory")
+            color = "#f85149" if warn else "#3fb950"
+            self._mem_bar.setStyleSheet(
+                "QProgressBar{background:#161b22;border:1px solid #30363d;border-radius:3px;}"
+                f"QProgressBar::chunk{{background:{color};border-radius:3px;}}"
+            )
+        except RuntimeError:
+            # The bars are ADOPTED by the log panel, which can now live (and die) inside a
+            # hosting view (one window, 2026-08-25): a dead bar unhooks this slot for good.
+            sender = self.sender()
+            try:
+                if sender is not None:
+                    sender.memoryChanged.disconnect(self._on_memory)
+            except (AttributeError, TypeError, RuntimeError):
+                pass
 
 
 def _process_memory_fraction() -> Optional[float]:
