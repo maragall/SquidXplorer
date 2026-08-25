@@ -136,6 +136,87 @@ def _say_max_3d_texture(value: int, *, measured: bool) -> int:
     return int(value)
 
 
+#: Layer-controls rows the app does not need on screen (hero declutter, team feedback
+#: 2026-08-25: "minimize most of the Napari-Native tools"). Matched against the form's own
+#: label text, lowercased. Each is a rendering choice the app sets itself (blending), a z
+#: policy the app's own slider and operators own (projection mode), or a knob no user of
+#: this app has ever needed (interpolation). Contrast, gamma, colormap and opacity stay:
+#: they are the IDENTITY_PROPS napari's controls legitimately expose.
+NATIVE_HIDDEN_ROWS = ("blending:", "projection mode:", "interpolation:")
+
+
+def hide_native_rows(controls_widget) -> "list[str]":
+    """Hide the :data:`NATIVE_HIDDEN_ROWS` of one layer-controls form; returns what it hid.
+
+    Idempotent, and matched by the LABEL TEXT of the form's own rows, never by napari
+    widget attribute names, so a napari rename degrades to rows staying visible rather
+    than an AttributeError."""
+    from qtpy.QtWidgets import QFormLayout
+
+    lay = controls_widget.layout() if controls_widget is not None else None
+    if not isinstance(lay, QFormLayout):
+        return []
+    hidden = []
+    for i in range(lay.rowCount()):
+        item = lay.itemAt(i, QFormLayout.LabelRole)
+        label = item.widget() if item is not None else None
+        text = str(label.text()).strip().lower() if hasattr(label, "text") else ""
+        if text not in NATIVE_HIDDEN_ROWS:
+            continue
+        try:
+            lay.setRowVisible(i, False)          # Qt >= 6.4: hides the whole row
+        except AttributeError:
+            field = lay.itemAt(i, QFormLayout.FieldRole)
+            label.hide()
+            if field is not None and field.widget() is not None:
+                field.widget().hide()
+        hidden.append(text)
+    return hidden
+
+
+def slim_dock_title(dock) -> None:
+    """Replace *dock*'s title bar with a zero-height widget: one window, so docks neither
+    float nor close, and the ~20 px per title goes to the hero surfaces instead."""
+    bar = QWidget(dock)
+    bar.setFixedHeight(0)
+    dock.setTitleBarWidget(bar)
+
+
+def keep_dock_slim(dock) -> None:
+    """Re-slim *dock* if something gave it a title bar back. napari's QtViewerDockWidget
+    re-installs its QtCustomTitleBar on EVERY visibilityChanged(True) (measured: the two
+    visible docks came back with 20 px titles right after show), so the pane connects this
+    after napari's own handler."""
+    tb = dock.titleBarWidget()
+    if tb is None or tb.maximumHeight() > 0:
+        slim_dock_title(dock)
+
+
+def minimize_native_chrome(qt_window, controls_widgets=()) -> "list[str]":
+    """Hide/slim the napari-native chrome the app does not need, and NAME what was hidden.
+
+    Three cuts, each measured on the embedded window (probe 2026-08-25): napari's own
+    status bar (27 px; the app's log panel is the one status surface), every dock's title
+    bar (20 px each; one window, docks neither float nor close), and the layer-controls
+    rows in :data:`NATIVE_HIDDEN_ROWS`. Returns the inventory; empty means nothing was
+    found to hide, which a caller should say rather than assume."""
+    from qtpy.QtWidgets import QDockWidget, QStatusBar
+
+    hidden: "list[str]" = []
+    for bar in qt_window.findChildren(QStatusBar):
+        if bar.isVisibleTo(qt_window):
+            hidden.append("status bar")
+        bar.hide()
+    for dock in qt_window.findChildren(QDockWidget):
+        tb = dock.titleBarWidget()
+        if tb is None or tb.maximumHeight() > 0:
+            slim_dock_title(dock)
+            hidden.append(f"dock title: {dock.windowTitle() or dock.objectName()}")
+    for w in controls_widgets:
+        hidden.extend(f"layer-controls row: {t}" for t in hide_native_rows(w))
+    return hidden
+
+
 class MosaicPane(QWidget):
     """Pane 2. Hosts the napari canvas, or a message saying why it could not be built."""
 
@@ -332,6 +413,59 @@ class MosaicPane(QWidget):
             qt_window.setMinimumHeight(220)
         lay.addWidget(qt_window, 1)
         self._native_window = qt_window
+        if self.show_docks:
+            self._minimize_native_chrome(qt_window)
+
+    #: What the chrome diet hid on this pane, for tests and the log. Empty until the embed.
+    native_chrome_hidden: "list[str]" = []
+
+    def _minimize_native_chrome(self, qt_window) -> None:
+        """Hero declutter (2026-08-25): hide the napari chrome the app does not need, and
+        keep hiding the layer-controls rows as napari builds new per-layer controls (its
+        container makes one widget per layer, lazily, so a one-shot pass would miss every
+        layer added after open)."""
+        from squidxplorer._logpane import get_logger
+
+        container = None
+        try:
+            container = self._viewer.window._qt_viewer.controls
+        except Exception as exc:                 # noqa: BLE001 - napari moved it: say so
+            get_logger("napari_pane").debug(
+                "the layer-controls container is unreachable (%s); its rows stay.", exc)
+        widgets = []
+        if container is not None:
+            try:
+                widgets = [container.widget(i) for i in range(container.count())]
+                container.currentChanged.connect(self._diet_current_controls)
+            except Exception as exc:             # noqa: BLE001 - degrade to the one-shot pass
+                get_logger("napari_pane").debug(
+                    "layer-controls diet cannot follow new layers (%s).", exc)
+        self._controls_container = container
+        self.native_chrome_hidden = minimize_native_chrome(qt_window, widgets)
+        # Slim titles must STAY slim: napari re-installs its title bar on every
+        # visibilityChanged(True); connected here (after napari's own handler) so ours
+        # runs last in the same emission.
+        from qtpy.QtWidgets import QDockWidget
+
+        for dock in qt_window.findChildren(QDockWidget):
+            try:
+                dock.visibilityChanged.connect(
+                    lambda vis, d=dock: keep_dock_slim(d) if vis else None)
+            except Exception:                    # noqa: BLE001 - cosmetic, never fatal
+                pass
+        get_logger("napari_pane").debug(
+            "napari chrome minimized: %s", ", ".join(self.native_chrome_hidden) or "nothing")
+
+    def _diet_current_controls(self, index: int) -> None:
+        """Apply the row diet to the controls widget napari just switched to (new layers
+        get fresh controls widgets; this keeps the diet on all of them)."""
+        container = getattr(self, "_controls_container", None)
+        if container is None:
+            return
+        try:
+            hide_native_rows(container.widget(int(index)))
+        except Exception:                        # noqa: BLE001 - cosmetic, never fatal
+            pass
 
     def dock_view_controls(self, widget: QWidget) -> bool:
         """Dock *widget* (the window's "2D / 3D · ROI" chip block) at the TOP of napari's left
@@ -358,6 +492,12 @@ class MosaicPane(QWidget):
             get_logger("napari_pane").debug(
                 "the view controls docked but could not be hoisted above the layer "
                 "controls: %s", exc)
+        try:
+            slim_dock_title(dock)                # the chips are their own identity; no title bar
+            dock.visibilityChanged.connect(
+                lambda vis, d=dock: keep_dock_slim(d) if vis else None)
+        except Exception:                        # noqa: BLE001 - cosmetic, never fatal
+            pass
         self.view_controls_dock = dock
         return True
 

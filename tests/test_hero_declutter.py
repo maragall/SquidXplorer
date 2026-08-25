@@ -181,6 +181,54 @@ def test_a_hosted_log_keeps_its_height_cap_across_a_collapse_cycle(qapp, napari_
         shutdown_plate_window(qapp, win)
 
 
+# --- napari-native chrome is minimized ------------------------------------------------------
+
+
+def test_native_chrome_is_minimized(qapp):
+    """The pure half of the pane's chrome diet, proven on a plain Qt window shaped like the
+    embedded napari one: the status bar hides, dock title bars slim to nothing, and the
+    layer-controls rows the app manages elsewhere fold away while the kept rows stay."""
+    from qtpy.QtCore import Qt
+    from qtpy.QtWidgets import (
+        QComboBox, QDockWidget, QFormLayout, QLabel, QMainWindow, QSlider, QStatusBar, QWidget,
+    )
+
+    from squidxplorer._napari_pane import NATIVE_HIDDEN_ROWS, minimize_native_chrome
+
+    win = QMainWindow()
+    win.setStatusBar(QStatusBar())
+    dock = QDockWidget("layer controls", win)
+    dock.setWidget(QWidget())
+    win.addDockWidget(Qt.LeftDockWidgetArea, dock)
+    controls = QWidget()
+    form = QFormLayout(controls)
+    keep_label, keep_field = QLabel("opacity:"), QSlider()
+    form.addRow(keep_label, keep_field)
+    folded = {}
+    for text in NATIVE_HIDDEN_ROWS:
+        lab, fld = QLabel(text), QComboBox()
+        form.addRow(lab, fld)
+        folded[text] = (lab, fld)
+    dock.widget().setLayout(QFormLayout())  # not the controls form; just a body
+    win.show()
+    qapp.processEvents()
+
+    hidden = minimize_native_chrome(win, [controls])
+    qapp.processEvents()
+
+    assert not win.statusBar().isVisibleTo(win), "napari's status bar is still showing"
+    tb = dock.titleBarWidget()
+    assert tb is not None and tb.maximumHeight() == 0, (
+        "the dock still spends a title bar")
+    for text, (lab, fld) in folded.items():
+        assert not lab.isVisibleTo(controls) and not fld.isVisibleTo(controls), (
+            f"the {text!r} row is still showing")
+    assert keep_label.isVisibleTo(controls) and keep_field.isVisibleTo(controls), (
+        "a kept layer-controls row was hidden too"
+    )
+    assert hidden, "nothing was reported hidden; the inventory must be named"
+
+
 # --- the log diet ---------------------------------------------------------------------------
 
 #: An ordinary open-and-preview session's ceiling of INFO lines. The point is a SHORT log:
