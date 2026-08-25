@@ -52,7 +52,8 @@ def mosaic():
 
 def _run(name: str, plane: np.ndarray) -> np.ndarray:
     """Run one registered operator over *plane*, grouping exactly as the engine would."""
-    group = [plane, plane] if "z" in operator_consumes(name) else [plane]
+    # Five planes: fstack's minimum z depth (3-point Gaussian interpolation, STEP=2).
+    group = [plane] * 5 if "z" in operator_consumes(name) else [plane]
     return _resolve_operator(name).fn(group)
 
 
@@ -286,6 +287,9 @@ PARAMETER_PROBES = {
     "registration_t": 1,
     "correct_illumination": False,
     "iterations": 1,   # RL at 1 vs the shipped 3: semi-convergence guarantees different pixels
+    "nhsize": 5,       # fstack: a different focus window moves the per-frame weights
+    "alpha": 1.0,      # fstack: selectivity sharpness rescales phi and so the tanh weights
+    "sth": 30.0,       # fstack: a higher threshold pushes more pixels toward the flat blend
 }
 
 
@@ -381,7 +385,18 @@ def test_every_parameter_an_operator_DECLARES_changes_its_pixels(name):
         for cy, cx in ((60, 60), (66, 70), (170, 60), (60, 175), (180, 180), (186, 190)):
             plane[(yy - cy) ** 2 + (xx - cx) ** 2 <= 64] = 4000    # touching and isolated blobs
         plane = np.clip(plane + rng.integers(0, 200, plane.shape), 0, 65535).astype(np.uint16)
-        group = [plane, plane] if "z" in operator_consumes(name) else [plane]
+        if "z" in operator_consumes(name):
+            import scipy.ndimage as ndi
+
+            # A real focal stack, sharpest at index 2: IDENTICAL planes make any normalised
+            # fusion (fstack) the identity, so no fusion parameter could reach the pixels.
+            # Five planes is fstack's minimum (3-point Gaussian interpolation, STEP=2).
+            group = [plane if k == 2 else
+                     np.clip(ndi.gaussian_filter(plane.astype(np.float64), 1.5 * abs(k - 2)),
+                             0, 65535).astype(np.uint16)
+                     for k in range(5)]
+        else:
+            group = [plane]
 
         def run(kwargs):
             return np.asarray(bind_operator(name, kwargs)(group))

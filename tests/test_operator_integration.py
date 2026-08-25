@@ -29,8 +29,8 @@ def _stack(z=5, shape=(64, 64), seed=0):
 
 
 def test_available_plane_operators_exact_list():
-    # The surviving set is exactly Julio's 2026-08-24 ruling: mip, decon, stitch, register.
-    assert s.available_plane_operators() == ["decon", "mip"]
+    # Julio's 2026-08-24 ruling (mip, decon, stitch, register) plus the 2026-08-25 fstack port.
+    assert s.available_plane_operators() == ["decon", "fstack", "mip"]
 
 
 def test_available_region_operators_exact_list():

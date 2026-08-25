@@ -81,7 +81,7 @@ from squidxplorer.reader import (
 # Imported for their side effect: each module registers its operator(s).
 # (Shelved 2026-08-24: _background/bgsub, _spots/spot, _cellpose, and the 2-D `decon`
 # plane-op; 'decon' is the volume solve now. Reinstating starts from git history.)
-from squidxplorer import _decon, _flatfield, _register  # noqa: E402,F401  (registration side effect)
+from squidxplorer import _decon, _flatfield, _fstack, _register  # noqa: E402,F401  (registration side effect)
 from squidxplorer._decon import (
     OpticsParams,
     decon_op,
