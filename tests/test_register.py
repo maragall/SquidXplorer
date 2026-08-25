@@ -194,13 +194,12 @@ def test_the_panel_carries_the_copy_switch_outside_the_params(qapp):
     assert panel.kwargs().get("copy") is True
     panel.copy_check.setChecked(False)
     assert "copy" not in panel.kwargs(), "unchecking must drop the kwarg, not send copy=False"
-    assert panel.save_btn is not None and not panel.save_btn.isVisibleTo(panel)
+    # One flow (2026-08-25): NO panel-level run/save buttons - the operators row launches
+    # every run and reads this panel through kwargs().
+    assert not hasattr(panel, "save_btn") and not hasattr(panel, "run_all_btn")
     panel.copy_check.setChecked(True)
-    panel.run_all_btn.click()
-    key, kw = host.calls[-1]
-    assert key == "register" and kw["save"] is False and kw["regions"] is None
-    assert kw["operator_kwargs"] == {"registration_channel": 0, "registration_t": 0,
-                                     "copy": True}
+    assert panel.kwargs() == {"registration_channel": 0, "registration_t": 0, "copy": True}
+    assert host.calls == [], "building/reading the panel must launch nothing"
 
 
 def test_a_register_result_layer_is_served_at_the_solved_positions(monkeypatch):
