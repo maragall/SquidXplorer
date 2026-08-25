@@ -2410,6 +2410,17 @@ class RegionViewer(QMainWindow):
         if self._disposed:
             return
         self._disposed = True
+        # DISARM THE DEBOUNCE TIMERS FIRST: a pending single-shot fires into a torn-down
+        # window during the deleteLater drain (the plate's closeEvent records the identical
+        # measured segfault; these two were never stopped here).
+        for name in ("_load_timer", "_time_load_timer"):
+            timer = getattr(self, name, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                    timer.timeout.disconnect()
+                except (TypeError, RuntimeError):
+                    pass
         # RELEASE, never dispose: the inserted parameter panel is the PLATE's live widget
         # (the run's single source of truth); dying with this view would lose it for good.
         try:
