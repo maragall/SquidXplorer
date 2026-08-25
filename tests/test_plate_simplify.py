@@ -288,7 +288,7 @@ def test_the_full_width_top_toolbar_is_gone_and_the_chips_live_in_the_left_colum
         assert box is not None
         # Every chip is inside the control block, and the block is inside the VIEW (with the
         # headless pane the left column falls back into the window body — same ancestry).
-        for name in ("_btn_2d", "_btn_3d", "_btn_focus", "_btn_record", "_btn_fovs",
+        for name in ("_btn_roi", "_btn_3d", "_btn_focus", "_btn_record", "_btn_fovs",
                      "_btn_copy_luts", "_btn_paste_luts"):
             chip = getattr(v, name)
             p = chip.parentWidget()

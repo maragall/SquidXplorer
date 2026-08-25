@@ -106,16 +106,19 @@ def test_inserting_a_param_panel_summons_the_operator_surface(qapp, napari_pane_
 # --- the chips fold to the essentials -------------------------------------------------------
 
 
-def test_only_the_2d_3d_essentials_show_until_the_controls_are_summoned(qapp, napari_pane_stub,
-                                                                        squid_dataset):
+def test_only_the_3d_and_roi_essentials_show_until_the_controls_are_summoned(qapp,
+                                                                             napari_pane_stub,
+                                                                             squid_dataset):
     root, _ = squid_dataset
     win, views = _open_view(qapp, root)
     try:
         v = views[0]
         fold = v._controls_fold
         assert fold.collapsed, "the view controls must start collapsed"
-        assert v._btn_2d.isVisibleTo(v), "2D is an essential and must stay visible"
         assert v._btn_3d.isVisibleTo(v), "3D is an essential and must stay visible"
+        assert v._btn_roi.isVisibleTo(v), (
+            "ROI is top-level (Julio, 2026-08-25: 'The ROI button shouldn't be hidden "
+            "behind controls.')")
         for name in ("_btn_focus", "_btn_record", "_btn_png", "_btn_fovs",
                      "_btn_copy_luts", "_btn_paste_luts"):
             assert not getattr(v, name).isVisibleTo(v), f"{name} is showing while collapsed"
@@ -124,6 +127,27 @@ def test_only_the_2d_3d_essentials_show_until_the_controls_are_summoned(qapp, na
                      "_btn_copy_luts", "_btn_paste_luts"):
             chip = getattr(v, name)
             assert chip.isVisibleTo(v), f"summon did not reveal {name}"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_the_2d_button_is_gone_whole_and_a_3d_tab_disables_its_own_3d(qapp, napari_pane_stub,
+                                                                      squid_dataset):
+    """Julio, 2026-08-25: "There should not be 2D button since we make separate tabs for
+    the 3d view." A 2D tab IS 2D and a 3D tab IS 3D; nothing switches modes in place."""
+    import squidxplorer._region_viewer as RV
+
+    assert not hasattr(RV.RegionViewer, "_view_roi_2d"), "the 2D chip's handler is back"
+    assert not hasattr(RV.RegionViewer, "_set_ndisplay"), (
+        "the in-place mode switch is back")
+    root, _ = squid_dataset
+    win, views = _open_view(qapp, root)
+    try:
+        v = views[0]
+        assert not hasattr(v, "_btn_2d"), "the 2D button is back"
+        v.note_volume_tab()
+        assert not v._btn_3d.isEnabled(), "a 3D tab still offers to open 3D from itself"
+        assert v._btn_3d.toolTip(), "a disabled chip must say why"
     finally:
         shutdown_plate_window(qapp, win)
 
@@ -177,6 +201,73 @@ def test_a_hosted_log_keeps_its_height_cap_across_a_collapse_cycle(qapp, napari_
         panel.set_collapsed(False)
         assert panel.maximumHeight() == cap, (
             "a collapse cycle lost the hosted height cap")
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+# --- the collapsed log is a REAL band, never a clipped sliver -------------------------------
+# Julio, live GUI 2026-08-25: "Can't see log. Blank frame." The collapsed cap was frozen at
+# construction-time sizeHint, BEFORE adopt_status_row grew the panel (header + memory/run
+# bars), so the band rendered as a clipped sliver ("2%" cut mid-label) with no reachable
+# summon toggle.
+
+
+def test_a_collapsed_log_shows_its_whole_header_and_status_rows(qapp, napari_pane_stub,
+                                                                squid_dataset):
+    win = V.PlateWindow(None)
+    try:
+        panel = win._log_panel
+        assert panel.collapsed
+        panel.layout().activate()
+        need = panel.layout().sizeHint().height()
+        assert panel.maximumHeight() >= need, (
+            f"the collapsed log is clipped: cap {panel.maximumHeight()} px against "
+            f"{need} px of header + status rows - the summon toggle and the progress "
+            f"bars are cut mid-pixel")
+        assert panel._toggle.isVisibleTo(panel), "the summon toggle is not in the band"
+        assert panel._status.isVisibleTo(panel), (
+            "the adopted memory/run bars are not in the collapsed band")
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_a_hosted_collapsed_log_is_a_reachable_band(qapp, napari_pane_stub, squid_dataset):
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    mgr = win._viewer_manager
+    mgr.tabbed_views = True
+    views = [mgr.open([list(win._order)[0]])]
+    _drain_until(qapp, lambda: views[0]._pane is not None, timeout=10)
+    for _ in range(10):
+        qapp.processEvents()
+    try:
+        panel = win._log_panel
+        v = views[0]
+        assert panel.collapsed
+        assert panel._toggle.isVisibleTo(v), (
+            "the hosted collapsed log has no summon affordance on screen")
+        panel.layout().activate()
+        assert panel.maximumHeight() >= panel.layout().sizeHint().height(), (
+            "the hosted collapsed log is clipped")
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_the_view_column_cannot_claim_more_height_than_its_content(qapp, napari_pane_stub,
+                                                                   squid_dataset):
+    """The blank frame: the docked left column kept the height its collapsed content no
+    longer needed, a dead band between the plate slot and the layer controls. A Maximum
+    vertical policy makes the dock hand freed space to the other slots (qSmartMaxSize
+    caps a no-grow policy at the size hint)."""
+    from qtpy.QtWidgets import QSizePolicy
+
+    root, _ = squid_dataset
+    win, views = _open_view(qapp, root)
+    try:
+        col = views[0]._left_col
+        assert col.sizePolicy().verticalPolicy() == QSizePolicy.Maximum, (
+            "the left column can grow past its content and paints the slack as a blank band")
     finally:
         shutdown_plate_window(qapp, win)
 

@@ -1072,12 +1072,31 @@ with verbose notifications about everything'". Julio's reconciliation stands: ON
 operators hidden by default and summoned, never a separate window.
 
 - **Sections fold behind summon grips** (`_region_viewer._FoldSection`, the plate-slot/log
-  grip pattern): the operator surface folds WHOLE behind "▸ operators"; the chip block keeps
-  only the 2D/3D essentials beside "▸ controls". Collapsed by default, state per VIEW,
-  session-scoped, no prefs file. `_insert_param_slot` summons before inserting (an insertion
-  under a collapsed fold reads as a dead ⚙ chip). `RegionViewer.summon_controls()` is the one
-  entry that expands everything; GATE 3's view sweep calls it as its settle step, because the
-  sweep itself clicks the grips - collapsed-by-default never hides a control from the gate.
+  grip pattern): the operator surface folds WHOLE behind "▸ operators"; the resting chip row
+  is [ 3D ] [ ▭ ROI ] [ ▸ controls ], buttons sized to their text. Collapsed by default,
+  state per VIEW, session-scoped, no prefs file. `_insert_param_slot` summons before
+  inserting (an insertion under a collapsed fold reads as a dead ⚙ chip).
+  `RegionViewer.summon_controls()` is the one entry that expands everything; GATE 3's view
+  sweep calls it as its settle step, because the sweep itself clicks the grips -
+  collapsed-by-default never hides a control from the gate.
+- **There is NO 2D button and no in-place 2D/3D switch** (Julio, 2026-08-25: "There should
+  not be 2D button since we make separate tabs for the 3d view. The ROI button shouldn't be
+  hidden behind controls."): a 2D tab IS 2D, a 3D tab IS 3D. Deleted whole with absence
+  pins: `_btn_2d`, `RegionViewer._view_roi_2d`, `_roi_tools.view_roi_2d`,
+  `RegionViewer._set_ndisplay` (each grep-proven caller-free). `_open_3d` stamps the child
+  via `note_volume_tab()`: the 3D tab's own 3D chip is disabled naming the way back (close
+  the tab). ROI-draw (`_btn_roi`) is top-level; select/clear/window/png/movie/focus/FOVs/
+  LUTs stay behind the summon. `_reslice_hidden_layers` still rides `dims.events.ndisplay`
+  (napari's own button and the volume machinery still flip it); nothing app-side switches a
+  live view's ndisplay any more.
+- **The collapsed log is a BAND, never a sliver** (Julio, live 2026-08-25: "Can't see log.
+  Blank frame."): the collapsed cap is re-derived from the layout's own hint whenever the
+  content relayouts (`LogPanel._apply_collapsed_cap` on every LayoutRequest, != guarded) -
+  a cap frozen at construction clipped the band once `adopt_status_row` grew it, cutting
+  the "2%" run bar mid-label with no reachable toggle. The view's left column is
+  `QSizePolicy.Maximum` vertically: a dock that can still grow paints the freed height as a
+  dead blank band instead of handing it to the layer controls (qSmartMaxSize caps a no-grow
+  policy at the size hint).
 - **The log starts COLLAPSED** (`LogPanel(start_collapsed=True)`), summoned by its own toggle
   or View > Log. Expanding at home re-hands the splitter split at BOTH levels
   (`PlateWindow._on_log_collapsed`, once more on a zero-timer after the layout pass - a

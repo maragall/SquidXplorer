@@ -29,16 +29,6 @@ ROI_COLORS: "tuple[str, ...]" = (
 )
 
 
-def view_roi_2d(win) -> None:
-    """Open the SELECTED ROI as a child 2D window; with no ROI picked, just show the mosaic in 2D."""
-    win.set_render_mode("2d")
-    bbox, _region = selected_roi(win)
-    if bbox is None:
-        win._set_ndisplay(2)
-        return
-    open_roi_children(win)
-
-
 def sync_roi_width(viewer, layer, screen_px: float = 3.0) -> None:
     """Keep the ROI border a ~constant on-screen thickness as the camera zooms."""
     try:

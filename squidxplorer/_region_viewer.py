@@ -229,13 +229,17 @@ class _FoldSection(QWidget):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
         for w in header:
-            row.addWidget(w, 1)
+            row.addWidget(w, 0)                # sized to their text (Julio, 2026-08-25)
         self.grip = QPushButton()
         self.grip.setCursor(Qt.PointingHandCursor)
         self.grip.setToolTip(f"Show or hide the {self._title}.")
         self.grip.setStyleSheet(self._GRIP_QSS)
         self.grip.clicked.connect(self.toggle)
-        row.addWidget(self.grip, 1)
+        if header:
+            row.addWidget(self.grip, 0)
+            row.addStretch(1)                  # a text-sized row, left-aligned
+        else:
+            row.addWidget(self.grip, 1)        # alone, the grip is the whole slim bar
         v.addLayout(row)
         self._body = QWidget()
         self.body = QVBoxLayout(self._body)
@@ -536,6 +540,13 @@ class RegionViewer(QMainWindow):
         # napari without dock areas) keeps the column in the window body so every control stays
         # actuatable.
         left_col = QWidget()
+        # Maximum, not Preferred: with the sections collapsed the column's content is a few
+        # slim bars, and a dock that can still GROW paints the difference as a dead blank
+        # band between the plate slot and the layer controls (Julio, live 2026-08-25:
+        # "Blank frame"). qSmartMaxSize caps a no-grow policy at the size hint, so the
+        # freed height goes to the other left docks, the hero surfaces.
+        left_col.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self._left_col = left_col
         lv = QVBoxLayout(left_col)
         lv.setContentsMargins(0, 0, 0, 0)
         lv.setSpacing(4)
@@ -641,7 +652,7 @@ class RegionViewer(QMainWindow):
         `_build` docks it at the TOP of napari's left column, above the layer controls
         (`MosaicPane.dock_view_controls`), so the canvas gains the height the old horizontal
         top dock spent (UI feedback 2026-08-19: "Should be on the left column, where the
-        controls are"). Chip attributes (`_btn_2d`, `_btn_3d`, `_btn_focus`, `_btn_record`,
+        controls are"). Chip attributes (`_btn_3d`, `_btn_roi`, `_btn_focus`, `_btn_record`,
         `_btn_fovs`) are pinned by tests and GATE 3; only the parenting and row wrapping moved.
 
         HERO DECLUTTER (team feedback 2026-08-25: "minimize most of the... tools. They just
@@ -653,8 +664,9 @@ class RegionViewer(QMainWindow):
         vv = QVBoxLayout(view_box)
         vv.setContentsMargins(8, 5, 8, 6)
         vv.setSpacing(4)
-        self._btn_2d = self._chip("2D", "View the SELECTED ROI in 2D (opens it as a child window); "
-                                  "with no ROI picked, just shows the mosaic in 2D.", self._view_roi_2d)
+        # NO 2D button (Julio, 2026-08-25: "There should not be 2D button since we make
+        # separate tabs for the 3d view."): a 2D tab IS 2D and a 3D tab IS 3D; nothing
+        # switches modes in place. The chip and `_view_roi_2d` are deleted whole.
         self._btn_3d = self._chip("3D", "Open this view in 3D at NATIVE resolution (the region if it "
                                   "fits the GPU texture, else draw an ROI to pick the spot). "
                                   "Replaces this window's previous 3D view rather than adding "
@@ -695,15 +707,18 @@ class RegionViewer(QMainWindow):
             "⇩ paste LUTs", "Paste the LUT clipboard onto this window's channels. The plate "
             "follows the same write, so plate and window contrast stay equal.", self._paste_luts)
         # One 3-column grid of equal-width chips: the ragged per-row HBoxes read as "poor
-        # distribution of buttons" (Julio, live GUI 2026-08-19). The essentials (2D, 3D)
-        # ride the fold's header row and stay visible; everything else is in the folded grid.
+        # distribution of buttons" (Julio, live GUI 2026-08-19). The resting top row is
+        # [ 3D ] [ ▭ ROI ] [ ▸ controls ], buttons sized to their text (Julio, 2026-08-25:
+        # "The ROI button shouldn't be hidden behind controls."); everything else is in
+        # the folded grid.
         from qtpy.QtWidgets import QGridLayout
 
-        fold = _FoldSection("controls", header=(self._btn_2d, self._btn_3d))
+        self._btn_roi = self._chip("▭ ROI", "Draw an ROI rectangle inside the mosaic.",
+                                   self._new_roi)
+        fold = _FoldSection("controls", header=(self._btn_3d, self._btn_roi))
         grid = QGridLayout(); grid.setSpacing(4)
         chips = [
             self._btn_focus, self._btn_record, self._btn_png,
-            self._chip("▭ new", "Draw an ROI rectangle inside the mosaic.", self._new_roi),
             self._chip("⊙ select", "Select ROIs: click one, then press Delete to remove it.",
                        self._select_rois),
             self._chip("✕ clear", "Remove all ROIs in this window.", self._clear_rois),
@@ -717,8 +732,6 @@ class RegionViewer(QMainWindow):
             grid.addWidget(chip, i // 3, i % 3)
         for col in range(3):
             grid.setColumnStretch(col, 1)
-        for essential in (self._btn_2d, self._btn_3d):
-            essential.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         fold.body.addLayout(grid)
         vv.addWidget(fold)
         self._controls_fold = fold
@@ -755,6 +768,19 @@ class RegionViewer(QMainWindow):
         driver use, so collapsed-by-default never makes a control unreachable."""
         self.set_controls_collapsed(False)
         self.set_operators_collapsed(False)
+
+    #: Whether this view IS a 3D tab (spawned by another view's 3D chip).
+    _is_volume_tab = False
+
+    def note_volume_tab(self) -> None:
+        """This view IS the 3D tab: there is no 2D/3D mode switch (a 2D tab is 2D, a 3D
+        tab is 3D - Julio, 2026-08-25), so its own 3D chip is disabled with the way back
+        stated: closing the tab."""
+        self._is_volume_tab = True
+        btn = getattr(self, "_btn_3d", None)
+        if btn is not None and _alive(btn):
+            btn.setEnabled(False)
+            btn.setToolTip("This tab IS the 3D view. Close the tab to go back to the 2D view.")
 
     _AT_DEFAULTS_QSS = "color:#8b949e;font-size:10px;border:none;"
     _PROGRESS_QSS = (
@@ -1674,16 +1700,6 @@ class RegionViewer(QMainWindow):
             return None
         return getattr(pane, "_viewer", None)
 
-    def _set_ndisplay(self, n: int) -> None:
-        v = self._napari_viewer()
-        if v is None:
-            self._say(f"cannot switch to {n}D - the napari viewer isn't available here.")
-            return
-        try:
-            v.dims.ndisplay = int(n)
-        except Exception as exc:                         # noqa: BLE001 - named, never silent
-            self._say(f"could not switch to {n}D: {exc}")
-
     def _focus_reference_plane(self) -> None:
         """Jump the z-slider to the sharpest plane (Tenengrad) of the current region's centre FOV."""
         v = self._napari_viewer()
@@ -1737,9 +1753,6 @@ class RegionViewer(QMainWindow):
     # -- the ROI cluster lives in `_roi_tools` (clamp-at-draw, acquisition-pixel costing and the
     # -- child windows move intact); thin delegates because tests and the ROI chips actuate these
     # -- by name on the window. -------------------------------------------------------------------
-    def _view_roi_2d(self) -> None:
-        _roi_tools.view_roi_2d(self)
-
     @staticmethod
     def _sync_roi_width(viewer, layer, screen_px: float = 3.0) -> None:
         _roi_tools.sync_roi_width(viewer, layer, screen_px)
@@ -2308,6 +2321,7 @@ class RegionViewer(QMainWindow):
             _volume_view.open_3d(self)
             return
         child.set_display_name(f"3D · {region}")
+        child.note_volume_tab()
         _volume_view.open_3d(child, scene_from=self)
 
     def _on_screen_luts(self, op: str) -> "tuple[dict, dict]":

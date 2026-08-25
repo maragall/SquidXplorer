@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from qtpy.QtCore import QObject, Qt, QTimer, Signal
+from qtpy.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from qtpy.QtGui import QFont
 from qtpy.QtWidgets import (
     QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
@@ -183,6 +183,10 @@ class LogPanel(QWidget):
         self._status_l.addWidget(work_caption)
         self._status_l.addWidget(work_bar)
         self._status.setVisible(True)
+        # The panel just grew; a collapsed cap frozen at the pre-adoption size CLIPS the
+        # band (Julio, live 2026-08-25: the "2%" run bar cut mid-label, no reachable
+        # summon toggle). Re-derive the cap from what the band now holds.
+        self._apply_collapsed_cap()
 
     def attach_bus(self, bus: LogBus, *, level: int = DEFAULT_LEVEL) -> None:
         bus.subscribe(self._on_record)      # called on the LOGGING thread — hop via the bridge
@@ -256,6 +260,32 @@ class LogPanel(QWidget):
         if not self._collapsed:
             self.setMaximumHeight(self._expanded_cap or 16777215)
 
+    def _apply_collapsed_cap(self) -> None:
+        """Cap a collapsed panel at what its VISIBLE content needs right now. The layout is
+        activated first: the cap is read in the same call that changed the content, when
+        the cached hint is still the old one (measured: a construction-time cap clipped
+        the band once the status rows were adopted)."""
+        if not self._collapsed:
+            return
+        lay = self.layout()
+        if lay is not None:
+            lay.activate()
+            need = lay.sizeHint().height()
+        else:
+            need = self.sizeHint().height()
+        if self.maximumHeight() != need:
+            self.setMaximumHeight(need)
+
+    def event(self, ev) -> bool:
+        # The band's content changes height at runtime (the run/memory bars show and hide
+        # with the work), and a stale collapsed cap CLIPS it (Julio, live 2026-08-25: the
+        # "2%" bar cut mid-label). Re-derive the cap on every layout request; the != guard
+        # in _apply_collapsed_cap keeps this from looping.
+        # getattr: layout events can land during construction, before _collapsed exists.
+        if ev.type() == QEvent.LayoutRequest and getattr(self, "_collapsed", False):
+            self._apply_collapsed_cap()
+        return super().event(ev)
+
     def set_collapsed(self, collapsed: bool) -> None:
         """Collapsing drops the vertical size hint to the header's height so the splitter hands the
         space back to the panes, instead of leaving a grey gap."""
@@ -263,7 +293,7 @@ class LogPanel(QWidget):
         self._collapsed = bool(collapsed)
         self._view.setVisible(not self._collapsed)
         if self._collapsed:
-            self.setMaximumHeight(self.sizeHint().height())
+            self._apply_collapsed_cap()
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         else:
             # QWIDGETSIZE_MAX (no cap) unless a host installed one.
