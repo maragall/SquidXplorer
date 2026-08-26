@@ -10,6 +10,7 @@ from typing import Any, Optional, Sequence
 
 import numpy as np
 from qtpy.QtCore import QObject, Qt, QTimer, Signal
+from qtpy.QtGui import QFont
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -267,6 +268,12 @@ _RAW_OP = "raw"
 
 #: THE one spacing of the left column: margins, gaps between chips, gaps between slots.
 COLUMN_PX = 6
+#: A view chip's fixed height and font, in pixels (Julio, 2026-08-25, live on 862 px: "The
+#: SquidXplorer buttons at the top of the left dock should be smaller as well, this will give
+#: the log a bit more height"). A QFont, never a stylesheet font: a stylesheet font resolves
+#: at polish, after the height was fixed from the wrong metrics.
+CHIP_PX = 22
+CHIP_FONT_PX = 11
 
 
 class RegionViewer(QMainWindow):
@@ -578,7 +585,7 @@ class RegionViewer(QMainWindow):
     _BOX_QSS = "QFrame{background:#0d1117;border:1px solid #232b3a;border-radius:5px;}"
     _CHIP_QSS = (
         "QPushButton{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
-        "border-radius:4px;padding:3px 9px;font-size:11px;}"
+        "border-radius:4px;padding:1px 6px;}"
         "QPushButton:hover{background:#21262d;}"
         "QPushButton:checked{background:#1f6feb;color:#ffffff;border-color:#1f6feb;}"
         "QPushButton:disabled{color:#586069;border-color:#20262e;}"
@@ -598,6 +605,10 @@ class RegionViewer(QMainWindow):
         b.setCheckable(checkable)
         b.setCursor(Qt.PointingHandCursor)
         b.setStyleSheet(self._CHIP_QSS)
+        font = QFont(b.font())
+        font.setPixelSize(CHIP_FONT_PX)
+        b.setFont(font)
+        b.setFixedHeight(CHIP_PX)
         b.clicked.connect(lambda _=False: slot())
         return b
 
@@ -617,8 +628,8 @@ class RegionViewer(QMainWindow):
         view_box = QFrame(self)
         view_box.setStyleSheet(self._BOX_QSS)
         vv = QVBoxLayout(view_box)
-        vv.setContentsMargins(8, 5, 8, 6)
-        vv.setSpacing(4)
+        vv.setContentsMargins(COLUMN_PX, COLUMN_PX, COLUMN_PX, COLUMN_PX)
+        vv.setSpacing(COLUMN_PX)
         # NO 2D button (Julio, 2026-08-25: "There should not be 2D button since we make
         # separate tabs for the 3d view."): a 2D tab IS 2D and a 3D tab IS 3D; nothing
         # switches modes in place. The chip and `_view_roi_2d` are deleted whole.

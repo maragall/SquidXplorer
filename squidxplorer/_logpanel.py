@@ -36,12 +36,15 @@ _MONO = "Menlo, Consolas, 'DejaVu Sans Mono', monospace"
 #: font resolves at polish, after the slot height was fixed from the wrong metrics (measured:
 #: 66 px at construction, 94 px once polished, two lines shown of the three promised).
 _FONT_PX = 11
+#: The header ("Log" + the status word) one step below the body (Julio, 2026-08-25, live on
+#: 862 px: "the 'log idle' text size could be smaller, to give more height to the actual log").
+_HEADER_FONT_PX = 10
 
 
-def _mono_font():
+def _mono_font(px: int = _FONT_PX):
     f = QFont()
     f.setFamilies([n.strip().strip("'") for n in _MONO.split(",")])
-    f.setPixelSize(_FONT_PX)
+    f.setPixelSize(px)
     return f
 _BG = "#0d1117"
 _HEADER_BG = "#161b22"
@@ -75,9 +78,11 @@ class LogPanel(QWidget):
 
     #: A FIXED slot: the header plus exactly LINES lines of the log's own font, scrollable;
     #: never collapsed, never floated (Julio, 2026-08-25: "Re-docking the logger doesn't
-    #: work... the logger fullscreen idea will cause complications downstream"). Three lines,
-    #: measured on an 862 px screen where 132 px of log left the layer list one channel tall.
-    LINES = 3
+    #: work... the logger fullscreen idea will cause complications downstream"). Three lines
+    #: at first (132 px of log left the layer list one channel tall on 862 px); five once the
+    #: header and the chip grid shrank to pay for them (Julio: "My log Height is a bit too
+    #: small").
+    LINES = 5
 
     def __init__(self, bus: Optional[LogBus] = None, activity: Optional[ActivityLog] = None,
                  *, level: int = DEFAULT_LEVEL, max_lines: int = MAX_LINES,
@@ -95,28 +100,28 @@ class LogPanel(QWidget):
         header = QWidget()
         header.setStyleSheet(f"background:{_HEADER_BG};")
         hl = QHBoxLayout(header)
-        hl.setContentsMargins(8, 3, 8, 3)
+        hl.setContentsMargins(8, 2, 8, 2)
         hl.setSpacing(12)
 
         self._title = QLabel("Log")
-        self._title.setFont(_mono_font())
+        self._title.setFont(_mono_font(_HEADER_FONT_PX))
         self._title.setStyleSheet(
             f"color:#c3ccd9;background:transparent;")
         hl.addWidget(self._title)
         self._activity_lbl = QLabel("idle")
-        self._activity_lbl.setFont(_mono_font())
+        self._activity_lbl.setFont(_mono_font(_HEADER_FONT_PX))
         self._activity_lbl.setStyleSheet(
             f"color:#c3ccd9;background:transparent;")
         hl.addWidget(_shrinkable(self._activity_lbl), 1)
 
         self._tally_lbl = QLabel("")
-        self._tally_lbl.setFont(_mono_font())
+        self._tally_lbl.setFont(_mono_font(_HEADER_FONT_PX))
         self._tally_lbl.setStyleSheet(
             f"background:transparent;")
         hl.addWidget(_shrinkable(self._tally_lbl))
 
         self._mem_lbl = QLabel(memory_line())
-        self._mem_lbl.setFont(_mono_font())
+        self._mem_lbl.setFont(_mono_font(_HEADER_FONT_PX))
         self._mem_lbl.setStyleSheet(
             f"color:{_MUTED};background:transparent;")
         hl.addWidget(_shrinkable(self._mem_lbl))

@@ -1159,9 +1159,13 @@ quality and simplicity." The rules now:
   an all-advanced one (fstack) shows only the "advanced parameters" disclosure, the ONE
   declaration-driven fold that survives.
 - **The log is a FIXED slot** (v2: "Re-docking the logger doesn't work"): the header plus
-  `LogPanel.LINES` (3) lines of its own font (`slot_px()`), scrollable, always visible under
+  `LogPanel.LINES` lines of its own font (`slot_px()`), scrollable, always visible under
   the plate slot; no float, no collapse, no View > Log. Measured on Julio's 862 px screen:
   132 px of log left the layer list ~80 px, one of three raw channels behind a scrollbar.
+  LINES was 3; it is 5 since 2026-08-25 (Julio, live: "My log Height is a bit too small"),
+  paid for by a smaller header (a 10 px QFont one step below the 11 px body, 19 -> 16 px)
+  and smaller chips (`CHIP_PX` 22 at `CHIP_FONT_PX` 11, explicit QFonts, the grid
+  105 -> 92 px headless): the slot went 66 -> 89 px with the log body 39 -> 65 px.
   So the LIST has a minimum (`MosaicTree.rows_wanted`: a group header plus the largest
   group's channel rows, refit on every model reset) and a screen too short for both
   shrinks the PLATE slot (a navigator; `_PlateSlotBox` prefers 240 px, floor
