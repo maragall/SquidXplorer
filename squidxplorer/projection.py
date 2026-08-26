@@ -206,6 +206,53 @@ def _refuse_all_copied_through(reduce, per_channel: dict) -> None:
         )
 
 
+def operator_halo_px(reduce, nz: int) -> int:
+    """The lateral halo (px) *reduce* DECLARES an ROI window needs around it so the window's
+    interior equals the whole-field result: ``halo_px`` on the callable, an int or a callable
+    of the stack depth. Undeclared means 0 (a MIP's pixel depends on its own column only).
+    Negative is refused by name."""
+    declared = getattr(reduce, "halo_px", None)
+    if declared is None:
+        return 0
+    halo = int(declared(int(nz)) if callable(declared) else declared)
+    if halo < 0:
+        raise ValueError(
+            f"{getattr(reduce, '__name__', reduce)!r} declares halo_px={halo}, which is not a "
+            "width; a halo is 0 or more pixels.")
+    return halo
+
+
+def read_window(reader, region, fov, channel, z_level, time_point, window):
+    """One plane's ``(r0, r1, c0, c1)`` window: the reader's own ``read_window`` when it has
+    one (the Zarr reader reads only the covering chunks), else the plane read whole and
+    sliced. Either way the caller is handed the window and nothing else."""
+    r0, r1, c0, c1 = (int(v) for v in window)
+    own = getattr(reader, "read_window", None)
+    if callable(own):
+        plane = np.asarray(own(region, fov, channel, z_level, time_point, (r0, r1, c0, c1)))
+    else:
+        plane = np.asarray(reader.read(region, fov, channel, z_level, time_point))[r0:r1, c0:c1]
+    if plane.shape != (r1 - r0, c1 - c0):
+        raise ValueError(
+            f"region {region!r} FOV {fov} {channel!r} z={z_level}: the reader handed back "
+            f"shape {plane.shape} for window rows {r0}:{r1}, cols {c0}:{c1}")
+    return plane
+
+
+def _clamp_window(window, frame_shape) -> tuple:
+    """A ``(r0, r1, c0, c1)`` window inside *frame_shape*, refused by name when it is not."""
+    y, x = (int(v) for v in frame_shape)
+    try:
+        r0, r1, c0, c1 = (int(v) for v in window)
+    except (TypeError, ValueError):
+        raise ValueError(f"window must be (r0, r1, c0, c1) frame pixels, got {window!r}") from None
+    if not (0 <= r0 < r1 <= y and 0 <= c0 < c1 <= x):
+        raise ValueError(
+            f"window rows {r0}:{r1}, cols {c0}:{c1} does not fit inside the {y}x{x} frame "
+            "(a window is clamped to the frame BEFORE it reaches the engine).")
+    return r0, r1, c0, c1
+
+
 def project(planes: Iterable[np.ndarray]) -> np.ndarray:
     """Maximum-intensity project an iterable of planes into one plane, streaming and dtype-preserving."""
     it = iter(planes)
@@ -245,12 +292,18 @@ def project_well(
     consumes=None,
     time_point: Optional[int] = None,
     z_level: Optional[int] = None,
+    window: Optional[tuple] = None,
 ) -> np.ndarray:
     """Apply one operator to a FOV's planes for every channel and timepoint.
 
     The grouping comes from the operator's ``consumes`` declaration: a z-reducer collapses z
     to 1, a plane-op keeps z at full depth. ``time_point``/``z_level`` restrict the run to one
     timepoint / one acquisition plane (``z_level=`` is plane-ops only).
+
+    ``window=(r0, r1, c0, c1)`` (frame pixels) is ruling z, sub-FOV decon: the operator runs
+    on the window PLUS the halo it declares (:func:`operator_halo_px`, clamped to the frame),
+    reads only that (:func:`read_window`), and the halo is trimmed, so the output's xy IS the
+    window while z stays whole. Every FOV of an ROI run carries its own window.
     """
     meta = reader.metadata
     channels = [c["name"] for c in meta["channels"]]
@@ -294,7 +347,12 @@ def project_well(
     # z consumed -> one group per (t, c); z not consumed -> one group per (t, c, z).
     z_groups = [tuple(z_levels)] if "z" in consumes else [(z_level,) for z_level in z_levels]
     out_depth = len(z_levels) if keeps_depth else len(z_groups)
-    out = np.empty((len(timepoints), len(channels), out_depth, y, x), dtype=meta["dtype"])
+    if window is not None:
+        r0, r1, c0, c1 = _clamp_window(window, (y, x))
+        out_h, out_w = r1 - r0, c1 - c0
+    else:
+        out_h, out_w = y, x
+    out = np.empty((len(timepoints), len(channels), out_depth, out_h, out_w), dtype=meta["dtype"])
     # One specialisation per channel for operators declaring `for_channel`.
     path = acquisition_path(reader) if hasattr(reduce, "for_channel") else None
     per_channel = {c: bind_channel(reduce, path, c) for c in channels}
@@ -302,18 +360,34 @@ def project_well(
     for t_i, t_src in enumerate(timepoints):
         for c_i, channel in enumerate(channels):
             op = per_channel[channel]
+            if window is None:
+                read_h, read_w, trim = y, x, (slice(None), slice(None))
+
+                def _read(z, t, _ch=channel):
+                    return reader.read(region, fov, _ch, z, t)
+            else:
+                # The window plus THIS channel's halo (its own PSF), clamped to the frame:
+                # at an edge the windowed solve sees the same edge the whole-field one does.
+                halo = operator_halo_px(op, len(z_levels))
+                hr0, hr1 = max(0, r0 - halo), min(y, r1 + halo)
+                hc0, hc1 = max(0, c0 - halo), min(x, c1 + halo)
+                read_h, read_w = hr1 - hr0, hc1 - hc0
+                trim = (slice(r0 - hr0, r0 - hr0 + out_h), slice(c0 - hc0, c0 - hc0 + out_w))
+
+                def _read(z, t, _ch=channel, _w=(hr0, hr1, hc0, hc1)):
+                    return read_window(reader, region, fov, _ch, z, t, _w)
             for k, group in enumerate(z_groups):
-                planes = (reader.read(region, fov, channel, z_level, t_src) for z_level in group)
+                planes = (_read(z_level, t_src) for z_level in group)
                 if keeps_depth:
                     stack = np.asarray(op(planes))
-                    if stack.shape != (out_depth, y, x):
+                    if stack.shape != (out_depth, read_h, read_w):
                         raise ValueError(
                             f"{getattr(reduce, '__name__', reduce)!r} declares keeps_depth "
-                            f"and so owes a ({out_depth}, {y}, {x}) stack; it returned "
-                            f"shape {stack.shape}.")
-                    out[t_i, c_i, :] = stack
+                            f"and so owes a ({out_depth}, {read_h}, {read_w}) stack; it "
+                            f"returned shape {stack.shape}.")
+                    out[t_i, c_i, :] = stack[(slice(None),) + trim]
                 else:
-                    out[t_i, c_i, k] = op(planes)  # streamed z; bounded memory
+                    out[t_i, c_i, k] = np.asarray(op(planes))[trim]  # streamed z; bounded memory
     return out
 
 

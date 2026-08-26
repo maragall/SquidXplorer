@@ -55,7 +55,8 @@ def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=N
                       tiff: bool = False, on_well: Optional[Callable] = None,
                       on_error: Optional[Callable] = None,
                       stop: Optional[Callable[[], bool]] = None,
-                      preview_z_level: Optional[int] = None) -> DispatchResult:
+                      preview_z_level: Optional[int] = None,
+                      windows: Optional[dict] = None) -> DispatchResult:
     """Run ``operator`` once — persisted when ``save``, streamed-and-dropped when not.
 
     ``parameters`` is the single source of the run's ``operator_kwargs``: both branches take
@@ -75,6 +76,12 @@ def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=N
 
     operator_kwargs = dict(parameters or {}) or None
     skipped_regions: set = set()
+
+    # ROI windows (ruling z) are a PREVIEW's: a save writes whole fields, always.
+    if windows and save:
+        raise ValueError(
+            f"a save writes whole fields: windows on {len(windows)} field(s) would write a "
+            "cropped acquisition. Preview the ROI, or save without windows.")
 
     # A 2D tab's PREVIEW of a depth-keeping per-FOV operator runs on ONE plane, the one in
     # view (Julio, 2026-08-25: "if it's on 2d mode it runs it only on that one") - the same
@@ -127,7 +134,7 @@ def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=N
     else:
         landed, stopped = _RUNNER.run_preview(reader, spec, workers=workers, on_well=on_well,
                                               on_error=_on_error, stop=stop,
-                                              z_level=z_restrict)
+                                              z_level=z_restrict, windows=windows or None)
     if not stopped and stop is not None and stop():
         stopped = True                  # requested between the last field and here
     outcome, detail = verdict(landed, owed, len(skipped_regions), stopped)

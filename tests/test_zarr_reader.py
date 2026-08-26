@@ -174,6 +174,19 @@ def test_v05_plate_round_trips_pixels_exactly(tmp_path):
             np.testing.assert_array_equal(got, data[0, c_i, 0])
 
 
+def test_read_window_serves_the_window_natively_and_matches_the_plane(tmp_path):
+    """Ruling z: an ROI-scoped run reads its box plus a halo; the Zarr reader slices the
+    array itself (only the covering chunks), and the window equals the plane's own slice."""
+    arrays = _write_v05_plate(tmp_path / "out")
+    reader = open_reader(tmp_path / "out")
+    names = [c["name"] for c in reader.metadata["channels"]]
+    (region, fov), data = next(iter(arrays.items()))
+    got = reader.read_window(region, fov, names[0], 0, 0, (2, 7, 1, 6))
+    assert got.shape == (5, 5) and got.dtype == np.uint16
+    np.testing.assert_array_equal(got, data[0, 0, 0][2:7, 1:6])
+    np.testing.assert_array_equal(got, reader.read(region, fov, names[0], 0)[2:7, 1:6])
+
+
 def test_v05_fixture_is_a_valid_ngff_plate(tmp_path):
     """The layout we read is the one the official OME schema accepts, not an invented one."""
     pytest.importorskip("ome_zarr_models")

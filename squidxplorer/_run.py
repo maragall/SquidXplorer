@@ -22,7 +22,8 @@ class OperatorRun:
 
     def __init__(self, *, key: str, layer_key: str, label: Optional[str],
                  action: Optional[str], dest: str, address: Any, requester: Any,
-                 is_partial: bool, t0: float, scope: Optional[dict] = None):
+                 is_partial: bool, t0: float, scope: Optional[dict] = None,
+                 windows: Optional[dict] = None):
         self.key = key
         self.layer_key = layer_key    # the plate layer this run's tiles stream into
         self.label = label            # the bare action label reported to the requester
@@ -38,6 +39,13 @@ class OperatorRun:
         #: The run's `{region: [fov, ...]}` when it is scoped to fields (an ROI preview), else
         #: None: what each region's accumulator OWES (Julio, 2026-08-25, sub-FOV decon).
         self.scope: Optional[dict] = dict(scope) if scope else None
+        #: ``{(region, fov): (r0, r1, c0, c1)}`` for an ROI-windowed preview (ruling z), else {}.
+        self.windows: dict = {(str(r), int(f)): tuple(w) for (r, f), w in (windows or {}).items()}
+
+    def region_windows(self, region: str) -> Optional[dict]:
+        """``{fov: window}`` of *region*'s windowed fields, or None for a whole-frame run."""
+        found = {f: w for (r, f), w in self.windows.items() if r == str(region)}
+        return found or None
 
     def settle_stranded(self, deliver: Callable[[str, Any], None]) -> list:
         """The run has ended: resolve every region whose result was still being accumulated.

@@ -855,24 +855,32 @@ class RegionViewer(QMainWindow):
                             self.window_id, type(exc).__name__, exc)
 
     def _run_scope(self):
-        """WHERE a run from this window goes: its regions, narrowed to the ROI's own FOVs."""
+        """WHERE a run from this window goes: ``(regions, windows)``: its regions narrowed to
+        the ROI's own FOVs, and (ruling z) the ROI as a window in each of those frames, so
+        the engine reads and solves the box plus a halo rather than whole fields."""
         regions = list(self._regions)
         if self._roi_bbox is None or not regions:
-            return regions
-        from squidxplorer._mosaic_source import fovs_overlapping_bbox
+            return regions, None
+        from squidxplorer._mosaic_source import fov_windows_px, fovs_overlapping_bbox
 
         scoped: "dict[str, list[int]]" = {}
+        windows: dict = {}
         for region in regions:
             fovs = fovs_overlapping_bbox(self._meta or {}, region, self._roi_bbox)
             if not fovs:
-                return regions
+                return regions, None
             scoped[region] = fovs
+            for fov, window in fov_windows_px(self._meta or {}, region, self._roi_bbox).items():
+                if fov in fovs:
+                    windows[(region, fov)] = window
         total = sum(len((self._meta or {}).get("fovs_per_region", {}).get(r) or []) for r in regions)
         picked = sum(len(v) for v in scoped.values())
-        if picked >= total:
-            return regions
+        if any((r, f) not in windows for r, fs in scoped.items() for f in fs):
+            windows = {}                          # a field the box touches but cannot window: whole
+        if picked >= total and not windows:
+            return regions, None
         self._say(f"ROI: running on {picked} of {total} field(s) - the ones your box touches.")
-        return scoped
+        return scoped, (windows or None)
 
     def _plate_operator_kwargs(self, key: str) -> dict:
         """What *key*'s panel on the plate is currently set to. ``{}`` = its declared defaults."""
@@ -1227,7 +1235,8 @@ class RegionViewer(QMainWindow):
 
     def _preview_view_operator(self) -> None:
         """PREVIEW: the selected operator on THIS view's regions; nothing is written."""
-        self._launch_operator(save=False, regions=self._run_scope())
+        regions, windows = self._run_scope()
+        self._launch_operator(save=False, regions=regions, windows=windows)
 
     def _run_plate_operator(self) -> None:
         """RUN ON PLATE: the one SAVE path - the plate selection (or the whole plate), to disk.
@@ -1241,7 +1250,7 @@ class RegionViewer(QMainWindow):
             getattr(getattr(plate, "_bulk_all_box", None), "isChecked", lambda: False)())
         self._launch_operator(save=True, regions=None, requester=None if bulk else self)
 
-    def _launch_operator(self, *, save: bool, regions, requester="self") -> None:
+    def _launch_operator(self, *, save: bool, regions, requester="self", windows=None) -> None:
         """The one launch: Preview and Run on plate differ only in scope and `save`."""
         if self._run_operator is None:
             self._say("the operator engine isn't connected to this window.")
@@ -1278,7 +1287,8 @@ class RegionViewer(QMainWindow):
                                # A depth-keeping preview must show THE PLANE THIS VIEW IS ON
                                # (Julio, 2026-08-25), so the run carries the view's own z.
                                z_level=self._z_slider_index(),
-                               preview_z_level=preview_z)
+                               preview_z_level=preview_z,
+                               windows=windows)
             # No echo: the log.info line above is the structured twin, and the banner
             # strip that showed the echo is retired (2026-08-25).
         except Exception as exc:                          # noqa: BLE001 - named to the window

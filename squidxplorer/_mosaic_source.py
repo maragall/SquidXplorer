@@ -742,6 +742,34 @@ def fovs_overlapping_bbox(meta: dict, region: str,
     return hit or None
 
 
+def fov_windows_px(meta: dict, region: str, bbox_um) -> "dict[int, tuple[int, int, int, int]]":
+    """``{fov: (r0, r1, c0, c1)}``: *bbox_um* as a window in EACH touched frame's own pixels
+    (ruling z, sub-FOV decon). The same boxes as :func:`fovs_overlapping_bbox` (top-left
+    convention), floored/ceiled to whole pixels and clamped to the frame; a FOV the box does
+    not touch is absent, and ``{}`` when nothing is touched or the geometry is unknown."""
+    if bbox_um is None:
+        return {}
+    try:
+        boxes = mosaic_fov_bboxes_um(meta, region)
+    except (KeyError, ValueError, TypeError):
+        return {}
+    p = float(meta["pixel_size_um"])
+    fh, fw = (int(v) for v in meta["frame_shape"])
+    rx0, ry0, rx1, ry1 = (float(v) for v in bbox_um)
+    rx0, rx1 = min(rx0, rx1), max(rx0, rx1)
+    ry0, ry1 = min(ry0, ry1), max(ry0, ry1)
+    out: "dict[int, tuple[int, int, int, int]]" = {}
+    eps = 1e-6                                   # a millionth of a pixel is float noise, not a pixel
+    for fov, (fx0, fy0, _fx1, _fy1) in boxes.items():
+        c0 = max(0, int(np.floor((rx0 - fx0) / p + eps)))
+        c1 = min(fw, int(np.ceil((rx1 - fx0) / p - eps)))
+        r0 = max(0, int(np.floor((ry0 - fy0) / p + eps)))
+        r1 = min(fh, int(np.ceil((ry1 - fy0) / p - eps)))
+        if r1 > r0 and c1 > c0:
+            out[int(fov)] = (r0, r1, c0, c1)
+    return out
+
+
 def fov_pixel_at_point(meta: dict, region: str, x_um: float,
                        y_um: float) -> "Optional[tuple[int, float, float]]":
     """``(fov, py, px)`` — which FOV a stage-micrometre point is in, and where inside THAT FRAME

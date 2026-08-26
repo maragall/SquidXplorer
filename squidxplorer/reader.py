@@ -1513,11 +1513,15 @@ class _Multiscale:
         """True for Squid's non-standard 6D ``acquisition.zarr`` — a leading ``fov`` axis."""
         return self.axis_names[:1] == ["fov"]
 
-    def index(self, shape, time_point: int, c: int, z_level: int, fov: int = 0) -> tuple:
-        """The tensorstore index tuple selecting the single ``(y, x)`` plane at (t, c, z[, fov])."""
+    def index(self, shape, time_point: int, c: int, z_level: int, fov: int = 0,
+              window=None) -> tuple:
+        """The tensorstore index tuple selecting the single ``(y, x)`` plane at (t, c, z[, fov]),
+        or its ``(r0, r1, c0, c1)`` *window*."""
         picks = {"t": time_point, "c": c, "z": z_level, "fov": fov}
+        r0, r1, c0, c1 = window if window is not None else (None, None, None, None)
+        spans = {"y": slice(r0, r1), "x": slice(c0, c1)}
         return tuple(
-            slice(None) if n in ("y", "x") else picks.get(n, 0)
+            spans[n] if n in spans else picks.get(n, 0)
             for n in self.axis_names[: len(shape)]
         )
 
@@ -1829,6 +1833,33 @@ class SquidZarrReader(_PadPartialMixin):
             if zeros is not None:
                 return zeros
         idx = ms.index(arr.shape, time_point, self._channel_index(channel), z_level, fov=int(fov))
+        plane = np.asarray(arr[idx].read().result())
+        return _validate_plane(plane, ms.array_path)
+
+    def read_window(self, region, fov, channel, z_level, time_point, window):
+        """One plane's ``(r0, r1, c0, c1)`` window, reading only the chunks under it (ruling
+        z: an ROI-scoped run reads its box plus a halo, not the frame). A padded slot's
+        window is zeros like the plane would be."""
+        r0, r1, c0, c1 = (int(v) for v in window)
+        meta = self.metadata
+        z_level, time_point = int(z_level), int(time_point)
+        if not 0 <= z_level < meta["n_z"]:
+            raise IndexError(f"z={z_level} out of range (n_z={meta['n_z']}).")
+        if not 0 <= time_point < meta["n_t"]:
+            raise IndexError(f"t={time_point} out of range (n_t={meta['n_t']}).")
+        if (str(region), int(fov)) not in self._discover():
+            zeros = self._padded_zeros(str(region), int(fov), str(channel), z_level, time_point)
+            if zeros is not None:
+                return zeros[r0:r1, c0:c1]
+        group = self._field(region, fov)
+        arr = self._array(group)
+        ms = self._multiscale(group)
+        if z_level >= ms.size(arr.shape, "z") or time_point >= ms.size(arr.shape, "t"):
+            zeros = self._padded_zeros(str(region), int(fov), str(channel), z_level, time_point)
+            if zeros is not None:
+                return zeros[r0:r1, c0:c1]
+        idx = ms.index(arr.shape, time_point, self._channel_index(channel), z_level,
+                       fov=int(fov), window=(r0, r1, c0, c1))
         plane = np.asarray(arr[idx].read().result())
         return _validate_plane(plane, ms.array_path)
 

@@ -2433,7 +2433,8 @@ class PlateWindow(QMainWindow):
                      regions: Optional[list] = None, save: bool = True,
                      operator_kwargs: Optional[dict] = None,
                      requester: Optional[Any] = None,
-                     z_level: int = 0, preview_z_level: Optional[int] = None):
+                     z_level: int = 0, preview_z_level: Optional[int] = None,
+                     windows: Optional[dict] = None):
         """Run a plane operator (MIP / reference) over the plate, or over a subset of it.
 
         ``requester`` IS THE COMPLETION CALLBACK, and its absence was the root fault Julio
@@ -2540,6 +2541,11 @@ class PlateWindow(QMainWindow):
             scope = f"{len(regions)} selected well(s)"
         else:
             scope = f"{len(regions)} well" + ("s" if len(regions) != 1 else "")
+        # ROI windows (ruling z) ride ONLY on a field-mapped PREVIEW: a save writes whole fields.
+        if windows and (save or not isinstance(regions, dict)):
+            self._readout.setText(
+                "ROI windows need a preview over {region: [fov, ...]}; a save writes whole fields")
+            return
 
         # CONFIRM THE RESOLVED TARGET SET, by name, before the QThread starts (Defect 2).
         # The selector names the RULE ("selected wells"); this names the ANSWER. They differ
@@ -2640,7 +2646,8 @@ class PlateWindow(QMainWindow):
         worker = _OperatorWorker(key, self._reader, self._meta, self._fov_index,
                                  str(out_dir) if out_dir else "", regions=regions, save=save,
                                  n_fovs=None, operator_kwargs=operator_kwargs,
-                                 z_level=z_level, preview_z_level=preview_z_level)
+                                 z_level=z_level, preview_z_level=preview_z_level,
+                                 windows=windows)
         self._overview.set_mosaic_boxes(worker.mosaic_boxes)
         # A re-run must not composite on top of the LAST run's pixels: with a mosaic, a run that
         # lands fewer FOVs would otherwise leave the previous run's fields standing in the same
@@ -2705,7 +2712,8 @@ class PlateWindow(QMainWindow):
             # Is this run only PART of each well? A mapping means explicit fields (see `_on_tile`).
             is_partial=isinstance(regions, dict),
             t0=t0,
-            scope=regions if isinstance(regions, dict) else None)
+            scope=regions if isinstance(regions, dict) else None,
+            windows=windows)
         self._tell_requester(requester, "operator_started", label)
         self.log.started(self._run.action, address=self._run.address)
         self._run_readout(f"● {label} · {scope}{dest} …")
@@ -2920,6 +2928,8 @@ class PlateWindow(QMainWindow):
                 region_operator=is_region_operator(operator_name(op)),
                 # A scoped run ({region: [fov, ...]}) owes ONLY its own fields (2026-08-25).
                 fovs=(run.scope or {}).get(str(region)),
+                # ...and a windowed one places each field's window at its own corner.
+                windows=run.region_windows(str(region)),
             )
             accs[str(region)] = acc
         try:

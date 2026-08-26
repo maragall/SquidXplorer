@@ -157,6 +157,32 @@ def make_psf(optics: OpticsParams) -> np.ndarray:
     return np.ascontiguousarray(psf, dtype=np.float32)
 
 
+#: The halo an ROI-scoped solve pads its window with: the PSF's LATERAL SUPPORT, the radius
+#: holding HALO_ENERGY of the z-integrated energy of the same ``make_psf`` the solve uses,
+#: floored at HALO_MIN_PX (ruling z, Julio 2026-08-25, sub-FOV decon). Measured before the
+#: rule was written, on 25 point sources blurred with the real PSF at G7's optics (nz 5 and
+#: 15, CPU and MPS): the 99.9% radius is 9.9 px, halo 0 differs from the whole-field solve by
+#: up to 5 counts, every halo >= 4 px is within 1 count. ``tests/test_sub_fov_decon.py`` pins.
+HALO_ENERGY: float = 0.999
+HALO_MIN_PX: int = 8
+
+
+@lru_cache(maxsize=_PSF_CACHE_SIZE)
+def lateral_halo_px(optics: OpticsParams) -> int:
+    """The lateral radius (px) holding :data:`HALO_ENERGY` of the modelled PSF's energy, at
+    least :data:`HALO_MIN_PX`: what a windowed solve pads with so its interior equals the
+    whole-field solve."""
+    lateral = make_psf(optics).sum(axis=0)
+    cy, cx = np.unravel_index(int(np.argmax(lateral)), lateral.shape)
+    yy, xx = np.indices(lateral.shape)
+    radius = np.hypot(yy - cy, xx - cx).ravel()
+    order = np.argsort(radius)
+    energy = np.cumsum(lateral.ravel()[order])
+    energy /= float(energy[-1]) or 1.0
+    at = radius[order][min(int(np.searchsorted(energy, HALO_ENERGY)), radius.size - 1)]
+    return max(HALO_MIN_PX, int(np.ceil(float(at))))
+
+
 def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool):
     """One call into RL: device selection, optional FFT-length padding, and an all-zero result guard.
 
@@ -487,6 +513,15 @@ def decon_op(
     _decon.keeps_depth = True
     if optics is None:
         _decon.for_channel = lambda path, channel: _decon_for_channel(path, channel, iterations)
+    else:
+        # The declaration an ROI-scoped run reads (``projection.operator_halo_px``): the PSF's
+        # lateral support AT THE STACK'S DEPTH, since the PSF is bound to it in the solve.
+        def _halo(nz: int) -> int:
+            bound = optics if optics.nz == int(nz) else OpticsParams(
+                optics.na, optics.wavelength_um, optics.dxy_um, optics.dz_um, int(nz), optics.ni)
+            return lateral_halo_px(bound)
+
+        _decon.halo_px = _halo
     return _decon
 
 

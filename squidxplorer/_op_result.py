@@ -21,12 +21,20 @@ class RegionResultAccumulator:
 
     def __init__(self, op: str, region: str, meta: Mapping, channels: Sequence[str],
                  *, region_operator: bool = False,
-                 fovs: "Sequence[int] | None" = None) -> None:
+                 fovs: "Sequence[int] | None" = None,
+                 windows: "Mapping[int, tuple] | None" = None) -> None:
         self.op = str(op)
         self.region = str(region)
         self.channels = tuple(str(c) for c in channels)
         self._region_operator = bool(region_operator)
         self._planes: dict[int, np.ndarray] = {}
+        # Ruling z (sub-FOV decon): a windowed run's field is ``(C[, Nz], h, w)`` for its own
+        # ``(r0, r1, c0, c1)`` frame window, placed at the FOV's offset PLUS the window's corner
+        # (the same ``fov_offsets_px`` the whole-frame fuser uses, one placement rule), and the
+        # result's footprint is the windows' union, not the region's.
+        self._windows: dict[int, tuple] = {
+            int(f): tuple(int(v) for v in w) for f, w in (windows or {}).items()}
+        self._window_origin: tuple = (0, 0)      # (row, col) of the union in the region mosaic
         # THE RUN'S OWN SCOPE (Julio, 2026-08-25, "Can't run decon sub FOV?"): an ROI preview
         # runs `{region: [fov, ...]}` and owes exactly those fields. The books used to owe every
         # FOV of the region off the metadata, so a scoped run was refused as "1 of 9 FOV(s)"
@@ -45,15 +53,21 @@ class RegionResultAccumulator:
                               ((meta.get("fovs_per_region") or {}).get(region) or [])]
 
     def add(self, fov: int, planes: Any) -> None:
-        """Record one unit's output: ``(C, Y, X)``, or ``(C, Nz, Y, X)`` from a region operator."""
+        """Record one unit's output: ``(C, Y, X)``, or ``(C, Nz, Y, X)`` at full depth (a
+        region operator's fused stack, or a per-FOV result a 3D tab asked for whole)."""
         arr = np.asanyarray(planes)
-        allowed = (3, 4) if self._region_operator else (3,)
-        if arr.ndim not in allowed:
-            expected = ("a (C, Y, X) or (C, Nz, Y, X) stack" if self._region_operator
-                        else "a (C, Y, X) stack")
+        if arr.ndim not in (3, 4):
             raise ValueError(
-                f"{self.op!r} region {self.region!r} FOV {fov}: expected {expected}, "
-                f"got shape {arr.shape}")
+                f"{self.op!r} region {self.region!r} FOV {fov}: expected a (C, Y, X) or "
+                f"(C, Nz, Y, X) stack, got shape {arr.shape}")
+        window = self._windows.get(int(fov))
+        if window is not None:
+            r0, r1, c0, c1 = window
+            if tuple(arr.shape[-2:]) != (r1 - r0, c1 - c0):
+                raise ValueError(
+                    f"{self.op!r} region {self.region!r} FOV {fov}: the run's window is "
+                    f"{r1 - r0}x{c1 - c0} px but the result is {arr.shape[-2]}x{arr.shape[-1]}; "
+                    "refusing to place pixels whose footprint is not the window's")
         if arr.shape[0] != len(self.channels):
             raise ValueError(
                 f"{self.op!r} region {self.region!r} FOV {fov}: result has {arr.shape[0]} "
@@ -92,6 +106,8 @@ class RegionResultAccumulator:
         if self._region_operator:
             stack = next(iter(self._planes.values()))
             planes = [np.asanyarray(stack[i]) for i in range(len(self.channels))]
+        elif self._windows:
+            planes = [self._fuse_windows(i) for i in range(len(self.channels))]
         else:
             planes = [self._fuse(i) for i in range(len(self.channels))]
         if not planes:
@@ -111,24 +127,57 @@ class RegionResultAccumulator:
         )
 
     def _fuse(self, c_idx: int) -> np.ndarray:
-        """Place this channel's FOVs with the RAW mosaic's own placement code."""
+        """Place this channel's FOVs with the RAW mosaic's own placement code; a stack with
+        depth is fused one z plane at a time and stacked back ``(Nz, H, W)``."""
         from squidxplorer._mosaic_source import fuse_region_mosaic
 
         planes = self._planes
+        depth = max((int(a.shape[1]) if a.ndim == 4 else 1) for a in planes.values())
 
         class _PlaneReader:
             @staticmethod
             def read(region, fov, channel, z_level=0, time_point=0):
                 stack = planes.get(int(fov))
-                return None if stack is None else stack[c_idx]
+                if stack is None:
+                    return None
+                return stack[c_idx, z_level] if stack.ndim == 4 else stack[c_idx]
 
-        fused = fuse_region_mosaic(_PlaneReader(), self._meta, self.region,
-                                   self.channels[c_idx])
-        if fused is None:
+        fused = [fuse_region_mosaic(_PlaneReader(), self._meta, self.region,
+                                    self.channels[c_idx], z_level=z) for z in range(depth)]
+        if any(f is None for f in fused):
             raise ValueError(
                 f"{self.op!r} region {self.region!r}: the acquisition carries no stage "
                 f"positions / pixel size, so its FOVs cannot be placed into a mosaic")
-        return fused[0]
+        return fused[0][0] if depth == 1 else np.stack([f[0] for f in fused])
+
+    def _fuse_windows(self, c_idx: int) -> np.ndarray:
+        """Place this channel's WINDOWS: each at its FOV's offset plus the window's corner,
+        later-overwrites-earlier like the preview fuser, over the windows' union only."""
+        from squidxplorer._placement import fov_offsets_px
+
+        meta = self._meta
+        fovs = [f for f in self._expected if f in self._planes]
+        offsets = fov_offsets_px(meta.get("fov_positions_um") or {}, self.region, fovs,
+                                 meta.get("pixel_size_um"))
+        tops = {f: (offsets[f][0] + self._windows[f][0], offsets[f][1] + self._windows[f][2])
+                for f in fovs}
+        r_min = min(t[0] for t in tops.values())
+        c_min = min(t[1] for t in tops.values())
+        r_max = max(tops[f][0] + (self._windows[f][1] - self._windows[f][0]) for f in fovs)
+        c_max = max(tops[f][1] + (self._windows[f][3] - self._windows[f][2]) for f in fovs)
+        self._window_origin = (int(r_min), int(c_min))
+        depth = max((int(a.shape[1]) if a.ndim == 4 else 1) for a in self._planes.values())
+        first = next(iter(self._planes.values()))
+        shape = (depth, r_max - r_min, c_max - c_min) if depth > 1 else (r_max - r_min, c_max - c_min)
+        out = np.zeros(shape, dtype=first.dtype)
+        for f in fovs:
+            plane = self._planes[f][c_idx]
+            if depth > 1 and plane.ndim == 2:
+                plane = plane[None]
+            top, left = tops[f][0] - r_min, tops[f][1] - c_min
+            h, w = plane.shape[-2:]
+            out[..., top:top + h, left:left + w] = plane
+        return out
 
     def _bbox(self):
         """The stage-µm footprint of THESE pixels."""
@@ -138,4 +187,26 @@ class RegionResultAccumulator:
             placement = getattr(next(iter(self._planes.values())), "placement", None)
             if placement is not None:
                 return placement.bbox_um
-        return mosaic_bbox_um(self._meta, self.region)
+        box = mosaic_bbox_um(self._meta, self.region)
+        if not self._windows or box is None:
+            return box
+        # The windows' union inside the scoped fields' mosaic (fused already, so the origin
+        # is known); the same origin `mosaic_bbox_um` and `fov_offsets_px` share.
+        px = float(self._meta["pixel_size_um"])
+        r0, c0 = self._window_origin
+        fovs = [f for f in self._expected if f in self._planes]
+        h = max(self._fuse_span(f, 0) for f in fovs) - r0
+        w = max(self._fuse_span(f, 1) for f in fovs) - c0
+        x0, y0 = box[0] + c0 * px, box[1] + r0 * px
+        return (x0, y0, x0 + w * px, y0 + h * px)
+
+    def _fuse_span(self, fov: int, axis: int) -> int:
+        """The far edge (row or col, region-mosaic px) of *fov*'s window."""
+        from squidxplorer._placement import fov_offsets_px
+
+        meta = self._meta
+        fovs = [f for f in self._expected if f in self._planes]
+        off = fov_offsets_px(meta.get("fov_positions_um") or {}, self.region, fovs,
+                             meta.get("pixel_size_um"))[fov]
+        r0, r1, c0, c1 = self._windows[fov]
+        return off[0] + r1 if axis == 0 else off[1] + c1

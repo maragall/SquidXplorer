@@ -379,6 +379,17 @@ def operator_reduces_depth(name: str) -> bool:
     return "z" in op.consumes and not bool(getattr(op.fn, "keeps_depth", False))
 
 
+def run_halo_px(reader, name: str, operator_kwargs: Optional[dict], nz: int) -> int:
+    """The halo an ROI run of *name* pads its windows with: the max over the acquisition's
+    channels of each channel-bound operator's declared ``halo_px`` (0 when none declares)."""
+    from squidxplorer.projection import acquisition_path, bind_channel, operator_halo_px
+
+    fn = bind_operator(name, operator_kwargs)
+    channels = [c["name"] for c in reader.metadata["channels"]]
+    path = acquisition_path(reader) if hasattr(fn, "for_channel") else None
+    return max((operator_halo_px(bind_channel(fn, path, c), nz) for c in channels), default=0)
+
+
 def bind_operator(name: str, operator_kwargs: Optional[dict] = None) -> OperatorFn:
     """Resolve *name* and apply *operator_kwargs*, raising on an unknown name or parameter."""
     return _resolve_operator(name).bind(operator_kwargs)
@@ -434,6 +445,7 @@ def run_plate(
     on_error=None,
     operator_kwargs: Optional[dict] = None,
     z_level: Optional[int] = None,
+    windows: Optional[dict] = None,
 ) -> Iterator[tuple[str, int, np.ndarray]]:
     """Run *operator* over every selected well, streaming ``(region, fov, image)`` results.
 
@@ -444,12 +456,20 @@ def run_plate(
     region arm — a FOV subset of a region is spelled ``regions={region: [fov, ...]}``.
     ``z_level=`` restricts the per-FOV loop to one acquisition plane (``project_well``'s own
     knob: plane-ops and depth-keeping z-consumers only) and is refused on the region arm.
+    ``windows={(region, fov): (r0, r1, c0, c1)}`` runs each named field on that frame-pixel
+    window plus the operator's declared halo (ruling z, sub-FOV decon); refused on the
+    region arm, whose fusion needs whole frames.
     """
     if is_region_operator(operator):
         if z_level is not None:
             raise ValueError(
                 f"a region operator's z handling is its z_operator: z_level={z_level!r} would "
                 "silently crop the fusion. Pass z_operator= in operator_kwargs instead.")
+        if windows:
+            raise ValueError(
+                f"a region operator fuses whole frames: a window on {len(windows)} field(s) "
+                "would register and blend cropped tiles. Select FOVs with "
+                "regions={region: [fov, ...]} instead.")
         from squidxplorer._stitch import _stitch_plate
 
         if n_fovs is not N_FOVS_LOOP_DEFAULT and n_fovs is not None:
@@ -465,7 +485,7 @@ def run_plate(
                           n_fovs=1 if n_fovs is N_FOVS_LOOP_DEFAULT else n_fovs,
                           workers=workers, operator=operator,
                           on_error=on_error, regions=regions, operator_kwargs=operator_kwargs,
-                          z_level=z_level)
+                          z_level=z_level, windows=windows)
 
 
 def _project_plate(
@@ -478,6 +498,7 @@ def _project_plate(
     regions=None,
     operator_kwargs: Optional[dict] = None,
     z_level: Optional[int] = None,
+    windows: Optional[dict] = None,
 ) -> Iterator[tuple[str, int, np.ndarray]]:
     """Project every selected well in parallel, streaming ``(region, fov, image)`` results.
 
@@ -496,6 +517,7 @@ def _project_plate(
             "(reader, region, fovs), which is not what the per-FOV loop hands an operator. Run "
             f"it with squidxplorer.run_plate(reader, operator={operator!r}).")
     fn = bind_operator(operator, operator_kwargs)
+    by_field = {(str(r), int(f)): w for (r, f), w in (windows or {}).items()}
 
     # Warm the reader's lazy state single-threaded before fan-out.
     meta = reader.metadata
@@ -514,7 +536,8 @@ def _project_plate(
             except StopIteration:
                 return False
             future = pool.submit(project_well, reader, region, fov,
-                                 reduce=fn, consumes=op.consumes, z_level=z_level)
+                                 reduce=fn, consumes=op.consumes, z_level=z_level,
+                                 window=by_field.get((str(region), int(fov))))
             in_flight[future] = (region, fov)
             return True
 

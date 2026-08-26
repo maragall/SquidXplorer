@@ -50,9 +50,12 @@ class _OperatorWorker(QThread):
 
     def __init__(self, operator: str, reader, meta, fov_index: dict, out_dir: str,
                  regions=None, save: bool = True, n_fovs=1, operator_kwargs=None,
-                 z_level: int = 0, preview_z_level=None):
+                 z_level: int = 0, preview_z_level=None, windows=None):
         super().__init__()
         self._operator = operator
+        #: ``{(region, fov): (r0, r1, c0, c1)}``, an ROI preview's own windows (ruling z).
+        self._windows = {(str(r), int(f)): tuple(int(v) for v in w)
+                         for (r, f), w in (windows or {}).items()}
         # The z plane the DISPLAY gets from a depth-keeping result: the requesting view's own
         # in-view z (Julio, 2026-08-25: "decon runs on a z-level that's not in view"). Clamped
         # per result in _result_pixels; 0 for a run no view asked for.
@@ -195,9 +198,31 @@ class _OperatorWorker(QThread):
     def progress_report(self):
         return self._progress.report()
 
+    def _roi_line(self) -> None:
+        """ONE INFO line per windowed run: the window, the halo it is padded with, the planes."""
+        from squidxplorer._engine import operator_reduces_depth, run_halo_px
+
+        nz = len(self._meta.get("z_levels") or [0])
+        reduces = operator_reduces_depth(self._operator)
+        solved_z = 1 if (self._preview_z is not None and not reduces) else nz
+        planes = 1 if reduces else solved_z
+        try:
+            halo = run_halo_px(self._reader, self._operator, self._operator_kwargs, solved_z)
+        except Exception as exc:                  # noqa: BLE001 - the run will name it itself
+            halo = f"? ({type(exc).__name__})"
+        if len(self._windows) == 1:
+            (r0, r1, c0, c1), = self._windows.values()
+            what = f"{c1 - c0}x{r1 - r0} px window"
+        else:
+            total = sum((r1 - r0) * (c1 - c0) for r0, r1, c0, c1 in self._windows.values())
+            what = f"{len(self._windows)} windows, {total} px"
+        log.info("ROI %s: %s + %s px halo, %d plane(s)", self._operator, what, halo, planes)
+
     def _run_body(self, _run_metrics):
         # say 0 of N before any work, so the bar is determinate from its first frame
         self.runProgress.emit(self._progress.report())
+        if self._windows:
+            self._roi_line()
         try:
             # the ONE save-vs-preview dispatch; this worker only adds Qt signals around it
             result = run_operator_once(
@@ -207,7 +232,7 @@ class _OperatorWorker(QThread):
                 workers=1 if self._region_op else _VIEWER_WORKERS,
                 parameters=self._operator_kwargs, tiff=False,
                 on_well=self._on_well, on_error=self._on_error, stop=self._stop.is_set,
-                preview_z_level=self._preview_z)
+                preview_z_level=self._preview_z, windows=self._windows or None)
             if result.stopped:
                 _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
                 return  # window closing / re-opening; drop out cleanly (no final/written emit)
