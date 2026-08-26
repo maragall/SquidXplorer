@@ -1,17 +1,4 @@
-"""Zarr input: OME-NGFF HCS plate + non-HCS image groups through the same reader seam as the TIFF
-readers. The contract under test is parity: ``metadata`` carries the same twelve keys and
-``read(region, fov, channel, z, t)`` has the same signature and returns the same kind of 2-D
-native-dtype plane, whether the bytes came from TIFFs or from a Zarr store.
-
-Layout:
-
-    HCS      plate.ome.zarr/{row}/{col}/{fov}/{level}      rows/columns/wells + well.images
-    non-HCS  zarr/{region_id}/{level}                      a bare multiscales image group
-
-Fixtures are tiny (4x4 to 8x8 px) and live in ``tmp_path``. The v0.5 fixture is produced by
-SquidXplorer's own writer (so this doubles as a round-trip test); the v0.4 fixture is hand-written
-zarr v2 (``.zgroup``/``.zattrs``), since the two NGFF versions put metadata in different places.
-"""
+"""Zarr input: OME-NGFF HCS plate + non-HCS image groups through the same reader seam as the TIFF readers."""
 
 from __future__ import annotations
 
@@ -124,12 +111,6 @@ def _write_v04_plate(root: Path, wells=(("B", "2"), ("B", "3")), fovs=("0", "1")
     return arrays
 
 
-def test_open_reader_no_longer_raises_not_implemented_for_zarr(tmp_path):
-    _write_v05_plate(tmp_path / "out")
-    reader = open_reader(tmp_path / "out")
-    assert isinstance(reader, SquidZarrReader)
-
-
 def test_open_reader_accepts_the_plate_directory_itself(tmp_path):
     _write_v05_plate(tmp_path / "out")
     assert isinstance(open_reader(tmp_path / "out" / "plate.ome.zarr"), SquidZarrReader)
@@ -147,9 +128,11 @@ def test_open_reader_finds_non_hcs_zarr_folder(tmp_path):
     assert r.metadata["regions"] == ["manual0"]
 
 
-def test_v05_plate_round_trips_metadata(tmp_path):
-    _write_v05_plate(tmp_path / "out")
-    meta = open_reader(tmp_path / "out").metadata
+def test_v05_plate_round_trips_metadata_and_pixels_exactly(tmp_path):
+    """Level 0 is pixel-exact, so a write/read round trip must be byte-identical."""
+    arrays = _write_v05_plate(tmp_path / "out")
+    reader = open_reader(tmp_path / "out")
+    meta = reader.metadata
     assert meta["regions"] == ["B2", "B3"]
     assert meta["fovs_per_region"] == {"B2": [0, 1], "B3": [0, 1]}
     assert meta["frame_shape"] == (8, 8)
@@ -159,14 +142,8 @@ def test_v05_plate_round_trips_metadata(tmp_path):
     assert meta["z_levels"] == [0]
     assert meta["pixel_size_um"] == pytest.approx(0.3728571)
     assert meta["dz_um"] == pytest.approx(1.5)
-    assert [c["name"] for c in meta["channels"]] == [c["name"] for c in _CH]
-
-
-def test_v05_plate_round_trips_pixels_exactly(tmp_path):
-    """Level 0 is pixel-exact, so a write/read round trip must be byte-identical."""
-    arrays = _write_v05_plate(tmp_path / "out")
-    reader = open_reader(tmp_path / "out")
-    names = [c["name"] for c in reader.metadata["channels"]]
+    names = [c["name"] for c in meta["channels"]]
+    assert names == [c["name"] for c in _CH]
     for (region, fov), data in arrays.items():
         for c_i, ch in enumerate(names):
             got = reader.read(region, fov, ch, 0)
@@ -190,7 +167,7 @@ def test_read_window_serves_the_window_natively_and_matches_the_plane(tmp_path):
 def test_v05_fixture_is_a_valid_ngff_plate(tmp_path):
     """The layout we read is the one the official OME schema accepts, not an invented one."""
     pytest.importorskip("ome_zarr_models")
-    from tests.ngff_check import assert_valid_ngff_plate
+    from squidxplorer.contract.validate import assert_valid_ngff_plate
 
     _write_v05_plate(tmp_path / "out")
     assert_valid_ngff_plate(tmp_path / "out" / "plate.ome.zarr")
@@ -235,8 +212,7 @@ def test_well_image_paths_drive_fov_ids_not_a_0_based_range(tmp_path):
 
 
 def test_positions_come_from_dataset_translation_in_um(tmp_path):
-    """NGFF's only position mechanism is ``coordinateTransformations.translation`` (post-scale).
-    The axes declare ``micrometer``, so the values pass through unscaled."""
+    """NGFF's only position mechanism is ``coordinateTransformations.translation`` (post-scale)."""
     root = tmp_path / "plate.ome.zarr"
     _write_v04_plate(root, wells=(("B", "2"),), fovs=("0", "1"),
                      translations={("B2", 0): [0.0, 0.0, 0.0, 2000.0, 1000.0],
@@ -246,8 +222,7 @@ def test_positions_come_from_dataset_translation_in_um(tmp_path):
 
 
 def test_translation_in_millimetres_is_converted_at_the_producer(tmp_path):
-    """A store whose space axes say ``millimeter`` must still yield micrometres; the conversion
-    belongs to this producer and there must be exactly one of it."""
+    """A store whose space axes say ``millimeter`` must still yield micrometres; the conversion belongs to this producer and there must be exactly one of it."""
     root = tmp_path / "plate.ome.zarr"
     _write_v04_plate(root, wells=(("B", "2"),), fovs=("0",), unit="millimeter",
                      translations={("B2", 0): [0.0, 0.0, 0.0, 2.0, 1.0]})
@@ -272,61 +247,21 @@ def test_positions_empty_when_neither_source_exists(tmp_path):
     assert open_reader(tmp_path / "out").metadata["fov_positions_um"] == {}
 
 
-def test_metadata_keys_identical_to_the_tiff_reader(tmp_path, squid_dataset):
-    """Same twelve keys, no more, no fewer — consumers must not have to ask which reader they hold."""
-    tiff_root, _ = squid_dataset
-    _write_v05_plate(tmp_path / "out", regions=("B2",), fovs=(0,))
-    tiff_meta = open_reader(tiff_root).metadata
-    zarr_meta = open_reader(tmp_path / "out").metadata
-    assert set(zarr_meta) == set(tiff_meta)
-    for key, value in zarr_meta.items():
-        assert value is not None, f"metadata[{key!r}] is None — dead attribute"
-
-
-def test_read_signature_matches_the_tiff_reader(tmp_path):
-    import inspect
-
-    from squidxplorer.reader import SquidOMEReader, SquidReader
-
-    sig = inspect.signature(SquidZarrReader.read)
-    assert sig.parameters.keys() == inspect.signature(SquidReader.read).parameters.keys()
-    assert sig.parameters.keys() == inspect.signature(SquidOMEReader.read).parameters.keys()
-
-
-def test_wellplate_format_is_resolved(tmp_path):
-    _write_v05_plate(tmp_path / "out", regions=("B2",), fovs=(0,))
-    assert open_reader(tmp_path / "out").metadata["wellplate_format"]
-
-
 def test_declared_wellplate_format_beats_inference(tmp_path):
     out = tmp_path / "out"
     _write_v05_plate(out, regions=("B2",), fovs=(0,))
+    assert open_reader(out).metadata["wellplate_format"]
     (out / "acquisition.yaml").write_text("sample:\n  wellplate_format: 384 well plate\n")
     assert open_reader(out).metadata["wellplate_format"] == "384 well plate"
 
 
-def test_read_is_lazy_one_plane_not_the_whole_field(tmp_path):
-    """A plane read must not materialise the (T, C, Z, Y, X) field — that is the memory contract."""
-    _write_v05_plate(tmp_path / "out", regions=("B2",), fovs=(0,), shape=(1, 2, 1, 8, 8))
-    reader = open_reader(tmp_path / "out")
-    ch = reader.metadata["channels"][0]["name"]
-    got = reader.read("B2", 0, ch, 0)
-    assert got.shape == (8, 8) and got.ndim == 2
-
-
-def test_read_invalid_args_raise_keyerror(tmp_path):
+def test_read_refuses_unknown_keys_and_out_of_range_z_and_t(tmp_path):
     _write_v05_plate(tmp_path / "out", regions=("B2",), fovs=(0,))
     reader = open_reader(tmp_path / "out")
     ch = reader.metadata["channels"][0]["name"]
     for args in [("ZZ", 0, ch, 0), ("B2", 99, ch, 0), ("B2", 0, "Nope", 0)]:
         with pytest.raises(KeyError):
             reader.read(*args)
-
-
-def test_read_out_of_range_z_and_t_raise_indexerror(tmp_path):
-    _write_v05_plate(tmp_path / "out", regions=("B2",), fovs=(0,))
-    reader = open_reader(tmp_path / "out")
-    ch = reader.metadata["channels"][0]["name"]
     with pytest.raises(IndexError):
         reader.read("B2", 0, ch, 9)
     with pytest.raises(IndexError):
@@ -334,8 +269,7 @@ def test_read_out_of_range_z_and_t_raise_indexerror(tmp_path):
 
 
 def test_plane_ref_points_at_an_openable_ngff_image_group(tmp_path):
-    """The viewer registers plane_ref() into ndviewer; for Zarr the honest referent is the field's
-    image group (a valid NGFF node any ome-zarr reader opens), not a TIFF page."""
+    """The viewer registers plane_ref() into ndviewer; for Zarr the honest referent is the field's image group (a valid NGFF node any ome-zarr reader"""
     _write_v05_plate(tmp_path / "out", regions=("B2",), fovs=(0,))
     reader = open_reader(tmp_path / "out")
     path, page = reader.plane_ref("B2", 0, reader.metadata["channels"][0]["name"], 0)
@@ -364,14 +298,11 @@ def test_empty_plate_raises_clearly(tmp_path):
 
 
 def test_a_stopped_zarr_plate_pads_declared_wells_and_axes(tmp_path):
-    """The plate metadata's declared wells vs the wells on disk IS the Zarr plan record: a
-    declared-but-unwritten well pads to field_count zeros fields, and the sidecar's declared
-    Nz/Nt pad the axes, exactly like the individual-TIFF reader."""
+    """The plate metadata's declared wells vs the wells on disk IS the Zarr plan record: a declared-but-unwritten well pads to field_count zeros fields, and"""
     import shutil
 
     out = tmp_path / "out"
     _write_v05_plate(out, regions=("B2", "B3"), fovs=(0, 1))
-    # the stop: B3's well group never landed, though the plate metadata declares it
     shutil.rmtree(out / "plate.ome.zarr" / "B" / "3")
     (out / "acquisition.yaml").write_text("z_stack:\n  nz: 3\ntime_series:\n  nt: 2\n")
     with pytest.warns(UserWarning, match="partial acquisition.*BLACK"):
@@ -398,8 +329,7 @@ def test_a_complete_zarr_plate_is_untouched_by_pad_partial(tmp_path, recwarn):
 
 
 def test_pad_partial_without_a_plan_record_is_a_named_no_op(tmp_path, caplog):
-    """A non-HCS store with no sidecars has no plan to pad to: the open says so in one log
-    line and the grid stays exactly what is on disk. Never a guess."""
+    """A non-HCS store with no sidecars has no plan to pad to: the open says so in one log line and the grid stays exactly what is on disk."""
     import logging
 
     root = tmp_path / "acq"

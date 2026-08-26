@@ -1,5 +1,4 @@
-"""Freeform region ids must navigate verbatim, and window autofocus must rank a
-representative FOV."""
+"""Freeform region ids must navigate verbatim, and window autofocus must rank a representative FOV."""
 
 from __future__ import annotations
 
@@ -99,12 +98,9 @@ def test_window_autofocus_ranks_a_representative_fov_not_the_regions_first(
     assert win._meta["fovs_per_region"]["B3"][:2] == [0, 1], "fixture needs 2 FOVs"
 
     w = win._viewer_manager.open(["B3"])
-    # The z slider is LAYER-derived on the real model: wait for the mosaic before focusing,
-    # exactly as a user must (focusing an unloaded window has no z slider to move).
     from .test_viewer import _drain_until
 
     assert _drain_until(qapp, lambda: bool(len(w._pane._viewer.layers)), timeout=30)
-    # Three fields, clustered so the centroid sits nearest field 1: first != centre.
     w._meta = w._meta.model_copy(update={
         "fovs_per_region": {**dict(win._meta["fovs_per_region"]), "B3": [0, 1, 2]},
         "fov_positions_um": {("B3", 0): (0.0, 0.0), ("B3", 1): (100.0, 0.0),

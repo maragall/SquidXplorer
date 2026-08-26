@@ -60,7 +60,6 @@ def _read_array(path: Path) -> np.ndarray:
 # --- pure helpers ---------------------------------------------------------------------------
 
 def test_parse_well_id_preserves_case_and_roundtrips_exactly():
-    # Vendored Squid semantics except the .upper(): upper-casing silently renames freeform regions.
     assert parse_well_id("B2") == ("B", "2")
     assert parse_well_id("aa3") == ("aa", "3")      # case preserved, NOT upper-cased
     assert parse_well_id("manual0") == ("manual", "0")
@@ -95,13 +94,13 @@ def test_write_from_stream_layout_and_pixels(tmp_path):
     plate = Path(manifest["plate"])
     assert plate.name == "plate.ome.zarr"
     assert manifest["n_wells"] == 3 and manifest["n_fields_written"] == 3
+    assert manifest["complete"] is True and not is_incomplete(plate)
+    assert not any(p.name.startswith(".") and p.is_dir() for p in plate.rglob("*"))
 
-    # plate group metadata
     plate_doc = json.loads((plate / "zarr.json").read_text())
     assert plate_doc["node_type"] == "group"
     assert plate_doc["attributes"]["ome"]["plate"]["field_count"] == 1
 
-    # each well: group metadata + single-level field + omero + pixel-exact full-res array
     for region in REGIONS:
         row, col = parse_well_id(region)
         well_doc = json.loads((plate / row / col / "zarr.json").read_text())
@@ -117,17 +116,16 @@ def test_write_from_stream_layout_and_pixels(tmp_path):
         assert np.array_equal(_read_array(field / "0"), images[region])  # full-res pixel-exact
         assert not (field / "1").exists()  # no pyramid level written
 
-    # every group validates against the official OME-NGFF v0.5 pydantic models
-    from tests.ngff_check import assert_valid_ngff_plate
+    from squidxplorer.contract.validate import assert_valid_ngff_plate
 
     assert_valid_ngff_plate(plate)
 
 
 def test_large_field_writes_pyramid(tmp_path):
-    # A field larger than the pyramid floor (256 px) gets downsample levels: 600 -> 300 -> 150.
     big = {r: _image(i, y=600, x=600) for i, r in enumerate(REGIONS)}
     manifest = write_from_stream(_meta(), _stream(big), tmp_path, n_fovs=1, tiff=False)
     assert manifest["levels"] == 3
+    assert manifest["tiff"] is None and not (tmp_path / "tiff").exists()
 
     field = Path(manifest["plate"]) / "B" / "2" / "0"
     ds_paths = [d["path"] for d in
@@ -136,7 +134,6 @@ def test_large_field_writes_pyramid(tmp_path):
     assert np.array_equal(_read_array(field / "0"), big["B2"])          # level 0 pixel-exact
     assert _read_array(field / "1").shape == (1, 2, 1, 300, 300)        # half-size
     assert _read_array(field / "2").shape == (1, 2, 1, 150, 150)
-    # coarse-level scale reflects the real downsample factor (2x, 4x) in Y,X
     scales = [d["coordinateTransformations"][0]["scale"] for d in
               json.loads((field / "zarr.json").read_text())["attributes"]["ome"]["multiscales"][0]["datasets"]]
     assert scales[1][-2:] == [0.325 * 2, 0.325 * 2]
@@ -159,13 +156,6 @@ def test_write_from_stream_individual_tiffs(tmp_path):
             assert np.array_equal(plane, images[region][0, c_i, 0])  # pixel-exact, z collapsed
 
 
-def test_tiff_disabled(tmp_path):
-    images = {r: _image(i) for i, r in enumerate(REGIONS)}
-    manifest = write_from_stream(_meta(), _stream(images), tmp_path, n_fovs=1, tiff=False)
-    assert manifest["tiff"] is None
-    assert not (tmp_path / "tiff").exists()
-
-
 def test_uint8_dtype_preserved(tmp_path):
     images = {r: _image(i, dtype=np.uint8) for i, r in enumerate(REGIONS)}
     write_from_stream(_meta(), _stream(images), tmp_path, n_fovs=1, tiff=False)
@@ -174,7 +164,7 @@ def test_uint8_dtype_preserved(tmp_path):
     assert np.array_equal(arr, images["B2"])
 
 
-def test_fails_loud_on_wrong_shape(tmp_path):
+def test_fails_loud_on_wrong_shape_or_channel_count(tmp_path):
     """A malformed shape is still refused, but Z>1 is not malformed."""
     import pytest
 
@@ -186,6 +176,9 @@ def test_fails_loud_on_wrong_shape(tmp_path):
     ]:
         with pytest.raises(ValueError):
             write_from_stream(_meta(), iter([("B2", 0, bad)]), tmp_path, n_fovs=1, tiff=False)
+    with pytest.raises(ValueError, match="channels"):
+        write_from_stream(_meta(), iter([("B2", 0, np.zeros((1, 3, 1, 8, 8), np.uint16))]),
+                          tmp_path, n_fovs=1, tiff=False)
 
 
 def test_z_stack_round_trips_through_the_plate(tmp_path):
@@ -200,25 +193,13 @@ def test_z_stack_round_trips_through_the_plate(tmp_path):
     arr = _read_array(tmp_path / "plate.ome.zarr" / "B" / "2" / "0" / "0")
     assert arr.shape == stack.shape
     assert np.array_equal(arr, stack), "z-stack did not round-trip pixel-identically"
-    # ...and each plane is DISTINCT, so "plane 0 broadcast over z" cannot pass.
     assert len({arr[0, 0, z].tobytes() for z in range(5)}) == 5
 
-    # The TIFF export names the plane in the z field of Squid's convention, and does not
-    # collapse the stack to one file per channel.
     for z in range(5):
         for t in range(2):
             path = tmp_path / "tiff" / str(t) / f"B2_0_{z}_{CH[0]['name']}.tiff"
             assert path.exists(), f"missing per-plane TIFF for t={t} z={z}"
             assert np.array_equal(tifffile.imread(path), stack[t, 0, z])
-
-
-def test_fails_loud_on_channel_count_mismatch(tmp_path):
-    import pytest
-
-    # image says 3 channels, metadata lists 2 -> refuse (would mislabel omero)
-    bad = np.zeros((1, 3, 1, 8, 8), np.uint16)
-    with pytest.raises(ValueError, match="channels"):
-        write_from_stream(_meta(), iter([("B2", 0, bad)]), tmp_path, n_fovs=1, tiff=False)
 
 
 def test_writer_memory_is_bounded_in_well_count(tmp_path):
@@ -273,7 +254,6 @@ def _big_meta(n_regions=4, n_fovs=9, y=2048, x=2048, n_t=1):
 
 
 def test_pyramid_factor_is_the_exact_level_sum_not_a_guess():
-    # 2048 -> 1024 -> 512 -> 256 : the ladder pyramid_shapes() would write, exactly.
     from squidxplorer._output import pyramid_shapes
 
     shapes = pyramid_shapes((2048, 2048))
@@ -286,20 +266,15 @@ def test_pyramid_factor_is_the_exact_level_sum_not_a_guess():
 def test_estimate_scales_with_fields_channels_and_timepoints():
     m = _big_meta()
     base = estimate_write_bytes(m, n_fovs=None)
-    # hand-computed: fields x t x c x z x frame_bytes x pyramid x safety (+ a small fixed allowance)
     hand = (4 * 9) * 1 * 2 * 1 * 2048 * 2048 * 2 * plate_pyramid_factor((2048, 2048))
     assert base == pytest.approx(hand * 1.03, rel=1e-3, abs=200 * 1024)
-    # n_t multiplies: a 5-timepoint plate writes 5x (the exact under-count the viewer guard fixed)
     assert estimate_write_bytes(_big_meta(n_t=5), n_fovs=None) == pytest.approx(base * 5, rel=1e-3)
-    # a subset of regions is scoped, and one FOV per well is 1/9th of nine
     assert estimate_write_bytes(m, n_fovs=None, regions=["B2"]) == pytest.approx(base / 4, rel=1e-2)
     assert estimate_write_bytes(m, n_fovs=1) == pytest.approx(base / 9, rel=1e-2)
-    # tiff doubles-ish: a second, UNCOMPRESSED, pyramid-free copy
     assert estimate_write_bytes(m, n_fovs=None, tiff=True) > base
 
 
 def test_free_bytes_uses_nearest_existing_ancestor(tmp_path):
-    # the destination does not exist yet — the guard must still be able to stat the filesystem
     assert free_bytes(tmp_path / "does" / "not" / "exist") == free_bytes(tmp_path)
     assert free_bytes(tmp_path) > 0
 
@@ -317,22 +292,17 @@ def test_refuses_up_front_and_writes_nothing(tmp_path, monkeypatch):
     assert not out.exists()
 
 
-def test_headroom_is_configurable_and_reserves_the_last_of_the_disk(tmp_path, monkeypatch):
+def test_headroom_is_configurable_and_the_guard_can_be_disabled(tmp_path, monkeypatch):
     meta = _meta()
     est = estimate_write_bytes(meta, n_fovs=1)
-    # exactly the estimate free: fits arithmetically, but leaves the disk at zero -> refuse
     monkeypatch.setattr("squidxplorer._output.free_bytes", lambda p: int(est))
     with pytest.raises(InsufficientDiskSpaceError):
         write_from_stream(meta, iter([]), tmp_path / "a", n_fovs=1)
-    # a caller who insists can dial the headroom down
     write_from_stream(meta, iter([]), tmp_path / "b", n_fovs=1, disk_headroom=0.0,
                       min_free_bytes=0)
     assert (tmp_path / "b" / "plate.ome.zarr").exists()
-
-
-def test_guard_can_be_disabled(tmp_path, monkeypatch):
     monkeypatch.setattr("squidxplorer._output.free_bytes", lambda p: 1)
-    write_from_stream(_meta(), iter([]), tmp_path / "c", n_fovs=1, check_disk=False)
+    write_from_stream(meta, iter([]), tmp_path / "c", n_fovs=1, check_disk=False)
     assert (tmp_path / "c" / "plate.ome.zarr").exists()
 
 
@@ -357,7 +327,6 @@ def test_a_failed_field_publishes_nothing_and_marks_the_plate_incomplete(tmp_pat
 
     plate = out / "plate.ome.zarr"
     assert is_incomplete(plate)                       # the store announces it is not finished
-    # `boom` fires on the second write, so exactly one complete field survives.
     fields = [f for f in plate.glob("*/*/*") if f.is_dir() and (f / "zarr.json").exists()]
     assert len(fields) == 1, [str(f) for f in fields]
     for row in plate.iterdir():
@@ -369,15 +338,6 @@ def test_a_failed_field_publishes_nothing_and_marks_the_plate_incomplete(tmp_pat
                     continue
                 assert not fov.name.startswith("."), f"partial left behind: {fov}"
                 assert (fov / "0" / "zarr.json").exists() and (fov / "zarr.json").exists()
-
-
-def test_successful_write_clears_the_incomplete_marker(tmp_path):
-    images = {r: _image(i) for i, r in enumerate(REGIONS)}
-    manifest = write_from_stream(_meta(), _stream(images), tmp_path, n_fovs=1)
-    plate = Path(manifest["plate"])
-    assert not is_incomplete(plate)
-    assert manifest["complete"] is True
-    assert not any(p.name.startswith(".") and p.is_dir() for p in plate.rglob("*"))
 
 
 def test_a_run_that_lost_a_well_does_not_declare_the_store_trustworthy(tmp_path):
@@ -427,7 +387,6 @@ def test_a_labels_result_is_coarsened_by_nearest_because_object_ids_are_not_numb
     assert sorted(set(np.unique(_pyramid(field, min_yx=2, produces="intensity")[1]).tolist())) == [0, 1], (
         "guard on the fixture: the intensity reducer really does produce ids that are not there"
     )
-    # ...and the store SAYS which reduction it used, so a reader never has to infer it.
     doc = json.loads((Path(manifest["plate"]) / "B" / "2" / "0" / "zarr.json").read_text())
     ms = doc["attributes"]["ome"]["multiscales"][0]
     assert ms["type"] == "nearest", f"the store declared type={ms['type']!r} for a labels field"
@@ -476,7 +435,6 @@ def test_partial_tiffs_are_never_published(tmp_path, monkeypatch):
     out = tmp_path / "run"
     with pytest.raises(OSError):
         write_from_stream(_meta(), _stream(images), out, n_fovs=1, tiff=True, write_workers=1)
-    # One write succeeded before the second raised, so exactly one .tiff must survive.
     published = sorted(p for p in (out / "tiff").rglob("*.tiff") if p.is_file())
     assert len(published) == 1, [str(p) for p in published]
     for tif in published:
@@ -531,9 +489,7 @@ def test_um_to_ngio_map_is_a_rename_not_a_conversion():
     """Every SquidXplorer key ends _um, every ngio column ends _micrometer, same unit both sides."""
     for ours, theirs in _NGIO_COLUMN.items():
         assert ours.endswith("_um"), ours
-        # ngio spells the unit "micrometer" (and puts _original AFTER it) — same unit, our _um
         assert theirs.endswith("_micrometer") or theirs.endswith("_micrometer_original"), theirs
-        # x_um -> x_micrometer, len_x_um -> len_x_micrometer, x_original_um -> x_micrometer_original
         assert ours.replace("_original_um", "").replace("_um", "") == \
             theirs.replace("_micrometer_original", "").replace("_micrometer", "")
 
@@ -545,13 +501,10 @@ def test_records_use_the_field_origin_corner_not_the_centre():
         corner = field_origin_um(ROI_POS[fov], ROI_FRAME, ROI_PX)          # what _multiscales stamps
         assert by_fov[str(fov)]["x_original_um"] == pytest.approx(corner[0])
         assert by_fov[str(fov)]["y_original_um"] == pytest.approx(corner[1])
-        # centre 1000 -> corner 950 for a 100 µm frame: half a frame, never the centre itself
         assert by_fov[str(fov)]["x_original_um"] != pytest.approx(ROI_POS[fov][0])
-    # extents are the frame's physical size; z is the projected STACK depth (dz x n_z)
     assert by_fov["0"]["len_x_um"] == pytest.approx(100.0)
     assert by_fov["0"]["len_y_um"] == pytest.approx(100.0)
     assert by_fov["0"]["len_z_um"] == pytest.approx(10.0)
-    # region-relative origin (fractal reset_origin): the top-left FOV sits at 0,0
     assert (by_fov["0"]["x_um"], by_fov["0"]["y_um"]) == pytest.approx((0.0, 0.0))
     assert by_fov["1"]["x_um"] == pytest.approx(500.0)   # the recorded 500 µm centre pitch
 
@@ -580,7 +533,6 @@ def test_roi_table_written_on_persist_with_ngio_column_names(tmp_path):
 
     well = Path(manifest["plate"]) / "B" / "2"
     tables = well / "tables"
-    # the tables group indexes its members, which is how ngio discovers them
     assert json.loads((tables / "zarr.json").read_text())["attributes"]["tables"] == ["FOV_ROI_table"]
 
     attrs, index, columns, rows = _read_table(tables / "FOV_ROI_table")
@@ -589,7 +541,6 @@ def test_roi_table_written_on_persist_with_ngio_column_names(tmp_path):
     assert attrs["fractal_table_version"] == "1" and attrs["table_version"] == "1"
     assert attrs["index_key"] == "FieldIndex" and attrs["index_type"] == "str"
     assert index == ["FOV_0", "FOV_1"]                     # ngio FieldIndex convention
-    # the six REQUIRED ngio columns, spelled exactly, all present
     assert set(columns) >= {"x_micrometer", "y_micrometer", "z_micrometer",
                             "len_x_micrometer", "len_y_micrometer", "len_z_micrometer"}
     assert {"x_micrometer_original", "y_micrometer_original"} <= set(columns)
@@ -597,8 +548,7 @@ def test_roi_table_written_on_persist_with_ngio_column_names(tmp_path):
     assert rows["FOV_1"]["len_x_micrometer"] == pytest.approx(100.0)
     assert rows["FOV_0"]["path_in_well"] == "0"            # points at the field dir on disk
 
-    # a `tables` sibling must not break the plate as an OME-NGFF v0.5 document
-    from tests.ngff_check import assert_valid_ngff_plate
+    from squidxplorer.contract.validate import assert_valid_ngff_plate
 
     assert_valid_ngff_plate(Path(manifest["plate"]))
 

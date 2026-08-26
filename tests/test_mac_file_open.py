@@ -1,18 +1,4 @@
-"""Drag-onto-the-.app (macOS): the FileOpen event reaches ``PlateWindow.ingest``.
-
-THE MECHANISM UNDER TEST. Finder never passes a dropped folder as an argument to a bundle —
-LaunchServices delivers an ``odoc`` Apple event, and Qt's Cocoa plugin converts it into a
-``QFileOpenEvent`` on the QApplication. Two halves make the gesture work and each has a test
-here: the bundle's Info.plist must DECLARE ``public.folder`` (or Finder refuses the drop before
-any event exists), and the app must HANDLE the event (or it arrives and dies unread — which is
-exactly what shipped first, and why `scripts/installer/README.md` briefly documented the gap
-instead of the feature).
-
-``QFileOpenEvent`` cannot be instantiated from PyQt6, so the filter is exercised by calling
-``eventFilter`` directly with a stand-in carrying the same two facts Qt's event carries — its
-``type()`` and its ``file()``. The Apple-event delivery itself is macOS's, not ours, and is
-covered by the hand check recorded in the commit that added this.
-"""
+"""Drag-onto-the-.app (macOS): the FileOpen event reaches ``PlateWindow.ingest``."""
 
 from __future__ import annotations
 
@@ -77,10 +63,7 @@ def test_a_file_open_event_ingests_its_path(qapp, squid_dataset):
 
 
 def test_a_launch_document_is_buffered_until_the_window_exists(qapp, squid_dataset):
-    """THE MEASURED TIMING. A launch-with-document's FileOpen arrives during the SPLASH's event
-    processing — napari's ~20 s import runs before PlateWindow exists — so the filter must hold
-    the path and replay it on attach. Verified with a real bundle on this machine: a filter
-    built after the window missed the launch document; a buffering one cannot."""
+    """THE MEASURED TIMING."""
     root, _ = squid_dataset
     flt = V._FileOpenFilter()
     assert flt.eventFilter(qapp, _FakeFileOpen(str(root))) is True
@@ -112,8 +95,7 @@ def test_an_empty_path_is_ignored_and_other_events_pass_through(qapp):
 
 
 def test_the_bundle_declares_folders_so_finder_accepts_the_drop():
-    """The OTHER half: without public.folder in CFBundleDocumentTypes, Finder refuses the drop
-    and no event ever exists for the filter to catch."""
+    """The OTHER half: without public.folder in CFBundleDocumentTypes, Finder refuses the drop and no event ever exists for the filter to catch."""
     import importlib.util
     from pathlib import Path
 

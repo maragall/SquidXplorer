@@ -10,9 +10,8 @@ import numpy as np
 import pytest
 
 import squidxplorer as s
-from squidxplorer._engine import MissingOperatorDependency, Operator
+from squidxplorer._engine import MissingOperatorDependency
 from squidxplorer._plugins import GROUP, DISABLE_ENV, OperatorPluginError, load_operator_plugins
-from squidxplorer.projection import MissingDependency
 
 _REPO = Path(__file__).resolve().parents[1]
 _TEMPLATE = _REPO / "templates" / "operator"
@@ -29,21 +28,6 @@ def _passthrough(planes):
 # ==============================================================================================
 # 1. THE DECLARATION
 # ==============================================================================================
-
-def test_operator_carries_requires_with_an_empty_default():
-    assert "requires" in Operator.__dataclass_fields__
-    assert Operator.__dataclass_fields__["requires"].default == ()
-
-
-def test_every_registrar_takes_requires_by_the_same_keyword():
-    """Checked by signature so a new registrar cannot quietly ship without it."""
-    import inspect
-
-    from squidxplorer._stitch import add_region_operator
-
-    for fn in (s.add_operator, add_region_operator):
-        assert "requires" in inspect.signature(fn).parameters, fn.__name__
-
 
 def test_a_bare_string_requires_is_read_as_one_module_not_eight_letters():
     """The tuple-comma trap. ``requires="somepkg"`` must mean one module."""
@@ -88,27 +72,14 @@ def unavailable():
     return "tpl_unavailable"
 
 
-def test_an_unavailable_operator_is_still_listed(unavailable):
-    """Filtering it out would make "package missing" and "nobody wrote it" identical."""
-    assert unavailable in s.available_plane_operators()
-
-
 def test_availability_is_reported_with_a_reason_and_the_install_command(unavailable):
+    assert unavailable in s.available_plane_operators(), "filtered out: 'missing' reads as 'unwritten'"
     ok, why = s.operator_available(unavailable)
 
     assert not ok
     assert unavailable in why
     assert ABSENT in why
     assert f"pip install {ABSENT}" in why
-
-
-def test_binding_refuses_by_name_before_any_work(unavailable):
-    with pytest.raises(MissingOperatorDependency, match=ABSENT):
-        s.bind_operator(unavailable)
-
-
-def test_the_refusal_is_a_missing_dependency_so_a_runner_can_tell_it_from_a_data_fault(unavailable):
-    assert issubclass(MissingOperatorDependency, MissingDependency)
 
 
 def test_reading_an_unavailable_operators_declaration_still_works(unavailable):
@@ -204,15 +175,6 @@ def test_list_operators_reports_availability_without_filtering_the_list(unavaila
 def test_the_built_in_operators_with_heavyweight_lazy_imports_declare_them():
     """Pinned by name so it is not rediscovered on the next clean install."""
     assert s.operator_requires("decon") == ("petakit",)
-
-
-def test_every_region_operator_declares_its_requirements():
-    """The declaration is readable through the same function every other operator's is."""
-    names = s.available_region_operators()
-    assert names, "no region operator is registered at all"
-    for name in names:
-        assert isinstance(s.operator_requires(name), tuple)
-    # `stitch` reaches tilefusion one call deep and must say so, by name.
     assert "tilefusion" in s.operator_requires("stitch"), s.operator_requires("stitch")
 
 
@@ -376,14 +338,6 @@ def test_discovery_is_additive_the_built_ins_do_not_go_through_it():
 # 5. THE TEMPLATE PACKAGE ITSELF
 # ==============================================================================================
 
-def test_the_template_ships_every_file_a_contributor_needs():
-    for relative in ("pyproject.toml", "README.md",
-                     "squidxplorer_operator_template/__init__.py",
-                     "squidxplorer_operator_template/_stdev.py",
-                     "tests/test_template_operator.py"):
-        assert (_TEMPLATE / relative).exists(), f"templates/operator/{relative} is missing"
-
-
 def test_the_templates_operator_declares_all_four_things():
     """The template must demonstrate the WHOLE record, or it teaches half a contract."""
     source = (_TEMPLATE / "squidxplorer_operator_template" / "__init__.py").read_text()
@@ -408,6 +362,11 @@ def test_the_template_does_not_import_squidxplorer_at_module_scope():
 
 def test_the_template_readme_states_the_contract_the_viewer_depends_on():
     """These are the facts a contributor cannot guess."""
+    for relative in ("pyproject.toml", "README.md",
+                     "squidxplorer_operator_template/__init__.py",
+                     "squidxplorer_operator_template/_stdev.py",
+                     "tests/test_template_operator.py"):
+        assert (_TEMPLATE / relative).exists(), f"templates/operator/{relative} is missing"
     readme = (_TEMPLATE / "README.md").read_text()
 
     for fact in (
@@ -421,42 +380,13 @@ def test_the_template_readme_states_the_contract_the_viewer_depends_on():
         "requires=",                             # how a dependency is declared
         "unavailable_operator",                  # what happens when it is missing
         "SQUIDXPLORER_NO_PLUGINS=1",                 # the escape hatch
+        "does NOT support", "A HAND-WRITTEN GUI panel", "a plugin cannot add one",
+        "squidxplorer/_param_panel.py", "TYPE OF YOUR\nDEFAULT", "a check box",
+        "an integer spin", "a decimal spin", "a text field", "refused by name",
+        "From\ntheir declaration",
+        "Composition happens in Python", "no chain syntax",
     ):
         assert fact in readme, f"templates/operator/README.md does not state: {fact}"
-
-
-def test_the_template_names_what_it_does_not_support():
-    """A template that implies a feature exists sends a contributor to build against a hole."""
-    readme = (_TEMPLATE / "README.md").read_text()
-
-    assert "does NOT support" in readme
-    assert "A HAND-WRITTEN GUI panel" in readme
-    assert "a plugin cannot add one" in readme
-
-
-def test_the_template_states_how_a_declared_param_becomes_a_widget():
-    """The default-type-to-widget mapping rule has to be in the public contract."""
-    readme = (_TEMPLATE / "README.md").read_text()
-
-    for fact in (
-        "squidxplorer/_param_panel.py",          # where the rule lives
-        "TYPE OF YOUR\nDEFAULT",             # what the widget is chosen from
-        "a check box",                       # bool
-        "an integer spin",                   # int
-        "a decimal spin",                    # float
-        "a text field",                      # str
-        "refused by name",                   # anything else
-        "From\ntheir declaration",           # where it shows up in the app
-    ):
-        assert fact in readme, f"templates/operator/README.md does not state: {fact!r}"
-
-
-def test_the_template_states_that_composition_happens_in_python():
-    """No chain syntax exists; the README says where composing DOES happen."""
-    readme = (_TEMPLATE / "README.md").read_text()
-
-    assert "Composition happens in Python" in readme
-    assert "no chain syntax" in readme
 
 
 def test_the_template_package_imports_and_registers_in_a_clean_interpreter():

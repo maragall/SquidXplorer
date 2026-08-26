@@ -1,8 +1,4 @@
-"""The .mp4 export, asserted on pixels and files rather than on state.
-
-The failure shape guarded against is a recording whose frames are all identical,
-so every test reads pixels back — composited frames or frames decoded from the .mp4.
-"""
+"""The .mp4 export, asserted on pixels and files rather than on state."""
 
 from __future__ import annotations
 
@@ -89,18 +85,12 @@ needs_encoder = pytest.mark.skipif(
 
 # --- the gate: when is the feature offered, and on which axis ------------------------------------
 
-def test_can_record_is_true_on_a_z_stack_with_one_timepoint():
+def test_the_gate_offers_z_or_t_prefers_time_and_counts_each_axis_frames():
     assert can_record({"n_t": 1, "z_levels": list(range(10))}) is True
     assert can_record({"n_t": 3, "z_levels": [0]}) is True
     assert can_record({"n_t": 1, "z_levels": [0]}) is False
-
-
-def test_default_axis_prefers_time_and_falls_back_to_z():
     assert default_axis({"n_t": 3, "z_levels": list(range(10))}) == "t"
     assert default_axis({"n_t": 1, "z_levels": list(range(10))}) == "z"
-
-
-def test_axis_length_counts_the_frames_each_axis_is_worth():
     meta = {"n_t": 3, "z_levels": [0, 1, 2, 3]}
     assert axis_length(meta, "t") == 3
     assert axis_length(meta, "z") == 4
@@ -110,8 +100,8 @@ def test_axis_length_counts_the_frames_each_axis_is_worth():
 
 # --- the frames themselves ----------------------------------------------------------------------
 
-def test_consecutive_t_frames_are_different_pixels(five_d):
-    """A stuck t index yields identical frames; the fixture's blob moves with t."""
+def test_consecutive_t_and_z_frames_are_different_pixels(five_d):
+    """A stuck index yields identical frames; the fixture's blob moves with t and focus sweeps with z."""
     reader, meta, region, _root = five_d
     frames = list(region_movie_frames(reader, meta, region, axis="t"))
 
@@ -119,16 +109,10 @@ def test_consecutive_t_frames_are_different_pixels(five_d):
     for i in range(len(frames) - 1):
         diff = np.abs(frames[i].astype(int) - frames[i + 1].astype(int))
         assert diff.any(), f"t frames {i} and {i + 1} are pixel-identical — the axis is stuck"
-        # the blob is a real feature and moves a real distance, not one stray pixel
         assert (diff.sum(axis=2) > 0).sum() > 0.05 * frames[i][:, :, 0].size, (
             f"t frames {i}/{i + 1} differ in only {(diff.sum(axis=2) > 0).sum()} pixels")
 
-
-def test_consecutive_z_frames_are_different_pixels(five_d):
-    """The fixture sweeps focus, so consecutive z frames must differ."""
-    reader, meta, region, _root = five_d
     frames = list(region_movie_frames(reader, meta, region, axis="z"))
-
     assert len(frames) == len(meta["z_levels"]) == 3
     for i in range(len(frames) - 1):
         assert np.any(frames[i] != frames[i + 1]), (
@@ -221,16 +205,12 @@ def test_odd_sized_frames_are_padded_not_resized(tmp_path):
 
 
 @needs_encoder
-def test_no_frames_leaves_no_file_behind(tmp_path):
-    out = tmp_path / "empty.mp4"
-    with pytest.raises(ValueError, match="nothing to encode"):
-        write_mp4(iter(()), out, fps=DEFAULT_FPS)
-    assert not out.exists(), "an empty encode left a file behind"
-
-
-@needs_encoder
-def test_a_producer_that_raises_part_way_leaves_no_truncated_movie(tmp_path):
+def test_no_frames_or_a_producer_that_raises_part_way_leaves_no_file_behind(tmp_path):
     """A playable-but-short .mp4 after a mid-export failure must be deleted."""
+    empty = tmp_path / "empty.mp4"
+    with pytest.raises(ValueError, match="nothing to encode"):
+        write_mp4(iter(()), empty, fps=DEFAULT_FPS)
+    assert not empty.exists(), "an empty encode left a file behind"
     out = tmp_path / "partial.mp4"
 
     def _dies_on_the_third():
@@ -257,9 +237,10 @@ def test_a_missing_encoder_refuses_by_name_and_writes_nothing(tmp_path, monkeypa
 
 
 @needs_encoder
-def test_record_region_writes_a_playable_movie_of_the_t_axis(five_d, tmp_path):
-    """End to end: read -> fuse -> composite -> encode -> decode."""
-    reader, meta, region, _root = five_d
+def test_record_region_writes_a_playable_movie_where_pointed_and_touches_nothing_else(five_d, tmp_path):
+    """End to end: read -> fuse -> composite -> encode -> decode; the acquisition folder is byte-identical after."""
+    reader, meta, region, root = five_d
+    before = _tree_digest(root)
     out = tmp_path / f"{region}_t.mp4"
     seen = []
     path, n = record_region(reader, meta, region, out, axis="t", fps=DEFAULT_FPS,
@@ -273,14 +254,6 @@ def test_record_region_writes_a_playable_movie_of_the_t_axis(five_d, tmp_path):
     for i in range(len(decoded) - 1):
         assert np.any(decoded[i] != decoded[i + 1]), (
             f"decoded t frames {i}/{i + 1} are identical")
-
-
-@needs_encoder
-def test_recording_does_not_touch_the_acquisition(five_d, tmp_path):
-    """The recorder reads planes and writes one .mp4 where the user pointed it."""
-    reader, meta, region, root = five_d
-    before = _tree_digest(root)
-    record_region(reader, meta, region, tmp_path / "untouched.mp4", axis="z", fps=DEFAULT_FPS)
     assert _tree_digest(root) == before, "the export modified the acquisition folder"
     assert not list(root.rglob("*.mp4")), "the export wrote a movie into the acquisition folder"
 

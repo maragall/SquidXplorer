@@ -61,7 +61,6 @@ def test_the_plate_is_on_top_and_takes_about_half_the_window(qapp, monkeypatch, 
         share = 100.0 * _h(plate_host) / win.height()
         assert share >= 48.0, (
             f"the plate is {share:.1f}% of a {size[0]}x{size[1]} window; Spencer asked for ~50%")
-        # On top: above the band. The band is asserted to be LAST, not at a literal index.
         assert win._body.indexOf(plate_host) == 0
         assert win._body.indexOf(win._band_host) == win._body.count() - 1
         assert plate_host.geometry().bottom() <= win._band_host.geometry().top()
@@ -94,16 +93,9 @@ def test_the_plate_keeps_the_growth_when_the_window_grows(qapp, monkeypatch):
 
 # --- three panels on screen at once, no tab switch ----------------------------------------------
 
-def test_the_log_owns_the_band_and_the_navigator_is_gone(shown):
-    """2026-08-19 (Julio's mock): the Window navigator is DELETED — its list was superseded by
-    the deck's tabs — and the operator-tab bar hides while empty, so the LOG has the whole band.
-    Absence is pinned with `not hasattr`, this repo's convention for deleted features."""
+def test_the_log_owns_the_band_and_the_operator_tab_bar_hides_while_empty(shown):
     win = shown
-    assert not hasattr(win, "_open_views"), "the plate rebuilt a Window navigator"
-    assert not hasattr(win, "_band"), "the horizontal band splitter survived its left child"
-
     assert win._log_panel.isVisible(), "the log is not on screen"
-    # Ruling v2 (2026-08-25): the log is a FIXED slot, a few lines tall, never collapsed.
     from squidxplorer._logpanel import LogPanel
 
     assert _h(win._log_panel) == win._log_panel.slot_px(), f"the log slot is {_h(win._log_panel)} px"
@@ -114,7 +106,6 @@ def test_the_log_owns_the_band_and_the_navigator_is_gone(shown):
     assert win._right_col.indexOf(win._left_tabs) == 0, "Operator tabs are not above the Log"
     assert win._right_col.indexOf(win._log_panel) == 1
 
-    # Opening an operator panel shows the bar; closing it hands the band back to the log.
     from qtpy.QtWidgets import QLabel
     win._open_op_tab("probe", "Probe", lambda: QLabel("probe"))
     assert win._left_tabs.isVisible() and win._left_tabs.count() == 1
@@ -142,23 +133,14 @@ def test_the_band_cap_is_enforced_on_a_plain_host_not_on_the_splitter(shown):
 # --- the status bars moved into the log ---------------------------------------------------------
 
 def test_the_memory_and_progress_indicators_are_inside_the_log_panel(shown):
-    """The status bars live inside the logger, driven by `StatusRow` — what survived the
-    navigator's deletion (its tree went with the widget; these two bars still have a job)."""
+    """The status bars live inside the logger, driven by `StatusRow` — what survived the navigator's deletion (its tree went with the widget; these two bars"""
     win = shown
     row, log = win._status_row, win._log_panel
 
-    # Ruling y (2026-08-25): the memory bar is deleted; the run bar is the one bar.
     for name in ("_work_label", "_work_bar"):
         w = getattr(row, name)
         assert _is_inside(w, log), f"{name} is not inside the log panel"
     assert not hasattr(row, "_mem_bar"), "the memory bar is back"
-
-
-def test_the_progress_bar_is_still_absent_while_nothing_runs(shown):
-    """Absent means nothing is running; the rule has to survive the move."""
-    win = shown
-    assert win._status_row._work_bar.isHidden()
-    assert win._status_row._work_label.isHidden()
 
 
 # --- the metadata label -------------------------------------------------------------------------

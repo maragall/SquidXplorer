@@ -1,9 +1,4 @@
-"""Flat-field machinery: numerical property tests + the MIP-commutation shortcut.
-
-The standalone `flatfield` OPERATOR was shelved 2026-08-24; what this file covers is the
-machinery STITCH rides (profile record, BaSiC estimate, per-channel .npy parse, the
-correction arithmetic, the installed-profile store) plus the absence pins.
-"""
+"""Flat-field machinery: numerical property tests + the MIP-commutation shortcut."""
 
 from __future__ import annotations
 
@@ -13,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from squidxplorer import available_plane_operators, project
+from squidxplorer import project
 from squidxplorer._flatfield import (
     FlatfieldProfile,
     active_profiles,
@@ -101,8 +96,7 @@ def test_estimate_profile_recovers_a_vignette_from_tiles():
 
 
 def test_estimate_profile_normalises_a_field_the_constructor_would_have_refused():
-    """With few tiles BaSiC's gain can land outside FlatfieldProfile's 1e-3 mean tolerance;
-    estimate_profile must renormalise it rather than let the constructor raise."""
+    """With few tiles BaSiC's gain can land outside FlatfieldProfile's 1e-3 mean tolerance; estimate_profile must renormalise it rather than let the constructor raise."""
     import squidxplorer._flatfield as F
 
     off_by = np.full((8, 8), 1.0, dtype=np.float32)
@@ -114,7 +108,6 @@ def test_estimate_profile_normalises_a_field_the_constructor_would_have_refused(
     def stub(stack, use_darkfield=False):
         return off_by.copy(), None
 
-    # Only the import may skip; an ImportError inside estimate_profile itself must not be absorbed.
     try:
         import tilefusion.flatfield as tff
     except ImportError:
@@ -137,7 +130,6 @@ def test_dtype_preserved_input_not_mutated_and_no_integer_wrap():
     assert out.dtype == np.uint16
     assert np.array_equal(raw, before)
     assert out.max() <= 65535 and out.min() >= 0
-    # dim corners divide UP past the ceiling: must clip, never wrap to black
     assert out[:4, :4].mean() > raw[:4, :4].mean()
 
 
@@ -229,21 +221,6 @@ def test_flatfield_commutes_with_the_mip_on_real_10x_data(laser_af_dataset, caps
     assert t_per_plane > t_after_mip
 
 
-def test_the_flatfield_operator_is_shelved_whole():
-    """Absence pin (2026-08-24): no registered operator, no callable surface, no export.
-    The machinery stitch rides — FlatfieldProfile, estimate_profile, correct_flatfield and
-    the set_profile(s)/active_profiles store — deliberately survives, tested above."""
-    import squidxplorer
-    import squidxplorer._flatfield as ff
-
-    assert "flatfield" not in squidxplorer.runnable_operators()
-    assert "flatfield" not in available_plane_operators()
-    for gone in ("flatfield_op", "_ACTIVE_OP", "_correct_with_active", "_profile_for",
-                 "LAYER_KEY", "LAYER_LABEL"):
-        assert not hasattr(ff, gone), f"{gone} is back; the flatfield operator was shelved"
-    assert not hasattr(squidxplorer, "flatfield_op")
-
-
 def test_a_profile_cannot_be_installed_without_saying_which_channel_measured_it():
     """channel is keyword-only and required, so a call with no channel no longer type-checks."""
     with pytest.raises(TypeError):
@@ -266,8 +243,7 @@ def test_the_profile_store_round_trips_per_channel():
 
 @pytest.mark.integration
 def test_per_channel_npy_parse_on_the_real_stored_profile(laser_af_dataset, capsys):
-    """per_channel_from_npy maps channel NAMES to plane INDICES of the stored (C, Y, X) file;
-    correcting a channel with plane 0's field is measurably wrong (the 2026-08-06 defect)."""
+    """per_channel_from_npy maps channel NAMES to plane INDICES of the stored (C, Y, X) file; correcting a channel with plane 0's field is measurably wrong"""
     npy = laser_af_dataset / f"{laser_af_dataset.name}_flatfield.npy"
     if not npy.exists():
         pytest.skip("this acquisition carries no stored flat-field profile")

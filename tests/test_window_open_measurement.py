@@ -1,17 +1,4 @@
-"""Opening a window is MEASURED: the clock is wired to the real open, not only to a class.
-
-Separate from tests/test_run_measurement.py, which pins the clock itself against a hand-moved
-clock with no Qt. This file pins the WIRING: that a real ViewerManager.open produces a record,
-that an ROI child is distinguishable from a whole-region open, and that things a window does
-after opening (loading another region, closing) do not each record another open.
-
-Per docs/adr/0001-ci-gates-work-not-time.md nothing here asserts a duration — only that a number
-was recorded, and recorded once.
-
-Not tested, stated rather than left to be found: whether first paint is taken where the layer is
-added or where the worker emits it. Both placements produce a number; telling them apart needs a
-real interface under load.
-"""
+"""Opening a window is MEASURED: the clock is wired to the real open, not only to a class."""
 
 from __future__ import annotations
 
@@ -41,8 +28,7 @@ from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixture)
 
 @pytest.fixture(autouse=True)
 def _own_the_metrics_log():
-    """These tests read the process-wide log the app writes; cleared per test so opens don't
-    leak across tests."""
+    """These tests read the process-wide log the app writes; cleared per test so opens don't leak across tests."""
     METRICS.clear()
     yield
     METRICS.clear()
@@ -91,16 +77,15 @@ def test_opening_a_region_window_is_measured(qapp, manager):
         "from 'quick to show, slow to finish'")
     assert m.seconds >= m.first_paint_seconds, (
         "the whole open finished before its first layer appeared; the two ends are crossed")
+    win.close()
+    for _ in range(20):
+        qapp.processEvents()
+    assert len(_opens()) == 1 and _opens()[0].outcome == OK, "the close overwrote or doubled the open"
 
 
 def test_the_clock_covers_building_the_window_not_only_loading_it(qapp, manager, napari_pane_stub,
                                                                   monkeypatch):
-    """Constructing the napari pane is time the user waits (91 MB to 419 MB just opening a
-    9-well plate); a clock started after the window exists would miss it entirely.
-
-    Asserted as order, not duration, per ADR-0001: at the moment the clock is created, no pane
-    has been built yet.
-    """
+    """Constructing the napari pane is time the user waits (91 MB to 419 MB just opening a 9-well plate); a clock started after the window exists would miss"""
     from squidxplorer import _measure
 
     panes_at_start = []
@@ -119,8 +104,7 @@ def test_the_clock_covers_building_the_window_not_only_loading_it(qapp, manager,
 
 
 def test_an_roi_child_open_is_measured_and_names_itself_as_one(qapp, manager):
-    """An ROI child reads a corner, a region window reads the region; two records that read
-    alike cannot show that difference in cost."""
+    """An ROI child reads a corner, a region window reads the region; two records that read alike cannot show that difference in cost."""
     parent = manager.open([REGIONS[0]])
     _loaded(qapp, parent)
     child = manager.open_child([REGIONS[0]], roi_bbox=(0.0, 0.0, 5.0, 5.0),
@@ -135,12 +119,9 @@ def test_an_roi_child_open_is_measured_and_names_itself_as_one(qapp, manager):
 
 
 def test_loading_another_mosaic_in_an_open_window_is_not_another_open(qapp, manager):
-    """A window that navigates regions, or moves timepoint, runs the same loader again;
-    recording each as an open would make the log claim windows the user never opened."""
+    """A window that navigates regions, or moves timepoint, runs the same loader again; recording each as an open would make the log claim windows the user"""
     win = manager.open([REGIONS[0], REGIONS[1]])
     _loaded(qapp, win)
-    # The reload lands as in-place data replacement (the reuse path) or an insertion; both fire
-    # events on the REAL model, which is the observable now that the stub's add-log is gone.
     landed = []
     for ly in list(win._pane._viewer.layers):
         ly.events.data.connect(lambda e: landed.append(1))
@@ -153,14 +134,3 @@ def test_loading_another_mosaic_in_an_open_window_is_not_another_open(qapp, mana
     assert len(_opens()) == 1
 
 
-def test_closing_a_window_that_already_loaded_does_not_record_a_second_open(qapp, manager):
-    """Every window is closed eventually; recording both ends would double every successful
-    open in the log."""
-    win = manager.open([REGIONS[0]])
-    _loaded(qapp, win)
-    win.close()
-    for _ in range(20):
-        qapp.processEvents()
-
-    assert len(_opens()) == 1
-    assert _opens()[0].outcome == OK, "a completed open was overwritten by its own close"

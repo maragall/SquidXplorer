@@ -12,40 +12,32 @@ def log():
     return ActivityLog()
 
 
-def test_a_fresh_log_is_not_busy(log):
-    assert not log.busy
-    assert log.sentence() == ""
-    assert log.current() is None
-
-
-def test_starting_work_makes_it_busy_and_ending_it_stops(log):
+def test_busy_follows_start_and_end_and_clear_and_a_stray_end_is_harmless(log):
+    assert not log.busy and log.sentence() == "" and log.current() is None
     log.start("fuse", "loading mosaic")
     assert log.busy
     log.end("fuse")
     assert not log.busy, "the indicator is still on with nothing running"
+    log.end("never-started")
+    assert not log.busy
+    log.start("a", "one")
+    log.start("b", "two")
+    log.clear()
+    assert not log.busy
 
 
-def test_unknown_size_is_reported_as_unknown_not_as_zero_percent(log):
-    """Unknown must stay unknown so the indicator can be indeterminate."""
+def test_an_unknown_total_stays_unknown_until_the_worker_revises_it(log):
+    """Unknown must stay unknown so the indicator can be indeterminate; the worker, not the click, knows the total."""
     a = log.start("fuse", "loading mosaic")
-    assert a.total is None
-    assert not a.determinate
+    assert a.total is None and not a.determinate
     assert a.sentence() == "loading mosaic …"
-
-
-def test_known_size_counts(log):
-    log.start("run", "MIP", total=28)
-    log.advance("run", 3)
-    assert log.current().sentence() == "MIP · 3/28"
-
-
-def test_advance_can_revise_a_total_it_did_not_know_at_the_start(log):
-    """The total is known by the worker, not by the click that started it."""
     log.start("run", "MIP")
     assert not log.current().determinate
     log.advance("run", 1, 28)
     assert log.current().determinate
     assert log.current().sentence() == "MIP · 1/28"
+    log.advance("run", 3)
+    assert log.current().sentence() == "MIP · 3/28"
 
 
 def test_progress_for_work_that_already_ended_is_ignored_not_fatal(log):
@@ -56,24 +48,13 @@ def test_progress_for_work_that_already_ended_is_ignored_not_fatal(log):
     assert not log.busy
 
 
-def test_ending_something_that_never_started_is_not_an_error(log):
-    log.end("never-started")
-    assert not log.busy
-
-
-def test_two_activities_are_both_tracked_and_the_bar_says_how_many(log):
+def test_two_activities_are_both_tracked_and_the_determinate_one_is_shown(log):
     log.start("fuse", "loading mosaic")
     log.start("run", "MIP", total=28)
     log.advance("run", 5)
     assert len(log) == 2
+    assert log.current().key == "run", "show the one that can say something real"
     assert log.sentence() == "MIP · 5/28  (+1 more)"
-
-
-def test_a_determinate_activity_is_preferred_for_display(log):
-    """When only one line can be shown, show the one that can say something real."""
-    log.start("fuse", "loading mosaic")
-    log.start("run", "MIP", total=28)
-    assert log.current().key == "run"
 
 
 def test_restarting_the_same_key_replaces_it_rather_than_stacking(log):
@@ -85,25 +66,15 @@ def test_restarting_the_same_key_replaces_it_rather_than_stacking(log):
     assert not log.busy
 
 
-def test_subscribers_hear_every_change(log):
+def test_subscribers_hear_every_change_and_a_late_one_hears_the_current_state(log):
     seen = []
     log.subscribe(lambda lg: seen.append(lg.sentence()))
     log.start("run", "MIP", total=2)
     log.advance("run", 1)
     log.end("run")
     assert seen == ["", "MIP · 0/2", "MIP · 1/2", ""]
-
-
-def test_a_subscriber_added_late_is_told_the_current_state_immediately(log):
     log.start("run", "MIP", total=9)
     log.advance("run", 4)
-    seen = []
-    log.subscribe(lambda lg: seen.append(lg.sentence()))
-    assert seen == ["MIP · 4/9"], "a late subscriber was not told what is already running"
-
-
-def test_clear_stops_everything(log):
-    log.start("a", "one")
-    log.start("b", "two")
-    log.clear()
-    assert not log.busy
+    late = []
+    log.subscribe(lambda lg: late.append(lg.sentence()))
+    assert late == ["MIP · 4/9"], "a late subscriber was not told what is already running"

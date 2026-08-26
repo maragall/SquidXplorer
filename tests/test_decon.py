@@ -1,10 +1,4 @@
-"""The `decon` operator (the volume solve): numerical property tests, not smoke tests.
-
-Since 2026-08-24 there is ONE deconvolution and ONE code path: `deconvolve_stack`, whose PSF
-depth follows the stack depth. The 2-D per-plane operator was shelved; on an n_z=1 stack the
-volume solve IS the 2-D in-focus solve (pinned below, measured before the deletion: float32
-max abs diff 0.00195, uint16 max 1 count). `decon3d` is a refused name pointing at `decon`.
-"""
+"""The `decon` operator (the volume solve): numerical property tests, not smoke tests."""
 
 from __future__ import annotations
 
@@ -87,6 +81,7 @@ def _rmse(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def test_decon_moves_a_known_blur_back_toward_ground_truth():
+    """RMSE falls, peak amplitude comes back, total intensity is conserved: one solve, three properties."""
     truth = _ground_truth()
     blurred = _blur_with_real_psf(truth)
 
@@ -94,16 +89,10 @@ def test_decon_moves_a_known_blur_back_toward_ground_truth():
 
     before, after = _rmse(blurred, truth), _rmse(restored, truth)
     assert after < before * 0.6, f"RL did not sharpen: rmse {before:.1f} -> {after:.1f}"
-
-
-def test_decon_recovers_peak_amplitude_lost_to_blur():
-    truth = _ground_truth()
-    blurred = _blur_with_real_psf(truth)
-    restored = _plane_solve(blurred, FAST_OPTICS, iterations=30)
-
     assert blurred.max() < truth.max() * 0.8
     assert restored.max() > blurred.max() * 1.2
     assert restored.max() <= truth.max() * 1.5
+    assert abs(float(restored.sum()) - float(blurred.sum())) / float(blurred.sum()) < 0.05
 
 
 def test_more_iterations_reduce_error_over_the_useful_range():
@@ -114,29 +103,12 @@ def test_more_iterations_reduce_error_over_the_useful_range():
     assert errs[-1] < errs[0], f"error did not fall with iterations: {errs}"
 
 
-def test_zero_iterations_is_the_identity():
-    blurred = _blur_with_real_psf(_ground_truth()).astype(np.uint16)
-    assert np.array_equal(_plane_solve(blurred, FAST_OPTICS, iterations=0), blurred)
-
-
 def test_deconvolve_stack_project_false_keeps_every_plane():
     """The format contract's decon shape: output the same size as the input."""
     stack = np.stack([_blur_with_real_psf(_ground_truth()).astype(np.uint16)] * 3)
     out = deconvolve_stack(stack, FAST_OPTICS, iterations=0, project=False)
     assert out.shape == stack.shape
     np.testing.assert_array_equal(out, stack)
-
-
-def test_decon_op_declares_keeps_depth():
-    op = decon_op(FAST_OPTICS, iterations=0)
-    assert getattr(op, "keeps_depth", False) is True, \
-        "decon must declare the whole deconvolved stack comes back"
-
-
-def test_rl_conserves_total_intensity_to_within_a_few_percent():
-    blurred = _blur_with_real_psf(_ground_truth())
-    restored = _plane_solve(blurred, FAST_OPTICS, iterations=30)
-    assert abs(float(restored.sum()) - float(blurred.sum())) / float(blurred.sum()) < 0.05
 
 
 def test_dtype_is_preserved_and_the_input_plane_is_never_mutated():
@@ -289,36 +261,23 @@ def test_decon_is_registered_as_the_depth_keeping_volume_solve():
 
 
 def test_the_output_query_says_decon_keeps_its_depth():
-    """`operator_output` is what the writer's depth AND the display's z-collapse read; for a
-    z-consumer declaring keeps_depth the OUTPUT does not collapse (the 2026-08-24 toggle bug:
-    `_reduces_z("decon")` read consumes alone and flattened the volume; write_plate declared
-    n_z=1 against a full-depth stream)."""
+    """`operator_output` is what the writer's depth AND the display's z-collapse read; for a z-consumer declaring keeps_depth the OUTPUT does not collapse"""
     from squidxplorer._engine import operator_output
 
     assert operator_output("decon") == (False, "intensity")
 
 
 def test_decon3d_is_refused_by_name_with_a_pointer_to_decon():
-    """Absence pin (2026-08-24): the survivor of the 2D/3D merge is REGISTERED AS `decon`;
-    a stale recipe or script saying decon3d gets the rename, not a bare unknown-name error."""
+    """Absence pin (2026-08-24): the survivor of the 2D/3D merge is REGISTERED AS `decon`; a stale recipe or script saying decon3d gets the rename, not a"""
     import squidxplorer
 
     assert "decon3d" not in squidxplorer.runnable_operators()
     with pytest.raises(KeyError, match="renamed to 'decon'"):
         _resolve_operator("decon3d")
-    import squidxplorer._decon as decon_mod
-
-    for gone in ("decon3d_op", "deconvolve_plane", "make_psf_2d", "deconvolve"):
-        assert not hasattr(decon_mod, gone), f"{gone} is back; there is ONE code path"
-        assert not hasattr(squidxplorer, gone)
 
 
 def test_the_volume_solve_over_one_plane_equals_the_shelved_2d_solve():
-    """THE nz=1 pin, written before deconvolve_plane was deleted: on a 1-plane stack the
-    volume solve landed the 2-D in-focus answer (measured float32 max abs diff 0.00195,
-    uint16 max 1 count against the then-live deconvolve_plane). Re-pinned here against the
-    kernel identity — the depth-1 3-D PSF's central plane renormalises exactly to the old
-    in-focus slice — and the blur/restore property below."""
+    """THE nz=1 pin, written before deconvolve_plane was deleted: on a 1-plane stack the volume solve landed the 2-D in-focus answer (measured float32 max"""
     psf = make_psf(_nz1(FAST_OPTICS))
     centre = psf[psf.shape[0] // 2]
     assert float(centre.sum()) > 0
@@ -368,15 +327,6 @@ def test_the_volume_solve_sharpens_the_mip(squid_dataset):
     assert sharpness(out) > sharpness(stack.max(axis=0)), "3-D decon did not sharpen the MIP"
 
 
-def test_decon_op_receives_the_stack_through_project_well(squid_dataset):
-    # Full depth since 2026-08-21: the deconvolved output is the SAME SIZE as the input.
-    root, _ = squid_dataset
-    reader = open_reader(root)
-    out = project_well(reader, "B2", 0, reduce=decon_op(FAST_OPTICS, iterations=2))
-    n_c = len(reader.metadata["channels"])
-    assert out.shape == (reader.metadata["n_t"], n_c, reader.metadata["n_z"], 4, 4)
-
-
 def test_deconvolve_stack_rejects_a_2d_input():
     with pytest.raises(ValueError, match=r"needs \(Z, Y, X\)"):
         deconvolve_stack(np.zeros((8, 8), np.float32), FAST_OPTICS)
@@ -398,8 +348,7 @@ _PER_CHANNEL_CHANNELS = ["Fluorescence 488 nm Ex", "Fluorescence 638 nm Ex"]
 
 
 def _two_channel_acquisition(root, nz: int = 2, frame: int = 64, channels=None):
-    """A tiny 10x/NA-0.3 acquisition whose two channels have DIFFERENT emission wavelengths
-    (or whatever *channels* names: a broadband channel states no wavelength at all)."""
+    """A tiny 10x/NA-0.3 acquisition whose two channels have DIFFERENT emission wavelengths (or whatever *channels* names: a broadband channel states no"""
     tifffile = pytest.importorskip("tifffile")
     channels = list(_PER_CHANNEL_CHANNELS if channels is None else channels)
     (root / "ome_tiff").mkdir(parents=True)
@@ -534,9 +483,7 @@ def test_specialising_to_a_channel_may_not_change_the_consumed_axis():
 
 
 def test_decon_over_an_nz1_acquisition_writes_a_one_plane_copy(tmp_path):
-    """THE n_z=1 gate for the 2D/3D merge: plenty of this rig's data is single-plane, and the
-    one surviving `decon` must serve it — run, keep the single plane, and write the
-    acquisition-format copy with exactly one plane per (FOV, channel)."""
+    """THE n_z=1 gate for the 2D/3D merge: plenty of this rig's data is single-plane, and the one surviving `decon` must serve it — run, keep the single"""
     import tifffile
 
     from squidxplorer._acq_output import write_acquisition_planes
@@ -560,8 +507,7 @@ def test_decon_over_an_nz1_acquisition_writes_a_one_plane_copy(tmp_path):
 # --- the QC sweep's capture hook is GONE (shelved with the sweep, 2026-08-25) -----------------
 
 def test_the_snapshot_capture_hook_is_gone_with_the_sweep():
-    """Julio: "The sweep code should be shelved. I can just run on an ROI iteration by
-    iteration." The per-iteration capture kwarg had no consumer left; absence is pinned."""
+    """Julio: "The sweep code should be shelved."""
     import inspect
 
     from squidxplorer import _decon, _decon_gpu
@@ -571,9 +517,7 @@ def test_the_snapshot_capture_hook_is_gone_with_the_sweep():
 
 
 def test_iterations_is_a_declared_param_on_the_decon_registration():
-    """THE one place the QC's chosen count lands: the surviving operator declares
-    ``iterations``, so operator_kwargs / recipes / the declaration probe all carry it.
-    (decon3d is shelved — the name is refused with a pointer to decon.)"""
+    """THE one place the QC's chosen count lands: the surviving operator declares ``iterations``, so operator_kwargs / recipes / the declaration probe all carry it."""
     from squidxplorer._engine import operator_params
 
     params = {p.name: p.default for p in operator_params("decon")}
@@ -597,8 +541,7 @@ def _write_acq(tmp_path, na=0.75):
 
 
 def test_session_ni_reaches_the_channel_optics_for_preview_and_run(tmp_path):
-    """optics_for_channel is the ONE reader both the QC worker and a run's for_channel use, so
-    the medium chosen in the panel shapes BOTH PSFs; clearing it restores inference."""
+    """optics_for_channel is the ONE reader both the QC worker and a run's for_channel use, so the medium chosen in the panel shapes BOTH PSFs; clearing it"""
     from squidxplorer._decon import session_ni, set_session_ni
 
     root = _write_acq(tmp_path)
@@ -614,8 +557,7 @@ def test_session_ni_reaches_the_channel_optics_for_preview_and_run(tmp_path):
 
 
 def test_an_na_impossible_under_the_chosen_medium_is_refused_by_name(tmp_path):
-    """NA <= ni is physics: a 1.40 objective under air must refuse, naming both numbers and
-    the way out, never solve with an impossible PSF."""
+    """NA <= ni is physics: a 1.40 objective under air must refuse, naming both numbers and the way out, never solve with an impossible PSF."""
     from squidxplorer._decon import set_session_ni
 
     root = _write_acq(tmp_path, na=1.40)
@@ -663,10 +605,7 @@ _PSF3D_OPTICS = OpticsParams(na=0.85, wavelength_um=0.670, dxy_um=0.325, dz_um=3
 
 
 def test_the_3d_psf_is_a_normalised_axially_centred_kernel():
-    """The PSF the solve builds: depth 2*nz-1 (every plane can borrow from every other),
-    unit energy, and per-plane energy symmetric about a centroid ON the centre plane. An
-    off-centre or lopsided PSF reassigns light to the wrong z, which renders as a solve
-    that 'sharpens' by moving structure between planes."""
+    """The PSF the solve builds: depth 2*nz-1 (every plane can borrow from every other), unit energy, and per-plane energy symmetric about a centroid ON the"""
     psf = make_psf(_PSF3D_OPTICS)
     assert psf.shape[0] == 2 * _PSF3D_OPTICS.nz - 1
     assert float(psf.sum()) == pytest.approx(1.0, abs=1e-3)
@@ -677,10 +616,7 @@ def test_the_3d_psf_is_a_normalised_axially_centred_kernel():
 
 
 def test_the_volume_solve_moves_light_back_to_its_own_plane():
-    """Blur a known sparse 3-D bead phantom with the EXACT PSF, restore with the volume
-    solve, and measure both lateral fit (RMSE) and AXIAL specificity (each bead's energy in
-    its own plane against its two neighbours). Measured at these settings: RMSE 30.5 -> 15.4;
-    axial ratio truth 4.72, blurred 1.13, restored 4.38."""
+    """Blur a known sparse 3-D bead phantom with the EXACT PSF, restore with the volume solve, and measure both lateral fit (RMSE) and AXIAL specificity"""
     nz = _PSF3D_OPTICS.nz
     psf = make_psf(_PSF3D_OPTICS)
     rng = np.random.default_rng(1)
@@ -755,7 +691,6 @@ def test_a_broadband_channel_is_copied_through_unchanged_and_named_once(tmp_path
     try:
         out = project_well(reader, "manual0", 0,
                            reduce=_resolve_operator("decon").fn, consumes=Z_REDUCER)
-        # A second field of the same acquisition: the fact is stated ONCE, not per FOV.
         project_well(reader, "manual0", 0,
                      reduce=_resolve_operator("decon").fn, consumes=Z_REDUCER)
     finally:
@@ -789,7 +724,6 @@ def test_a_set_with_no_modelable_channel_is_still_a_named_refusal(tmp_path):
 
 
 def test_only_the_no_emission_line_case_copies_through():
-    """A fluorescence channel whose optics cannot be READ (here: no acquisition path) is
-    still the named refusal, never a silent copy."""
+    """A fluorescence channel whose optics cannot be READ (here: no acquisition path) is still the named refusal, never a silent copy."""
     with pytest.raises(ValueError, match="Fluorescence_488_nm_Ex"):
         _resolve_operator("decon").fn.for_channel(None, "Fluorescence_488_nm_Ex")

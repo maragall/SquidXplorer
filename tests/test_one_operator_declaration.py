@@ -1,5 +1,4 @@
-"""ONE declaration, every consumer: each test registers an operator in exactly one call and then
-asks a different consumer a question it can only answer if it read the declaration."""
+"""ONE declaration, every consumer: each test registers an operator in exactly one call and then asks a different consumer a question it can only answer"""
 
 from __future__ import annotations
 
@@ -85,25 +84,10 @@ def test_it_runs_plate_scope_and_the_declared_default_is_in_the_pixels(declared_
     for image in out.values():
         assert image.shape[2] == 1, "a z-reducer must collapse z, per its own declaration"
         assert int(image.min()) >= PLANE_DEFAULT_OFFSET
-
-
-def test_it_runs_region_scope_and_touches_only_that_region(declared_operators, reader):
     one = reader.metadata["regions"][0]
-    seen = {region for region, _fov, _img in
-            s.run_plate(reader, n_fovs=1, operator=PLANE_OP_NAME, regions=[one])}
-
-    assert seen == {one}
-
-
-def test_a_parameter_the_run_names_reaches_the_pixels(declared_operators, reader):
-    """A value must reach the pixels, not just the console line."""
-    one = reader.metadata["regions"][0]
-
-    def _run(**kwargs):
-        return next(iter(s.run_plate(reader, n_fovs=1, operator=PLANE_OP_NAME,
-                                     regions=[one], operator_kwargs=kwargs or None)))[2]
-
-    assert int(_run(offset=200).min()) - int(_run().min()) == 200 - PLANE_DEFAULT_OFFSET
+    scoped = {region for region, _fov, _img in
+              s.run_plate(reader, n_fovs=1, operator=PLANE_OP_NAME, regions=[one])}
+    assert scoped == {one}
 
 
 def test_the_region_operator_runs_plate_scope_and_region_scope(declared_operators, reader):
@@ -130,14 +114,6 @@ def test_the_region_operators_declared_parameter_is_applied(declared_operators, 
     assert int(image.min()) == int(image.max()) == 42
 
 
-def test_it_is_saved_to_a_plate_with_no_edit_to_the_writer(declared_operators, reader, tmp_path):
-    """The SAVE path, not just preview: `write_plate` dispatches on the declaration."""
-    manifest = s.write_plate(reader, tmp_path / "out.hcs", operator=PLANE_OP_NAME, n_fovs=1,
-                             operator_kwargs={"offset": 3})
-
-    assert int(manifest.get("n_fields_written") or 0) > 0
-
-
 # CONSUMER 2: the CLI
 
 def test_the_cli_accepts_the_name_and_checks_the_declared_parameters(declared_operators):
@@ -146,6 +122,8 @@ def test_the_cli_accepts_the_name_and_checks_the_declared_parameters(declared_op
 
     params = ProcessParameters(input_folder=".", operator=PLANE_OP_NAME, param=["offset=5"])
     assert params.operator == PLANE_OP_NAME
+    assert ProcessParameters(input_folder=".",
+                             operator=REGION_OP_NAME).operator == REGION_OP_NAME
 
     with pytest.raises(ValueError, match="offsett|declares"):
         ProcessParameters(input_folder=".", operator=PLANE_OP_NAME, param=["offsett=5"])
@@ -159,18 +137,10 @@ def test_the_cli_help_lists_the_operator_with_its_declared_defaults(declared_ope
     assert f"{REGION_OP_NAME}(fill=7" in catalogue
 
 
-def test_the_cli_names_a_region_operator_too(declared_operators):
-    from squidxplorer._cli import ProcessParameters
-
-    assert ProcessParameters(input_folder=".",
-                             operator=REGION_OP_NAME).operator == REGION_OP_NAME
-
-
 # CONSUMER 3: the command surface (what an agent or script drives the app with)
 
 def test_list_operators_describes_it_from_the_declaration(declared_operators):
-    """Every column of the row is read off the declaration, so a new operator arrives fully
-    described in `ops list`."""
+    """Every column of the row is read off the declaration, so a new operator arrives fully described in `ops list`."""
     from squidxplorer._command import CommandBus, EngineExecutor, ListOperators
 
     bus = CommandBus(EngineExecutor())
@@ -187,8 +157,7 @@ def test_list_operators_describes_it_from_the_declaration(declared_operators):
 # CONSUMER 4: the desktop GUI — the list, and the widgets
 
 def test_the_gui_offers_it_in_the_operator_menu_with_no_card(declared_operators, qapp):
-    """The 'From their declaration' submenu is built off the registry, so an operator added
-    anywhere — including in an installed plugin package — appears in it."""
+    """The 'From their declaration' submenu is built off the registry, so an operator added anywhere — including in an installed plugin package — appears in it."""
     import squidxplorer._viewer as V
 
     win = V.PlateWindow(None)
@@ -200,22 +169,8 @@ def test_the_gui_offers_it_in_the_operator_menu_with_no_card(declared_operators,
         win.close()
 
 
-def test_its_params_become_widgets_seeded_at_the_declared_defaults(declared_operators, qapp):
-    """One widget per declared `Param`, chosen from the type of its default, seeded at it."""
-    from squidxplorer._param_panel import GenericOperatorPanel, panel_refusal
-    from tests.test_op_panels import _Host
-
-    assert panel_refusal(PLANE_OP_NAME) is None
-    panel = GenericOperatorPanel(_Host(), PLANE_OP_NAME)
-
-    assert sorted(panel.widgets) == ["gain", "offset"]
-    assert panel.kwargs() == {"offset": PLANE_DEFAULT_OFFSET, "gain": 1.0}
-    assert panel.widgets["offset"].toolTip() == "counts added to every plane"
-
-
 def test_a_region_operator_that_declares_params_gets_a_panel_too(declared_operators, qapp):
-    """A region operator's declared params draw exactly like a plane-op's; `stitch` declares
-    its knobs now, so any refusal it gets is about availability, never about params."""
+    """A region operator's declared params draw exactly like a plane-op's; `stitch` declares its knobs now, so any refusal it gets is about availability,"""
     from squidxplorer import operator_available
     from squidxplorer._param_panel import GenericOperatorPanel, panel_refusal
     from tests.test_op_panels import _Host

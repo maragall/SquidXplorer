@@ -1,9 +1,4 @@
-"""fstack: the noise-robust selective all-in-focus fusion (Pertuz SAF), as an operator.
-
-Pins the ported math (gfocus, gauss3P's end-swap quirk, the weight path), the algorithm's
-defining properties against MIP, the native-dtype divergence, the registry declaration
-(advanced params included) and the acquisition-format save round-trip.
-"""
+"""fstack: the noise-robust selective all-in-focus fusion (Pertuz SAF), as an operator."""
 
 from __future__ import annotations
 
@@ -26,11 +21,7 @@ from squidxplorer.projection import project, project_well
 # ------------------------------------------------------------------ 1. the algorithm pins
 
 def test_gfocus_hand_checked_on_a_delta():
-    """3x3 zeros with a 9 at the centre, window 3, replicate borders: FM is 8 everywhere.
-
-    Mean is 1 at every position (the 9 is in every window exactly once under nearest
-    padding), so (im-U)^2 is 64 centre / 1 elsewhere and every 3x3 window sums to 72.
-    """
+    """3x3 zeros with a 9 at the centre, window 3, replicate borders: FM is 8 everywhere."""
     im = np.zeros((3, 3))
     im[1, 1] = 9.0
     np.testing.assert_allclose(gfocus(im, 3), np.full((3, 3), 8.0))
@@ -43,8 +34,7 @@ def test_gfocus_is_zero_on_a_constant_and_scales_as_variance():
 
 
 def test_gauss3P_end_swaps_peak_the_fit_at_the_argmax_frame():
-    """The MATLAB's Index1/Index3 end-swaps make y3 == y1 at EVERY pixel, so the fitted
-    Gaussian's mean is the (clamped) argmax frame index — ported verbatim, not repaired."""
+    """The MATLAB's Index1/Index3 end-swaps make y3 == y1 at EVERY pixel, so the fitted Gaussian's mean is the (clamped) argmax frame index — ported"""
     P = 9
     focus = np.arange(P, dtype=np.float64)
     profile = np.exp(-((focus - 4.3) ** 2) / (2 * 1.7 ** 2))    # true peak between frames
@@ -66,8 +56,7 @@ def test_gauss3P_clamps_an_edge_peak_into_the_interior():
 
 
 def test_identical_planes_fuse_to_themselves_exactly():
-    """fm/fmax == 1 in every frame -> every weight is 0.5+0.5*tanh(0); the fusion is a
-    convex combination, so equal weights return the plane bit-exactly."""
+    """fm/fmax == 1 in every frame -> every weight is 0.5+0.5*tanh(0); the fusion is a convex combination, so equal weights return the plane bit-exactly."""
     rng = np.random.default_rng(3)
     plane = rng.integers(100, 40000, (32, 32)).astype(np.uint16)
     np.testing.assert_array_equal(fuse_stack([plane] * MIN_PLANES), plane)
@@ -88,8 +77,7 @@ def test_the_weights_favor_the_sharp_frame():
 # ------------------------------------------------- 2. two regions, two sharp frames
 
 def _two_region_stack(P=10, size=96):
-    """Region A is sharp in frame 2, region B in frame 7, background flat; the known
-    all-in-focus composite is the unblurred scene."""
+    """Region A is sharp in frame 2, region B in frame 7, background flat; the known all-in-focus composite is the unblurred scene."""
     rng = np.random.default_rng(11)
     scene = np.full((size, size), 300.0)
     scene[8:40, 8:40] = rng.integers(100, 4000, (32, 32))
@@ -115,7 +103,6 @@ def test_each_region_is_taken_from_its_own_sharp_frame_and_beats_mip():
 
     assert rmse(fused) < rmse(mip), (
         f"fstack RMSE {rmse(fused):.1f} vs MIP {rmse(mip):.1f} against the known composite")
-    # and per region, against each region's own sharp frame
     for sl in (np.s_[8:40, 8:40], np.s_[56:88, 56:88]):
         region_err = np.abs(fused[sl] - composite[sl]).mean()
         mip_err = np.abs(mip[sl] - composite[sl]).mean()
@@ -201,7 +188,6 @@ def test_fstack_is_registered_as_a_core_z_reducer_with_advanced_params():
     assert set(params) == {"nhsize", "alpha", "sth"}
     for p in params.values():
         assert p.advanced is True, f"{p.name} must be an advanced knob"
-    # the field's default leaves every existing declaration untouched
     assert s.Param("x", 1).advanced is False
 
 
@@ -210,7 +196,6 @@ def test_fstack_runs_through_project_well_with_the_z_reducer_shape():
     out = project_well(reader, "A1", 0, reduce=s.bind_operator("fstack"))
     assert out.shape == (2, 2, 1, 24, 24)
     assert out.dtype == np.uint16
-    # per-channel independence: each channel's fusion comes from its own planes
     ch0 = fuse_stack([reader.read("A1", 0, "405", z, 0) for z in range(5)])
     ch1 = fuse_stack([reader.read("A1", 0, "488", z, 0) for z in range(5)])
     np.testing.assert_array_equal(out[0, 0, 0], ch0)
@@ -324,10 +309,8 @@ def test_the_save_routes_to_acquisition_format_and_round_trips(fstack_dataset, t
     assert summary["complete"] and not summary["stopped"]
     assert summary["n_fields_written"] == 1
 
-    # one plane per FOV/channel at z filename index 0
     assert sorted(p.name for p in (dst / "0").iterdir()) == [
         f"{_FS_REGION}_0_0_{_FS_CH}.tiff"]
-    # pixels are exactly the fusion of the source planes at the defaults
     written = tifffile.imread(dst / "0" / f"{_FS_REGION}_0_0_{_FS_CH}.tiff")
     np.testing.assert_array_equal(written, fuse_stack(planes))
 

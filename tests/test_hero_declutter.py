@@ -1,9 +1,4 @@
-"""Hero declutter (team feedback, 2026-08-25): the image and the plate view are the hero
-features. Operator controls and the non-essential view chips start COLLAPSED behind slim
-summon affordances (the app's grip pattern), the log slot starts collapsed, and an ordinary
-open-and-preview session produces a SHORT log. State is per view and session-scoped: no
-prefs file.
-"""
+"""Hero declutter (team feedback, 2026-08-25): the image and the plate view are the hero features."""
 
 from __future__ import annotations
 
@@ -54,8 +49,7 @@ def _open_view(qapp, root, n_views=1):
 
 def test_the_2d_button_is_gone_whole_and_a_3d_tab_disables_its_own_3d(qapp, napari_pane_stub,
                                                                       squid_dataset):
-    """Julio, 2026-08-25: "There should not be 2D button since we make separate tabs for
-    the 3d view." A 2D tab IS 2D and a 3D tab IS 3D; nothing switches modes in place."""
+    """Julio, 2026-08-25: "There should not be 2D button since we make separate tabs for the 3d view." A 2D tab IS 2D and a 3D tab IS 3D; nothing switches"""
     import squidxplorer._region_viewer as RV
 
     assert not hasattr(RV.RegionViewer, "_view_roi_2d"), "the 2D chip's handler is back"
@@ -87,9 +81,7 @@ def test_the_2d_button_is_gone_whole_and_a_3d_tab_disables_its_own_3d(qapp, napa
 
 
 def test_native_chrome_is_minimized(qapp):
-    """The pure half of the pane's chrome diet, proven on a plain Qt window shaped like the
-    embedded napari one: the status bar hides, dock title bars slim to nothing, and the
-    layer-controls rows the app manages elsewhere fold away while the kept rows stay."""
+    """The pure half of the pane's chrome diet, proven on a plain Qt window shaped like the embedded napari one: the status bar hides, dock title bars slim"""
     from qtpy.QtCore import Qt
     from qtpy.QtWidgets import (
         QComboBox, QDockWidget, QFormLayout, QLabel, QMainWindow, QSlider, QStatusBar, QWidget,
@@ -133,11 +125,7 @@ def test_native_chrome_is_minimized(qapp):
 
 
 def test_the_layer_controls_diet_keeps_at_most_the_three_touched_rows(qapp):
-    """Julio, live 2026-08-25: "Layer controls, too much height." The resting blade shows
-    ONLY what a life-science user touches: contrast limits, auto-contrast (whose once button
-    runs the app's own rule), colormap. The
-    pin is a row-count budget over napari 0.6.6's real image-controls labels, never a
-    pixel number."""
+    """Julio, live 2026-08-25: "Layer controls, too much height." The resting blade shows ONLY what a life-science user touches: contrast limits,"""
     from qtpy.QtWidgets import QComboBox, QFormLayout, QLabel, QWidget
 
     from squidxplorer._napari_pane import hide_native_rows
@@ -224,8 +212,6 @@ def test_a_3d_preview_and_a_reducer_preview_keep_the_full_stack():
     assert sorted({k[3] for k in reader.reads}) == [0, 1, 2]
     assert got[0].shape[2] == 3, "an unrestricted preview keeps every plane"
 
-    # A z-REDUCER ignores the restriction by declaration: the MIP of one plane is a
-    # different result, so the guard must never let preview_z_level reach it.
     reducer_reader = _z_reader()
     run_operator_once(reducer_reader, operator="mip", save=False, owed=1, regions=["A1"],
                       n_fovs=None, on_well=lambda r, f, img: None, preview_z_level=1)
@@ -256,8 +242,7 @@ def test_the_region_arm_refuses_a_z_restriction_by_name():
 
 
 def test_no_gui_string_says_2d_or_3d_decon():
-    """The operator is just "decon" everywhere a user reads (Julio, 2026-08-25); the mode is
-    how we VIEW it. Same sweep shape as the em-dash guard: non-docstring literals only."""
+    """The operator is just "decon" everywhere a user reads (Julio, 2026-08-25); the mode is how we VIEW it."""
     import ast
     from pathlib import Path
 
@@ -390,8 +375,6 @@ def test_an_empty_launch_shows_the_hero_as_a_drop_target_with_one_line(qapp):
         assert win._drop.isVisibleTo(win), "the drop target is not on screen"
         assert win._drop.text() == EMPTY_HERO_LINE
         assert "\n" not in win._drop.text(), "the empty state must be ONE centred line"
-        # Only the drop line and the collapsed bands: the data-bound title controls (a view
-        # combo with nothing to pick, Open view, paste LUTs) wait for an acquisition.
         for name in ("_view_caption", "_view_combo", "_open_sel_btn"):
             assert not getattr(win, name).isVisibleTo(win), f"{name} is shown with no data"
         assert not win._left_tabs.isVisibleTo(win), "the operator band is open with no data"
@@ -424,8 +407,6 @@ def test_a_drop_on_the_empty_hero_reaches_ingest(qapp, tmp_path, monkeypatch):
     try:
         mime = QMimeData()
         mime.setUrls([QUrl.fromLocalFile(str(tmp_path))])
-        # Qt hands a drop to the first ancestor that accepts drops: the label under the
-        # cursor does not, so the window's own handlers are what a drop on the hero reaches.
         assert not win._drop.acceptDrops()
         pos = QPointF(win._drop.geometry().center())
         enter = QDragEnterEvent(pos.toPoint(), Qt.CopyAction, mime, Qt.LeftButton,
@@ -480,8 +461,7 @@ def _plate_is_off_screen(win) -> bool:
 
 
 def _assert_frame_is_the_work_area(window, avail):
-    """The frame (what the user sees) equals the available geometry, through the window's
-    own minimum where offscreen size hints inflate it (see test_default_layout.py)."""
+    """The frame (what the user sees) equals the available geometry, through the window's own minimum where offscreen size hints inflate it (see"""
     frame, client = window.frameGeometry(), window.geometry()
     assert frame.topLeft() == avail.topLeft(), (
         f"the deck's frame starts at {frame.topLeft()}, not the work area's {avail.topLeft()}")
@@ -498,7 +478,6 @@ def test_the_working_layout_is_one_window_and_the_deck_takes_the_work_area(
     from squidxplorer._fontscale import window_screen
 
     root, _ = squid_dataset
-    # Exactly what main() does: build over the path, then show.
     win = V.PlateWindow(str(root), default_layout=True, tabbed_views=True)
     win.show()
     _drain_until(qapp, lambda: win._viewer_manager.deck(create=False) is not None, timeout=10)
@@ -656,8 +635,7 @@ def test_a_progress_report_after_the_run_ended_does_not_resurrect_the_bar(qapp, 
 
 
 def test_the_shapes_controls_rows_and_tool_grid_are_chrome(qapp):
-    """The ROI rectangle's look is the app's, so napari's Shapes styling rows and its
-    shape-tool button grid are chrome; an Image form's tool grid stays."""
+    """The ROI rectangle's look is the app's, so napari's Shapes styling rows and its shape-tool button grid are chrome; an Image form's tool grid stays."""
     from qtpy.QtWidgets import QComboBox, QFormLayout, QGridLayout, QLabel, QPushButton, QWidget
 
     from squidxplorer._napari_pane import NATIVE_HIDDEN_ROWS, hide_native_rows
@@ -703,9 +681,7 @@ def test_the_shapes_controls_rows_and_tool_grid_are_chrome(qapp):
 
 
 def test_the_layer_controls_container_takes_only_what_its_page_needs(qapp):
-    """napari's controls container is a QStackedWidget whose hint is the TALLEST page (an
-    Image form, 289 px measured), so a Shapes page sat over a blank area. It is fitted to
-    the CURRENT page."""
+    """napari's controls container is a QStackedWidget whose hint is the TALLEST page (an Image form, 289 px measured), so a Shapes page sat over a blank area."""
     from qtpy.QtWidgets import QLabel, QStackedWidget, QVBoxLayout, QWidget
 
     from squidxplorer._napari_pane import fit_controls_container
@@ -843,7 +819,6 @@ def test_a_preview_lands_only_in_the_view_that_asked(qapp, napari_pane_stub, squ
         win._on_result(region, fov, planes)
         assert got.get(asker.window_id) == [True], "the asking view did not get its layer"
         assert other.window_id not in got, "a view that did not ask received the layer"
-        # ...and the scoped result was NOT filed in the cross-window cache.
         from squidxplorer._recipe import acquisition_version, cached_operator_results
 
         assert not list(cached_operator_results(region, acquisition_version(win._reader))), (
@@ -942,8 +917,7 @@ def test_the_continuous_autoscale_button_is_hidden_and_once_stays(qapp):
 
 
 def test_the_floor_clears_a_poisson_background():
-    """G7 561 / FOV 1 / z 7: mode 896, sigma 18.7, max 3840; mode + 2 sigma rendered 16.7% of
-    the background as speckle. The floor is the background population's 99th percentile."""
+    """G7 561 / FOV 1 / z 7: mode 896, sigma 18.7, max 3840; mode + 2 sigma rendered 16.7% of the background as speckle."""
     from squidxplorer._contrast import auto_contrast
 
     rng = np.random.default_rng(3)
@@ -1010,7 +984,6 @@ def test_hiding_one_result_channel_leaves_the_op_s_other_channels_and_raw_alone(
                 f"hiding (mip, {channels[0]}) also hid (mip, {ch}): the whole op went dark")
         assert {ch: bool(mosaic.find("raw", ch).visible) for ch in channels} == raw_before, (
             "raw was touched by a result channel's checkbox")
-        # The same through the layer's own property (napari's own list writes this).
         mosaic.find("mip", channels[1]).visible = False
         _settle(qapp)
         mosaic.find("mip", channels[1]).visible = True

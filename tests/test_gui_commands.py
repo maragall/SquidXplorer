@@ -47,9 +47,6 @@ def open_win(win, squid_dataset):
 def test_the_window_exposes_a_command_bus(win):
     assert isinstance(win.commands, CommandBus)
     assert win.commands.surface == "gui"
-
-
-def test_the_gui_surface_supports_the_run_and_control_commands(win):
     supported = win.commands.supported()
     for kind in ("open_acquisition", "describe", "list_operators", "run_operator", "stop_run",
                  "metrics"):
@@ -64,9 +61,9 @@ def test_list_operators_is_answered_identically_to_the_engine(win):
     assert gui == engine, "the two surfaces disagree on what can be run"
 
 
-def test_describe_refuses_by_name_before_anything_is_open(win):
-    r = win.commands.execute(Describe())
-    assert r.refusal == NO_ACQUISITION
+def test_describe_and_run_refuse_by_name_before_anything_is_open(win):
+    assert win.commands.execute(Describe()).refusal == NO_ACQUISITION
+    assert win.commands.execute(RunOperator(operator="mip")).refusal == NO_ACQUISITION
 
 
 def test_open_then_describe_reports_the_windows_regions_and_scope_state(open_win):
@@ -85,10 +82,6 @@ def test_opening_a_written_plate_is_refused_with_the_windows_own_sentence(win, t
 def test_an_unknown_operator_is_refused_by_name(open_win):
     r = open_win.commands.execute(RunOperator(operator="not_an_operator"))
     assert r.refusal == UNKNOWN_OPERATOR and "not_an_operator" in r.message
-
-
-def test_running_with_nothing_open_is_refused(win):
-    assert win.commands.execute(RunOperator(operator="mip")).refusal == NO_ACQUISITION
 
 
 def test_a_run_STARTS_a_thread_rather_than_blocking(open_win, qapp):
@@ -146,8 +139,7 @@ def test_the_run_scope_is_resolved_by_the_shared_resolver_from_window_state(open
 
 
 def test_a_plate_run_opens_AND_closes_a_started_done_pair_in_the_console(open_win, qapp, caplog):
-    """A run over one region carries a view id and an address; a plate-wide run carries only the
-    view id, since no single Extent can describe a set of regions."""
+    """A run over one region carries a view id and an address; a plate-wide run carries only the view id, since no single Extent can describe a set of regions."""
     import logging
 
     from squidxplorer._address import Extent
@@ -175,7 +167,6 @@ def test_a_plate_run_opens_AND_closes_a_started_done_pair_in_the_console(open_wi
 
 def test_a_run_shows_up_as_activity_in_the_log_panel_header(open_win, qapp, monkeypatch):
     open_win.commands.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE, save=False))
-    # activity is started synchronously in run_operator, before the worker thread does anything
     assert open_win._activity.busy or open_win._activity.sentence() != "", \
         "the run did not register any activity"
     for _ in range(1000):

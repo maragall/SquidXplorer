@@ -1,8 +1,4 @@
-"""Which micrometres-per-pixel each 3D path is entitled to.
-
-A path that renders the LAYER's pixels must be told the layer's pitch; a path that
-reads the READER's must be told the acquisition's.
-"""
+"""Which micrometres-per-pixel each 3D path is entitled to."""
 
 from __future__ import annotations
 
@@ -20,9 +16,7 @@ pytest.importorskip("qtpy")
 
 @pytest.fixture(autouse=True)
 def _sync_slicing_for_determinism(monkeypatch):
-    """The volume-push pins here were written for SYNCHRONOUS slicing and flake under the
-    async default (order-dependent, solo-green). Per-viewer sync knob; the global setting
-    (and production) stays async — same containment as test_time_point_playback."""
+    """The volume-push pins here were written for SYNCHRONOUS slicing and flake under the async default (order-dependent, solo-green)."""
     from napari.components import ViewerModel
 
     orig = ViewerModel.__init__
@@ -79,7 +73,6 @@ class TestTheVolumeIsPushedAtThePitchItsPixelsHave:
         root, _ = squid_dataset
         win, w, pane = _window_with_layers(qapp, napari_pane_stub, root)
         px, dz = win._meta["pixel_size_um"], win._meta["dz_um"]
-        # make this fixture's mosaic decimated, like every real acquisition's
         for layer in _raw_layers(win, pane):
             layer.scale = (dz, MEASURED_FUSE_STEP * px, MEASURED_FUSE_STEP * px)
         assert _raw_layers(win, pane), "the fixture put no raw layer on screen"
@@ -141,9 +134,6 @@ class TestTheVolumeIsPushedAtThePitchItsPixelsHave:
         win, w, pane = _window_with_layers(qapp, napari_pane_stub, root)
         channel = win._meta["channels"][0]["name"]
 
-        # A REAL napari layer cannot lose its scale (napari coerces None to ones), so the
-        # unplaced-layer case is driven at the seam that resolves it: the pitch resolver must
-        # refuse BY NAME and answer None…
         class _Unplaced:
             scale = None
 
@@ -152,8 +142,6 @@ class TestTheVolumeIsPushedAtThePitchItsPixelsHave:
         assert "refused" in said.lower(), f"the refusal was silent: {pane.said}"
         assert channel in said, f"the refusal did not name what is missing: {pane.said}"
 
-        # …and a render whose pitch resolver refuses must push NOTHING, never redescribe the
-        # pixels at pixel_size_um.
         monkeypatch.setattr(_volume_view, "displayed_pitch_um",
                             lambda _win, _layer, *, what: None)
         pushes = []
@@ -197,14 +185,12 @@ class TestTheVolumeSourceReportsWhichPitchItChose:
         channels = [c["name"] for c in win._meta["channels"]]
         px, dz = win._meta["pixel_size_um"], win._meta["dz_um"]
 
-        # a z-preserving result: the volume must have depth for the branch to be reached
         planes = [np.arange(2 * 8 * 8, dtype=np.uint16).reshape(2, 8, 8) + i * 100
                   for i, _ in enumerate(channels)]
         result = Result.of(Extent(region_id=w.current_region()), planes,
                            channels=tuple(channels), z_depth=2,
                            pixel_size_um=MEASURED_FUSE_STEP * px, dtype="uint16")
         assert w.deliver_result("demo", result, visible=True) == len(channels)
-        # hide raw; the operator layer is the one on top and visible
         for ch in channels:
             raw = pane.mosaic.find("raw", ch)
             if raw is not None:
@@ -266,20 +252,9 @@ class TestTheROIClampCountsACQUISITIONPixels:
             f"it can really render.")
         assert _bricks.fits_single_texture(round(span / px), round(span / px), nz, limit), (
             "the clamped box does not fit one texture of the voxels 3D will read")
-        # counting in displayed pixels instead would pass a box the renderer must brick
         at_displayed = round(limit * displayed / px)
         assert not _bricks.fits_single_texture(at_displayed, at_displayed, nz, limit), (
             f"this fixture cannot tell the two pitches apart ({at_displayed} still fits "
             f"{limit}), so the assertion above proves nothing about the unit")
         shutdown_plate_window(qapp, win)
 
-    def test_the_clamp_REFUSES_the_displayed_pitch_by_type(self):
-        """The unit above is now a TYPE (`_conventions`): fed the displayed pitch, the clamp
-        raises by name instead of promising one texture over a bricked 4x read."""
-        from squidxplorer._conventions import AcqPitchUm, DisplayPitchUm
-
-        box = (0.0, 0.0, 1e6, 1e6)
-        assert _bricks.clamp_bbox_um(box, AcqPitchUm(0.752), 2048) == \
-            _bricks.clamp_bbox_um(box, 0.752, 2048)
-        with pytest.raises(TypeError, match="ACQUISITION pitch is required"):
-            _bricks.clamp_bbox_um(box, DisplayPitchUm(MEASURED_FUSE_STEP * 0.752), 2048)

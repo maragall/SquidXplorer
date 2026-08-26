@@ -1,21 +1,4 @@
-"""``RegionViewer.dispose`` — the teardown, separated from the close EVENT.
-
-WHAT THIS IS FOR. ``closeEvent`` was doing two different jobs: joining this window's threads, and
-telling the registry the window is gone. Only a top-level window ever receives a close event, so
-both jobs were reachable by exactly one route, and the napari half of the first job was not being
-done at all: ``MosaicPane.shutdown`` had ZERO callers anywhere in ``squidxplorer/``, ``tests/`` or
-``tools/``, while its own docstring said every owner of a pane calls this before ``deleteLater()``.
-
-The consequence is in that docstring too: ``deleteLater()`` on the Qt wrapper does not close the
-napari Viewer, because napari keeps every Viewer in its own instance registry — so a GL context and
-tens of MB leaked per window CLOSED, which "killed a session after twenty of them".
-
-These tests are therefore mostly about a CALL HAPPENING, not about a return value. That is a weak
-shape for a test and it is deliberate here: the defect was silence. Note that ``dispose`` wraps
-every teardown step in ``except Exception`` — on purpose, because a step that throws must not
-strand the joins after it — which means a missing method would be swallowed and read as success.
-That is exactly why the model pane's ``shutdown`` COUNTS rather than no-ops (``_napari_pane``).
-"""
+"""``RegionViewer.dispose`` — the teardown, separated from the close EVENT."""
 
 from __future__ import annotations
 
@@ -51,8 +34,7 @@ def _plate_with_view(qapp, root):
 
 
 def test_disposing_a_view_shuts_its_napari_pane_down(qapp, napari_pane_stub, squid_dataset):
-    """THE LEAK. The pane's shutdown is the only thing that closes the napari Viewer and drops it
-    from napari's instance registry; nothing called it."""
+    """THE LEAK."""
     root, _ = squid_dataset
     win, view = _plate_with_view(qapp, root)
     pane = view._pane
@@ -65,9 +47,7 @@ def test_disposing_a_view_shuts_its_napari_pane_down(qapp, napari_pane_stub, squ
 
 
 def test_dispose_is_idempotent(qapp, napari_pane_stub, squid_dataset):
-    """A view can be disposed by its owner and THEN still receive a closeEvent. Joining a QThread
-    twice or closing a napari Viewer twice is the shape that aborts the interpreter rather than
-    raising, so the second call must do nothing at all."""
+    """A view can be disposed by its owner and THEN still receive a closeEvent."""
     root, _ = squid_dataset
     win, view = _plate_with_view(qapp, root)
     pane = view._pane
@@ -81,8 +61,7 @@ def test_dispose_is_idempotent(qapp, napari_pane_stub, squid_dataset):
 
 
 def test_closing_a_view_still_disposes_it(qapp, napari_pane_stub, squid_dataset):
-    """The extraction must not change what CLOSING does. This is the regression guard for the
-    refactor itself: closeEvent delegates, so every existing caller keeps its behaviour."""
+    """The extraction must not change what CLOSING does."""
     root, _ = squid_dataset
     win, view = _plate_with_view(qapp, root)
     pane = view._pane
@@ -96,9 +75,7 @@ def test_closing_a_view_still_disposes_it(qapp, napari_pane_stub, squid_dataset)
 
 
 def test_closing_a_view_still_deregisters_it(qapp, napari_pane_stub, squid_dataset):
-    """The OTHER job closeEvent was doing. ``closed`` is what ``ViewerManager`` listens on to drop
-    the window from its registry, and it now fires from ``dispose`` — so it must still reach the
-    manager by the ordinary close route."""
+    """The OTHER job closeEvent was doing."""
     root, _ = squid_dataset
     win, view = _plate_with_view(qapp, root)
     mgr = win._viewer_manager
@@ -114,9 +91,7 @@ def test_closing_a_view_still_deregisters_it(qapp, napari_pane_stub, squid_datas
 
 def test_a_pane_that_fails_to_shut_down_does_not_strand_the_registry(
         qapp, napari_pane_stub, squid_dataset):
-    """Every teardown step is wrapped separately so one failure cannot strand the rest. The napari
-    shutdown runs LAST and immediately before ``closed`` is emitted, which makes it the step most
-    able to lose the deregistration if it were allowed to propagate."""
+    """Every teardown step is wrapped separately so one failure cannot strand the rest."""
     root, _ = squid_dataset
     win, view = _plate_with_view(qapp, root)
     mgr = win._viewer_manager

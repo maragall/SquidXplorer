@@ -1,17 +1,4 @@
-"""Deep zoom reads the timepoint the plate is SHOWING, not the one its source was built with.
-
-TileDescriptor used to carry (level, key, channel, bbox_um) with no timepoint, while both caches
-on the read path keyed on t (_platecache: (token, t, region); ReaderTileSource._planes: t). So
-every source answered from the t it was constructed with, and set_time_point touched neither the
-source nor the tile cache: the plate could say "timepoint 2" over frame 0's tiles, byte-identical
-before and after the change.
-
-Fix puts t in the tile's identity, in the key (not the token), so a revisited timepoint stays a
-cache hit — same rule docs/plate-contract.md gives for a plate cell's timepoint.
-
-Uses multi_time_point_dataset, whose pixel value is t*100 + z*10 + c, so a stuck timepoint is a
-wrong number, not a hash.
-"""
+"""Deep zoom reads the timepoint the plate is SHOWING, not the one its source was built with."""
 
 from __future__ import annotations
 
@@ -62,13 +49,10 @@ def _expected_mip(t, channel_index):
     return max(time_series_pixel_value(t, z, channel_index) for z in range(TIME_SERIES_NZ))
 
 
-def test_a_tile_descriptor_cannot_be_built_without_saying_which_timepoint():
-    """No default: a defaulted 0 is precisely how the freeze happened one layer down."""
+def test_a_descriptor_must_say_its_timepoint_and_two_timepoints_are_two_cache_entries():
+    """No default t: a defaulted 0 is precisely how the freeze happened one layer down."""
     with pytest.raises(TypeError):
         TileDescriptor(0, ("A1", 0), "c", (0.0, 0.0, 1.0, 1.0))     # type: ignore[call-arg]
-
-
-def test_two_timepoints_of_one_tile_are_two_cache_entries():
     cache = TileCache(budget_bytes=1 << 20)
     box = (0.0, 0.0, 10.0, 10.0)
     a = TileDescriptor(0, ("A1", 0), "c", box, 0)
@@ -93,8 +77,7 @@ def test_a_coarse_ancestor_is_never_substituted_across_timepoints():
 
 
 def test_one_reader_source_serves_every_timepoint(multi_time_point_dataset):
-    """The source is built once and asked for three frames; before, ReaderTileSource took t
-    at construction and every tile came from that frame."""
+    """The source is built once and asked for three frames; before, ReaderTileSource took t at construction and every tile came from that frame."""
     root, _ = multi_time_point_dataset
     reader, meta, ladder = _open(root)
     channel = str(meta["channels"][0]["name"])
@@ -108,21 +91,13 @@ def test_one_reader_source_serves_every_timepoint(multi_time_point_dataset):
             f"tile at timepoint {t} carries pixel {got[t]}, which is timepoint "
             f"{got[t] // 100}'s value — the read is frozen at the frame the source was built with")
     assert len(set(got.values())) == N_T, f"three timepoints produced {got}"
-
-
-def test_the_composite_source_serves_every_timepoint_too(multi_time_point_dataset):
-    """The source the plate view actually builds; delegation must not reintroduce the freeze."""
-    root, _ = multi_time_point_dataset
-    reader, meta, ladder = _open(root)
-    channel = str(meta["channels"][0]["name"])
-    src = CompositePlateSource(reader, meta, ladder)
-    seen = [int(src.read_tile(_fov_desc(ladder, channel, t)).max()) for t in range(N_T)]
+    composite = CompositePlateSource(reader, meta, ladder)      # what the plate view builds
+    seen = [int(composite.read_tile(_fov_desc(ladder, channel, t)).max()) for t in range(N_T)]
     assert seen == [_expected_mip(t, 0) for t in range(N_T)], seen
 
 
 def test_the_composite_refuses_a_cell_cache_for_another_timepoint(multi_time_point_dataset):
-    """Reconciling silently is how a cell read at one frame gets published under another —
-    same refusal _workers._PreviewWorker makes at the other end of the same cells."""
+    """Reconciling silently is how a cell read at one frame gets published under another — same refusal _workers._PreviewWorker makes at the other end of"""
     root, _ = multi_time_point_dataset
     reader, meta, ladder = _open(root)
 
@@ -154,8 +129,7 @@ def test_in_ram_plate_rungs_refuse_a_tile_from_another_timepoint():
 
 def test_the_plate_view_asks_for_the_timepoint_it_says_it_is_showing(
         qapp, monkeypatch, multi_time_point_dataset):
-    """End to end: set_time_point used to touch neither _tile_src nor _tile_cache, so the plate
-    said "timepoint 2" over frame 0's tiles."""
+    """End to end: set_time_point used to touch neither _tile_src nor _tile_cache, so the plate said "timepoint 2" over frame 0's tiles."""
     monkeypatch.setenv("SQUIDXPLORER_DEEP_ZOOM", "1")
     from squidxplorer import _viewer as V
 
@@ -164,6 +138,7 @@ def test_the_plate_view_asks_for_the_timepoint_it_says_it_is_showing(
     region = meta["regions"][0]
     ov = V.PlateOverview(["A"], ["1"], {(0, 0): region})
     assert ov.set_tile_source(reader, meta), "deep zoom did not arm on the timepoint fixture"
+    assert isinstance(ov._tile_src, CompositePlateSource), "the plate view's deep zoom is the composite source"
 
     channel = str(meta["channels"][0]["name"])
     frames = {}

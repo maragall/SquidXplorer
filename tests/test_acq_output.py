@@ -1,9 +1,4 @@
-"""The acquisition-format save: one projected plane per FOV, bit-exact, beside the source.
-
-A z-reducing per-FOV operator's SAVE writes the same format as its input acquisition into
-``<operator>_<folder>``, so the output is native resolution (never a fused, decimated paste)
-and findable without knowing NGFF. Everything else keeps the OME-Zarr writer.
-"""
+"""The acquisition-format save: one projected plane per FOV, bit-exact, beside the source."""
 
 from __future__ import annotations
 
@@ -24,25 +19,19 @@ def _mip(arrays, region, fov, channel):
 
 # ------------------------------------------------------------------ the writer itself
 
-def test_output_layout_sidecars_and_one_file_per_fov_channel(squid_dataset, tmp_path):
-    root, _ = squid_dataset
+def test_a_mip_save_lands_the_acquisition_format_bit_exact_and_round_trips(squid_dataset, tmp_path):
+    """Sidecars copied (only nz rewritten), one z=0 file per FOV x channel at native shape, reopenable."""
+    root, arrays = squid_dataset
     dst = tmp_path / "mip_out"
     summary = write_acquisition_planes(open_reader(root), "mip", dst)
     assert summary["complete"] and not summary["stopped"]
     assert summary["n_fields_written"] == len(REGIONS) * len(FOVS)
-    # root sidecars copied, image files never copied
     for name in ("acquisition.yaml", "acquisition_channels.yaml",
                  "acquisition parameters.json", "coordinates.csv"):
         assert (dst / name).is_file(), name
     written = sorted(p.name for p in (dst / "0").iterdir())
     expected = sorted(f"{r}_{f}_0_{c}.tiff" for r in REGIONS for f in FOVS for c in CHANNELS)
-    assert written == expected  # z index 0 in every name, extension matches the .tiff input
-
-
-def test_pixels_are_the_exact_mip_at_native_shape(squid_dataset, tmp_path):
-    root, arrays = squid_dataset
-    dst = tmp_path / "mip_out"
-    write_acquisition_planes(open_reader(root), "mip", dst)
+    assert written == expected
     for region in REGIONS:
         for fov in FOVS:
             for channel in CHANNELS:
@@ -50,12 +39,10 @@ def test_pixels_are_the_exact_mip_at_native_shape(squid_dataset, tmp_path):
                 want = _mip(arrays, region, fov, channel)
                 assert out.dtype == want.dtype and out.shape == want.shape
                 np.testing.assert_array_equal(out, want)
+    src_lines = (root / "acquisition.yaml").read_text().splitlines()
+    dst_lines = (dst / "acquisition.yaml").read_text().splitlines()
+    assert [(a, b) for a, b in zip(src_lines, dst_lines) if a != b] == [("  nz: 2", "  nz: 1")]
 
-
-def test_the_output_round_trips_through_open_reader(squid_dataset, tmp_path):
-    root, arrays = squid_dataset
-    dst = tmp_path / "mip_out"
-    write_acquisition_planes(open_reader(root), "mip", dst)
     src_meta = open_reader(root).metadata
     out = open_reader(dst)
     meta = out.metadata
@@ -103,17 +90,7 @@ def test_a_uint8_bmp_acquisition_keeps_its_own_extension(tmp_path):
     assert out_path.is_file(), sorted(p.name for p in (dst / "0").iterdir())
     with Image.open(out_path) as img:
         np.testing.assert_array_equal(np.asarray(img), stack.max(axis=0))
-    assert open_reader(dst).metadata["n_z"] == 1  # the copied yaml's nz was rewritten to 1
-
-
-def test_the_copied_yaml_rewrites_only_the_z_count(squid_dataset, tmp_path):
-    root, _ = squid_dataset
-    dst = tmp_path / "mip_out"
-    write_acquisition_planes(open_reader(root), "mip", dst)
-    src_lines = (root / "acquisition.yaml").read_text().splitlines()
-    dst_lines = (dst / "acquisition.yaml").read_text().splitlines()
-    changed = [(a, b) for a, b in zip(src_lines, dst_lines) if a != b]
-    assert changed == [("  nz: 2", "  nz: 1")]
+    assert open_reader(dst).metadata["n_z"] == 1
 
 
 def test_a_stopped_run_stays_under_the_partial_name(squid_dataset, tmp_path):
@@ -125,15 +102,10 @@ def test_a_stopped_run_stays_under_the_partial_name(squid_dataset, tmp_path):
     assert summary["path"].endswith(".partial")
 
 
-# (The reference/hardlink block — the focus_dataset fixture and the four
-# _link_selected_planes tests — was deleted 2026-08-24 with the shelved `reference`
-# operator and the writer's select_index arm. Git history reinstates.)
-
-
 # ------------------------------------------------------------------ keep-z (decon-shaped)
 
-def test_a_keep_z_operator_writes_every_plane_under_its_own_index(squid_dataset, tmp_path,
-                                                                 identity_operator):
+def test_a_keep_z_operator_writes_every_plane_under_its_own_index_and_round_trips(
+        squid_dataset, tmp_path, identity_operator):
     root, arrays = squid_dataset
     dst = tmp_path / "planes_out"
     summary = write_acquisition_planes(open_reader(root), identity_operator, dst)
@@ -141,18 +113,10 @@ def test_a_keep_z_operator_writes_every_plane_under_its_own_index(squid_dataset,
     written = sorted(p.name for p in (dst / "0").iterdir())
     expected = sorted(f"{r}_{f}_{z}_{c}.tiff"
                       for r in REGIONS for f in FOVS for z in range(NZ) for c in CHANNELS)
-    assert written == expected                        # z index PRESERVED in every name
+    assert written == expected
     for z in range(NZ):
         out = tifffile.imread(dst / "0" / f"{REGIONS[0]}_0_{z}_{CHANNELS[0]}.tiff")
         np.testing.assert_array_equal(out, arrays[(REGIONS[0], 0, z, CHANNELS[0])])
-
-
-def test_a_keep_z_save_keeps_the_declared_z_count_and_round_trips(squid_dataset, tmp_path,
-                                                                 identity_operator):
-    root, arrays = squid_dataset
-    dst = tmp_path / "planes_out"
-    write_acquisition_planes(open_reader(root), identity_operator, dst)
-    # nz NOT rewritten: the output really has every acquired plane.
     assert (dst / "acquisition.yaml").read_text() == (root / "acquisition.yaml").read_text()
     out = open_reader(dst)
     assert out.metadata["n_z"] == NZ and list(out.metadata["z_levels"]) == list(range(NZ))
@@ -161,8 +125,7 @@ def test_a_keep_z_save_keeps_the_declared_z_count_and_round_trips(squid_dataset,
 
 
 def test_a_keeps_depth_z_consumer_saves_every_plane_same_size_as_input(squid_dataset, tmp_path):
-    """decon3d's save shape (Julio 2026-08-21): the output acquisition is the SAME SIZE as
-    the input — every processed z under its own index, nz untouched."""
+    """decon3d's save shape (Julio 2026-08-21): the output acquisition is the SAME SIZE as the input — every processed z under its own index, nz untouched."""
     from squidxplorer import add_operator
 
     def flipz(planes):
@@ -204,8 +167,7 @@ def test_an_unknown_parameter_is_refused_before_any_directory(squid_dataset, tmp
 
 # ------------------------------------------------------------------ the dispatch routing
 
-def test_saving_mip_honours_the_chosen_folder(squid_dataset, tmp_path):
-    # An explicit out_dir (the GUI's chosen folder, the CLI's --out) IS the destination.
+def test_saving_mip_honours_the_chosen_folder_or_defaults_beside_the_source(squid_dataset, tmp_path):
     root, arrays = squid_dataset
     out_dir = tmp_path / f"mip_{root.name}"
     result = run_operator_once(open_reader(root), operator="mip", save=True,
@@ -217,9 +179,6 @@ def test_saving_mip_honours_the_chosen_folder(squid_dataset, tmp_path):
     out = tifffile.imread(out_dir / "0" / f"{REGIONS[0]}_0_0_{CHANNELS[0]}.tiff")
     np.testing.assert_array_equal(out, _mip(arrays, REGIONS[0], 0, CHANNELS[0]))
 
-
-def test_saving_mip_without_a_destination_defaults_beside_the_source(squid_dataset):
-    root, _ = squid_dataset
     result = run_operator_once(open_reader(root), operator="mip", save=True,
                                owed=len(REGIONS), out_dir=None, n_fovs=None)
     dst = root.parent / f"mip_{root.name}"
@@ -239,8 +198,7 @@ def test_saving_an_operator_that_keeps_z_takes_the_acquisition_format(squid_data
 
 
 def test_the_window_save_toggle_lands_both_formats(qapp, squid_dataset, tmp_path):
-    """The in-window save: mip lands the acquisition format at the CHOSEN folder, stitch the
-    stitcher's fused OME-TIFF — both through PlateWindow.run_operator, the toggle's real path."""
+    """The in-window save: mip lands the acquisition format at the CHOSEN folder, stitch the stitcher's fused OME-TIFF — both through"""
     pytest.importorskip("tilefusion")
     import squidxplorer._viewer as V
 
@@ -261,8 +219,6 @@ def test_the_window_save_toggle_lands_both_formats(qapp, squid_dataset, tmp_path
         np.testing.assert_array_equal(out, _mip(arrays, REGIONS[0], 0, CHANNELS[0]))
         assert open_reader(mip_dst).metadata["n_z"] == 1
 
-        # The GUI's acq_format gate knows the fused writer: a stitch save names
-        # <operator>_<acq> and writes the stitcher's OME-TIFF acquisition, re-openable.
         fused_dst = tmp_path / f"stitch_{root.name}"
         win.run_operator("stitch", out_parent=str(tmp_path),
                          operator_kwargs={"register": False, "correct_illumination": False})

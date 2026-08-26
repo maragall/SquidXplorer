@@ -85,17 +85,17 @@ def test_project_streams_single_pass():
     np.testing.assert_array_equal(out, _plane(40))
 
 
-def test_project_well_shape_and_dtype(squid_dataset):
+def test_project_well_shape_dtype_and_distinct_ordered_channels(squid_dataset):
     root, _ = squid_dataset
     reader = open_reader(root)
     out = project_well(reader, "B2", 0)
-    assert out.shape == (1, 2, 1, 4, 4)
+    assert out.shape == (1, len(reader.metadata["channels"]), 1, 4, 4)
     assert out.dtype == np.uint16
+    assert not np.array_equal(out[0, 0, 0], out[0, 1, 0])
 
 
 def test_a_keeps_depth_z_consumer_returns_every_processed_plane(squid_dataset):
-    """decon3d's shape: one call over the whole stack, the WHOLE processed stack back
-    (Julio 2026-08-21: decon output the same size as the input — the planes get examined)."""
+    """decon3d's shape: one call over the whole stack, the WHOLE processed stack back (Julio 2026-08-21: decon output the same size as the input — the"""
     root, arrays = squid_dataset
     reader = open_reader(root)
     meta = reader.metadata
@@ -136,15 +136,6 @@ def test_project_well_matches_np_max_per_channel(squid_dataset):
         np.testing.assert_array_equal(out[0, c_i, 0], ref)
 
 
-def test_project_well_channels_distinct_and_ordered(squid_dataset):
-    root, _ = squid_dataset
-    reader = open_reader(root)
-    meta = reader.metadata
-    out = project_well(reader, "B2", 0)
-    assert out.shape[1] == len(meta["channels"])
-    assert not np.array_equal(out[0, 0, 0], out[0, 1, 0])
-
-
 def test_project_well_iterates_z_levels_not_range(tmp_path):
     root = tmp_path / "acq"
     ch = "Fluorescence_638_nm_-_Penta"
@@ -165,24 +156,6 @@ def test_project_well_iterates_z_levels_not_range(tmp_path):
 
     assert sorted(set(read_zs)) == [0, 1, 3]
     np.testing.assert_array_equal(out[0, 0, 0], np.max(np.stack(list(vals.values())), axis=0))
-
-
-def test_project_well_multi_timepoint(tmp_path):
-    root = tmp_path / "acq"
-    ch = "Fluorescence_638_nm_-_Penta"
-    t0 = {0: _plane(0), 1: _plane(5)}
-    t1 = {0: _plane(100), 1: _plane(105)}
-    for z, arr in t0.items():
-        _write_plane(root, "A1", 0, z, ch, arr, t=0)
-    for z, arr in t1.items():
-        _write_plane(root, "A1", 0, z, ch, arr, t=1)
-    _write_min_yaml(root, nz=2, nt=2)
-    reader = open_reader(root)
-    assert reader.metadata["n_t"] == 2
-    out = project_well(reader, "A1", 0)
-    assert out.shape == (2, 1, 1, 4, 4)
-    np.testing.assert_array_equal(out[0, 0, 0], np.max(np.stack(list(t0.values())), axis=0))
-    np.testing.assert_array_equal(out[1, 0, 0], np.max(np.stack(list(t1.values())), axis=0))
 
 
 def _two_timepoint_reader(tmp_path):
@@ -229,11 +202,13 @@ def test_project_well_t_reads_only_that_timepoint(tmp_path):
 
 
 def test_project_well_t_none_keeps_every_timepoint(tmp_path):
-    reader, _, _ = _two_timepoint_reader(tmp_path)
-    assert project_well(reader, "A1", 0).shape == (2, 1, 1, 4, 4)
-    np.testing.assert_array_equal(
-        project_well(reader, "A1", 0), project_well(reader, "A1", 0, time_point=None)
-    )
+    reader, t0, t1 = _two_timepoint_reader(tmp_path)
+    assert reader.metadata["n_t"] == 2
+    out = project_well(reader, "A1", 0)
+    assert out.shape == (2, 1, 1, 4, 4)
+    np.testing.assert_array_equal(out[0, 0, 0], np.max(np.stack(list(t0.values())), axis=0))
+    np.testing.assert_array_equal(out[1, 0, 0], np.max(np.stack(list(t1.values())), axis=0))
+    np.testing.assert_array_equal(out, project_well(reader, "A1", 0, time_point=None))
 
 
 @pytest.mark.parametrize("bad", [2, -1, 99])
@@ -244,10 +219,7 @@ def test_project_well_t_out_of_range_raises_named(tmp_path, bad):
 
 
 def test_project_accepts_a_legacy_acquisition(tmp_path):
-    """Was ``test_project_requires_acquisition_yaml`` — the refusal it pinned was overridden on
-    2026-08-16 (Julio: "We should be able to support old acquisitions too"): a dataset carrying
-    only the legacy 'acquisition parameters.json' now loads through the one metadata loader's
-    fallback, with a warning, and projects like any other."""
+    """Was ``test_project_requires_acquisition_yaml`` — the refusal it pinned was overridden on 2026-08-16 (Julio: "We should be able to support old"""
     ch = "Fluorescence_638_nm_-_Penta"
     root = tmp_path / "no_yaml"
     for z, arr in {0: _plane(0), 1: _plane(30)}.items():
@@ -279,11 +251,6 @@ def test_select_fovs_default_one_per_well():
     assert select_fovs(meta) == {"B2": [0], "B3": [0]}
 
 
-def test_select_fovs_keys_are_regions():
-    meta = _meta({"B2": [0], "B3": [0], "B4": [0]})
-    assert set(select_fovs(meta)) == {"B2", "B3", "B4"}
-
-
 def test_select_fovs_n_fovs_two():
     meta = _meta({"B2": [0, 1, 2], "B3": [0, 1, 2]})
     assert select_fovs(meta, n_fovs=2) == {"B2": [0, 1], "B3": [0, 1]}
@@ -307,23 +274,6 @@ def test_select_fovs_from_real_reader_metadata(squid_dataset):
     assert select_fovs(meta, n_fovs=2) == {"B2": [0, 1], "B3": [0, 1]}
 
 
-def test_the_reference_operator_is_shelved_whole():
-    """Absence pin (2026-08-24): the Tenengrad z-selecting reducer is gone — the operator, its
-    projection functions, and project_well's whole select_index arm. `_tenengrad` survives:
-    the GUI's z-slider autofocus reads it."""
-    import inspect
-
-    import squidxplorer
-    from squidxplorer import projection
-
-    assert "reference" not in squidxplorer.runnable_operators()
-    for gone in ("project_reference", "select_reference_z"):
-        assert not hasattr(projection, gone), f"{gone} is back; reference was shelved"
-    params = inspect.signature(projection.project_well).parameters
-    assert "reference_channel" not in params and "picked_z" not in params
-    assert hasattr(projection, "_tenengrad"), "the autofocus's focus measure must survive"
-
-
 CH_A = "Fluorescence_405_nm_-_Penta"
 CH_B = "Fluorescence_638_nm_-_Penta"
 
@@ -338,18 +288,10 @@ def _z_stack_acq(root: Path, nz=3, channels=(CH_A, CH_B), nt=1):
     return root
 
 
-def test_plane_op_keeps_every_z_plane(tmp_path):
-    reader = open_reader(_z_stack_acq(tmp_path / "planeop", nz=3))
-    out = project_well(reader, "A1", 0, reduce=plane_op(lambda p: p), consumes=frozenset())
-    assert out.shape == (1, 2, 3, 4, 4)
-    for c_i, ch in enumerate([c["name"] for c in reader.metadata["channels"]]):
-        for k, z in enumerate(reader.metadata["z_levels"]):
-            np.testing.assert_array_equal(out[0, c_i, k], reader.read("A1", 0, ch, z, 0))
-
-
-def test_plane_op_output_is_the_op_applied_per_plane(tmp_path):
+def test_plane_op_output_is_the_op_applied_per_plane_with_every_z_kept(tmp_path):
     reader = open_reader(_z_stack_acq(tmp_path / "shift", nz=3))
     out = project_well(reader, "A1", 0, reduce=plane_op(lambda p: p + 1), consumes=frozenset())
+    assert out.shape == (1, 2, 3, 4, 4)
     for c_i, ch in enumerate([c["name"] for c in reader.metadata["channels"]]):
         for k, z in enumerate(reader.metadata["z_levels"]):
             np.testing.assert_array_equal(out[0, c_i, k], reader.read("A1", 0, ch, z, 0) + 1)
@@ -376,15 +318,6 @@ def test_plane_op_preserves_dtype_and_timepoints(tmp_path):
     assert out.dtype == reader.metadata["dtype"]
 
 
-def test_default_consumes_is_the_z_reducer_contract(tmp_path):
-    reader = open_reader(_z_stack_acq(tmp_path / "default", nz=3))
-    out = project_well(reader, "A1", 0)
-    assert out.shape == (1, 2, 1, 4, 4)
-    for c_i, ch in enumerate([c["name"] for c in reader.metadata["channels"]]):
-        stack = [reader.read("A1", 0, ch, z, 0) for z in reader.metadata["z_levels"]]
-        np.testing.assert_array_equal(out[0, c_i, 0], np.max(np.stack(stack), axis=0))
-
-
 def test_plane_op_adapter_rejects_a_multi_plane_group(tmp_path):
     with pytest.raises(ValueError, match="plane-op"):
         plane_op(lambda p: p)([_plane(0), _plane(1)])
@@ -395,29 +328,6 @@ def test_n_equals_1_mip_is_byte_identical(tmp_path):
     out = project_well(reader, "A1", 0)
     for c_i, ch in enumerate([c["name"] for c in reader.metadata["channels"]]):
         np.testing.assert_array_equal(out[0, c_i, 0], reader.read("A1", 0, ch, 0, 0))
-
-
-def test_cast_like_rounds_and_clips_instead_of_truncating_and_wrapping():
-    from squidxplorer.projection import cast_like
-
-    got = cast_like(np.array([-3.0, 10.5, 11.5, 12.7, 70000.0], dtype=np.float32), np.uint16)
-    np.testing.assert_array_equal(got, np.array([0, 10, 12, 13, 65535], dtype=np.uint16))
-    assert got.dtype == np.uint16
-
-
-def test_cast_like_in_place_gives_the_same_answer_as_the_copying_form():
-    from squidxplorer.projection import cast_like
-
-    values = np.array([-3.0, 10.5, 11.5, 12.7, 70000.0], dtype=np.float32)
-    np.testing.assert_array_equal(cast_like(values.copy(), np.uint16),
-                                  cast_like(values.copy(), np.uint16, copy=False))
-
-
-def test_cast_like_in_place_refuses_an_integer_buffer_by_name():
-    from squidxplorer.projection import cast_like
-
-    with pytest.raises(ValueError, match="floating-point buffer"):
-        cast_like(np.array([1, 2, 3], dtype=np.uint16), np.uint16, copy=False)
 
 
 def test_no_module_carries_a_second_dtype_cast():

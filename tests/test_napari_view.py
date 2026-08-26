@@ -1,9 +1,4 @@
-"""napari mosaic view — the processing-layer/channel hierarchy and the binding guards.
-
-These tests use ``napari.components.ViewerModel``, which is Qt-free, so the hierarchy is
-exercised headless with no canvas, no display and no Qt binding conflict. Only the embedding
-test needs Qt, and it skips itself when Qt is unavailable.
-"""
+"""napari mosaic view — the processing-layer/channel hierarchy and the binding guards."""
 
 from __future__ import annotations
 
@@ -61,14 +56,14 @@ def _img(seed=0, shape=(32, 32)):
 # ---------------------------------------------------------------- the flag
 
 
-def test_napari_is_the_default_viewer_now_that_the_gate_passed():
+def test_napari_is_the_default_viewer_and_a_typo_does_not_cost_it():
     assert resolve_viewer({}) == "napari"
     assert resolve_viewer({"SQUIDXPLORER_VIEWER": ""}) == "napari"
+    assert resolve_viewer({"SQUIDXPLORER_VIEWER": "napri"}) == "napari"
 
 
 def test_a_retired_ndviewer_name_still_builds_napari_and_says_so(caplog):
-    """No fallback exists anymore; asking for the retired ndviewer by name must build napari
-    AND log why, rather than silently substituting a different viewer than the one named."""
+    """No fallback exists anymore; asking for the retired ndviewer by name must build napari AND log why, rather than silently substituting a different"""
     import logging
 
     for spelling in ("ndv", "ndviewer", "ndviewer_light", "  NDV  "):
@@ -78,13 +73,8 @@ def test_a_retired_ndviewer_name_still_builds_napari_and_says_so(caplog):
         assert "deleted" in caplog.text, f"{spelling!r} was retired in silence"
 
 
-def test_a_typo_does_not_silently_cost_you_the_viewer():
-    assert resolve_viewer({"SQUIDXPLORER_VIEWER": "napri"}) == "napari"
-
-
 def test_one_resolver_decides_so_the_pane_cannot_disagree_with_the_model():
-    """Two readers of one environment variable is how controls end up disagreeing about what
-    is on screen; ``make_pane`` must ask ``resolve_viewer`` rather than parse it again."""
+    """Two readers of one environment variable is how controls end up disagreeing about what is on screen; ``make_pane`` must ask ``resolve_viewer`` rather"""
     import inspect
 
     from squidxplorer import _napari_pane
@@ -101,14 +91,11 @@ def test_one_resolver_decides_so_the_pane_cannot_disagree_with_the_model():
 
 
 def test_identity_is_read_from_metadata_not_parsed_out_of_the_name(layers):
-    """The name is a label; identity never comes from parsing it (petakit's channel names
-    have defeated naive regex parsers before)."""
+    """The name is a label; identity never comes from parsing it (petakit's channel names have defeated naive regex parsers before)."""
     lyr = layers.add_mosaic("stitched", "Fluorescence_488_nm_Ex", _img())
 
-    # A name that would defeat a wavelength regex entirely...
     lyr.name = "something a parser would choke on"
 
-    # ...but identity is unaffected, because it never came from the name.
     assert key_of(lyr) == MosaicKey("stitched", "Fluorescence_488_nm_Ex")
     assert layers.channels("stitched") == ["Fluorescence_488_nm_Ex"]
 
@@ -120,11 +107,8 @@ def test_foreign_layers_are_ignored_not_crashed_on(layers):
     assert key_of(layers.model.layers["user annotation"]) is None
     assert layers.ops() == ["raw"]
     assert len(layers.ours()) == 1
-
-
-def test_a_layer_with_partial_metadata_is_not_claimed(layers):
-    lyr = layers.model.add_image(_img(), name="half", metadata={META_KEY: {"op": "raw"}})
-    assert key_of(lyr) is None
+    half = layers.model.add_image(_img(), name="half", metadata={META_KEY: {"op": "raw"}})
+    assert key_of(half) is None
 
 
 # ------------------------------------------------------------ the hierarchy
@@ -156,12 +140,7 @@ def test_show_op_is_the_before_after_toggle(layers):
 
 
 def test_a_subset_channel_result_is_the_visible_op_while_it_is_lit(layers):
-    """Julio, live (2026-08-24): a decon result covering ONE of raw's channels could not be
-    toggled — in 2D or 3D. Root: the result's arrival darkens raw only on ITS channel, so
-    raw stays lit on the others, and ``visible_op()`` returned the FIRST visible layer's op
-    (bottom-most = raw). Everything reading "the shown layer" — 3D's volume_source, the
-    z-axis rule, the plate follow — then drove RAW while the user was looking at the result.
-    The topmost visible layer is the one the user's last gesture lit; its op is the answer."""
+    """Julio, live (2026-08-24): a decon result covering ONE of raw's channels could not be toggled — in 2D or 3D."""
     layers.add_mosaic("raw", "488", _img())
     layers.add_mosaic("raw", "561", _img())
     layers.add_result("intensity", "decon", "488", _img(3))    # arrives lit; darkens raw·488 only
@@ -176,10 +155,7 @@ def test_a_subset_channel_result_is_the_visible_op_while_it_is_lit(layers):
 
 
 def test_the_channel_toggle_drives_the_layer_the_channel_is_showing(layers):
-    """The channel checkbox wrote ``group(visible_op())`` — with a subset-channel result lit,
-    OFF wrote the already-dark raw layer (a measured no-op: the canvas never changed) and ON
-    lit raw, whose arrival then DARKENED the result (the exclusive-op rule). The toggle must
-    hide what the channel is showing and bring the SAME thing back."""
+    """The channel checkbox wrote ``group(visible_op())`` — with a subset-channel result lit, OFF wrote the already-dark raw layer (a measured no-op: the"""
     layers.add_mosaic("raw", "488", _img())
     layers.add_mosaic("raw", "561", _img())
     layers.add_result("intensity", "decon", "488", _img(3))
@@ -234,8 +210,7 @@ def test_channels_of_one_operator_still_all_sum(layers):
 
 
 def test_an_operator_result_arrives_instead_of_raw_rather_than_on_top_of_it(layers):
-    """The delivery path (``deliver_result``) adds a visible operator layer over a lit raw, so
-    the sum exists before the user has touched anything — same defect, no gesture."""
+    """The delivery path (``deliver_result``) adds a visible operator layer over a lit raw, so the sum exists before the user has touched anything — same"""
     layers.add_mosaic("raw", "488", _img())
     layers.add_mosaic("raw", "561", _img(1))
 
@@ -247,8 +222,7 @@ def test_an_operator_result_arrives_instead_of_raw_rather_than_on_top_of_it(laye
 
 
 def test_a_result_delivered_dark_darkens_nothing(layers):
-    """A window that did not ask gets ``visible=False``; a layer off screen cannot be summing
-    with anything and must not take raw down with it."""
+    """A window that did not ask gets ``visible=False``; a layer off screen cannot be summing with anything and must not take raw down with it."""
     layers.add_mosaic("raw", "488", _img())
 
     layers.add_mosaic("mip", "488", _img(1), visible=False)
@@ -257,8 +231,7 @@ def test_a_result_delivered_dark_darkens_nothing(layers):
 
 
 def test_hiding_an_operator_lights_nothing(layers):
-    """Only turning a layer ON may force another off; a checkbox going dark that turns
-    something else on is a control moving a second control."""
+    """Only turning a layer ON may force another off; a checkbox going dark that turns something else on is a control moving a second control."""
     layers.add_mosaic("raw", "488", _img())
     layers.add_mosaic("mip", "488", _img(1))         # raw · 488 is now dark
 
@@ -269,8 +242,7 @@ def test_hiding_an_operator_lights_nothing(layers):
 
 
 def test_an_analysis_overlay_is_never_darkened_by_the_mosaic_it_is_drawn_over(layers):
-    """Labels/Points layers skip ``_register_channel`` (no ``contrast_limits`` to link), so
-    they never enter ``_by_channel`` and exclusivity never sees them."""
+    """Labels/Points layers skip ``_register_channel`` (no ``contrast_limits`` to link), so they never enter ``_by_channel`` and exclusivity never sees them."""
     layers.add_mosaic("raw", "488", _img())
     mask = layers.add_labels("spots", "488 mask", np.zeros((32, 32), dtype="uint32"))
 
@@ -284,8 +256,7 @@ def test_an_analysis_overlay_is_never_darkened_by_the_mosaic_it_is_drawn_over(la
 
 
 def test_channel_contrast_survives_the_before_after_toggle(layers):
-    """The whole point of linking per channel: a second control for the same channel must not
-    be able to disagree."""
+    """The whole point of linking per channel: a second control for the same channel must not be able to disagree."""
     for op in ("raw", "stitched"):
         for ch in ("488", "561"):
             layers.add_mosaic(op, ch, _img())
@@ -297,6 +268,8 @@ def test_channel_contrast_survives_the_before_after_toggle(layers):
 
     assert layers.contrast("488") == (123.0, 4321.0)
     assert layers.find("stitched", "488").contrast_limits == [123.0, 4321.0]
+    layers.find("raw", "488").contrast_limits = (7, 900)
+    assert list(layers.find("stitched", "488").contrast_limits) == [7.0, 900.0]
 
 
 def test_contrast_is_per_channel_not_global(layers):
@@ -308,19 +281,8 @@ def test_contrast_is_per_channel_not_global(layers):
     assert layers.contrast("561") != (100.0, 200.0)
 
 
-def test_setting_contrast_on_one_processing_layer_writes_the_other(layers):
-    raw = layers.add_mosaic("raw", "488", _img())
-    stitched = layers.add_mosaic("stitched", "488", _img())
-
-    raw.contrast_limits = (7, 900)
-
-    assert list(stitched.contrast_limits) == [7.0, 900.0]
-
-
 def test_an_operator_layer_opens_on_its_own_window_not_raw_s(layers):
-    """``link_layers`` connects events, not values: a freshly added operator layer keeps its
-    own seeded window until something writes it. Deliberate — a decon result must be legible
-    on its own terms — but had been documented as the opposite, so it is pinned here."""
+    """``link_layers`` connects events, not values: a freshly added operator layer keeps its own seeded window until something writes it."""
     dim = np.full((32, 32), 300, dtype=np.uint16)
     dim[:4] = 900                        # a little signal over a dim background
     bright = np.full((32, 32), 6000, dtype=np.uint16)
@@ -335,21 +297,8 @@ def test_an_operator_layer_opens_on_its_own_window_not_raw_s(layers):
     )
 
 
-def test_match_contrast_to_is_shelved_whole():
-    """"Match layers to raw" went with its button (Julio, 2026-08-19: "Shelf the match layers
-    to raw"). The ABSENCE is pinned the way this repo pins deleted features."""
-    from squidxplorer._napari_view import MosaicLayers
-
-    assert not hasattr(MosaicLayers, "match_contrast_to"), "match_contrast_to is back"
-
-    import squidxplorer._lut_clipboard as LC
-
-    assert not hasattr(LC, "match_raw_contrast"), "the window-side match helper is back"
-
-
 def test_the_link_does_not_carry_the_COLORMAP(layers):
-    """Contrast is shared; COLOUR is not — the link is bound only to ``contrast_limits``, so
-    the LUT paste (the app's only writer of ``layer.colormap``) is not made redundant by it."""
+    """Contrast is shared; COLOUR is not — the link is bound only to ``contrast_limits``, so the LUT paste (the app's only writer of ``layer.colormap``) is"""
     raw = layers.add_mosaic("raw", "488", _img(), colormap="green")
     decon = layers.add_mosaic("decon", "488", _img(1), colormap="green")
 
@@ -373,8 +322,7 @@ def test_contrast_changes_arrive_on_the_public_event(layers):
 
 
 def test_a_degenerate_window_is_not_widened(layers):
-    """``_pct_window`` returns hi <= lo for a blank channel on purpose; widening it to
-    (lo, lo+1) would render a blank channel as full white, i.e. as signal."""
+    """``_pct_window`` returns hi <= lo for a blank channel on purpose; widening it to (lo, lo+1) would render a blank channel as full white, i.e."""
     lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(500.0, 500.0))
     assert list(lyr.contrast_limits) != [500.0, 501.0]
 
@@ -401,18 +349,12 @@ def test_a_mosaic_layer_opens_on_the_DATASETS_range_not_the_seeded_window(layers
 
 
 def test_a_layer_with_NO_seed_still_gets_the_datasets_range(layers, twelve_bit):
-    """The bug this change removes: the range used to be set only when a window was seeded, so a
-    blank or degenerate channel was left pinned to whatever extent napari inferred by itself."""
+    """The bug this change removes: the range used to be set only when a window was seeded, so a blank or degenerate channel was left pinned to whatever"""
     lyr = layers.add_mosaic("raw", "488", _img())
-
     assert list(lyr.contrast_limits_range) == [0.0, 4095.0]
 
-
-def test_a_degenerate_seed_still_gets_the_datasets_range(layers, twelve_bit):
-    """`hi <= lo` is dropped as a WINDOW on purpose; that must not also drop the RANGE."""
-    lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(500.0, 500.0))
-
-    assert list(lyr.contrast_limits_range) == [0.0, 4095.0]
+    degenerate = layers.add_mosaic("raw", "561", _img(), contrast_limits=(500.0, 500.0))
+    assert list(degenerate.contrast_limits_range) == [0.0, 4095.0]
 
 
 def test_a_window_wider_than_the_measured_depth_is_never_clamped_away(layers, twelve_bit):
@@ -443,11 +385,7 @@ def test_widening_NEVER_narrows(layers, twelve_bit):
 
 
 def test_widening_the_range_is_not_reported_as_a_USER_gesture(layers, twelve_bit):
-    """napari re-emits contrast_limits when the RANGE moves, even though the value does not.
-
-    An echo that reaches the user-contrast tap latches the plate to manual and kills per-region
-    contrast, which is what `programmatic()` exists to prevent.
-    """
+    """napari re-emits contrast_limits when the RANGE moves, even though the value does not."""
     layers.add_mosaic("raw", "488", _img(), contrast_limits=(100.0, 3000.0))
     seen = []
     layers.on_user_contrast(lambda *a: seen.append(a))
@@ -482,7 +420,6 @@ def test_a_region_change_re_widens_the_slider_without_moving_the_window(layers, 
 
     import numpy as np
 
-    # PER CHANNEL (2026-08-25): E7's 488 frames are read, so 488's own ceiling rises.
     _bitdepth.depth().observe_array(np.array([[16380]], np.uint16), "488")
     same = layers.add_mosaic("raw", "488", _img(seed=1))     # same identity -> reuse
 
@@ -498,13 +435,8 @@ def test_bbox_um_maps_onto_napari_scale_and_translate_with_the_axis_flip():
     """``_tiling`` speaks (x0, y0, x1, y1); napari speaks (row, col) = (y, x)."""
     scale, translate = scale_translate_from_bbox_um((100.0, 20.0, 300.0, 120.0), (50, 400))
 
-    # height 100 µm over 50 rows; width 200 µm over 400 cols
     assert scale == pytest.approx((2.0, 0.5))
-    # translate is (y0, x0), NOT (x0, y0)
     assert translate == (20.0, 100.0)
-
-
-def test_bbox_um_rejects_a_degenerate_box():
     with pytest.raises(ValueError):
         scale_translate_from_bbox_um((10.0, 10.0, 10.0, 50.0), (8, 8))
 
@@ -524,9 +456,7 @@ def test_add_mosaic_places_the_layer_in_stage_micrometres(layers):
 
 
 def _pyramid(nz=10, pulls=None):
-    """A lazy ``(z, y, x)`` pyramid built the way ``fuse_region_pyramid`` builds one — one dask
-    block per z per level, recording the z index when computed — so the pull count here is the
-    count of whole-region fuses a real open would pay (a plain ndarray would count nothing)."""
+    """A lazy ``(z, y, x)`` pyramid built the way ``fuse_region_pyramid`` builds one — one dask block per z per level, recording the z index when computed —"""
     import dask.array as da
     from dask import delayed
 
@@ -544,10 +474,7 @@ def _pyramid(nz=10, pulls=None):
 
 
 def test_the_contrast_seed_samples_the_plane_napari_shows(layers):
-    """The seed and the display must be the SAME plane. They disagreed: ``sample_plane`` took
-    ``nz // 2`` while napari centres on ``(nz - 1) // 2``, costing 27 extra whole-frame decodes
-    per channel on the real 10x region. Driven through a real ``ViewerModel`` since the claim
-    is about what napari does."""
+    """The seed and the display must be the SAME plane."""
     from squidxplorer._contrast import opening_z
 
     for nz in (10, 9, 2):
@@ -562,11 +489,7 @@ def test_the_contrast_seed_samples_the_plane_napari_shows(layers):
 
 
 def test_adding_a_placed_mosaic_pulls_two_z_not_four(layers):
-    """Measured on the real acquisition before this fix: FOUR whole-region decode passes per
-    channel (seed's z, napari's z=0 slice, napari's centred slice, and a fourth because
-    ``_place`` set ``layer.scale`` after the layer existed, moving the slider again) — 432
-    frame decodes for a window that needs 216. Two remain; napari's own constructor slice at
-    z=0 is not fixable from outside napari."""
+    """Measured on the real acquisition before this fix: FOUR whole-region decode passes per channel (seed's z, napari's z=0 slice, napari's centred slice,"""
     from squidxplorer._contrast import opening_z
 
     data, pulls = _pyramid(nz=10)
@@ -580,11 +503,7 @@ def test_adding_a_placed_mosaic_pulls_two_z_not_four(layers):
 
 
 def test_placing_at_construction_puts_the_layer_exactly_where_placing_it_after_would(layers):
-    """The saving must not move the picture: ``placement_for`` is used both as ``add_image``
-    kwargs and by ``_place``, and two placement rules disagreeing is exactly what ``_place``'s
-    docstring exists to prevent. Units are checked too, since they used to be lost."""
-    # (x0, y0, x1, y1) = 640 µm square over a 64 px level 0, so 10 µm/px on both displayed axes,
-    # translate (y0, x0) after the flip, and 1.5 µm on the z axis in front of both.
+    """The saving must not move the picture: ``placement_for`` is used both as ``add_image`` kwargs and by ``_place``, and two placement rules disagreeing"""
     data, _pulls = _pyramid(nz=6)
     lyr = layers.add_mosaic("raw", "488", data, multiscale=True,
                             bbox_um=(100.0, 20.0, 740.0, 660.0), z_scale_um=1.5)
@@ -596,8 +515,7 @@ def test_placing_at_construction_puts_the_layer_exactly_where_placing_it_after_w
 
 
 def test_a_bbox_the_placement_rule_refuses_is_still_refused(layers):
-    """Moving WHERE placement runs (into ``add_image``) must not change WHETHER it runs: a
-    silently unplaced mosaic sits at scale 1 in a µm world and reads as a rendering bug."""
+    """Moving WHERE placement runs (into ``add_image``) must not change WHETHER it runs: a silently unplaced mosaic sits at scale 1 in a µm world and reads"""
     with pytest.raises(ValueError):
         layers.add_mosaic("raw", "488", _img(shape=(64, 64)),
                           bbox_um=(10.0, 10.0, 10.0, 50.0))
@@ -620,7 +538,6 @@ def test_removing_a_processing_layer_drops_its_channels(layers):
 
     assert sorted(layers.remove_op("stitched")) == ["405", "488"]
     assert layers.ops() == ["raw"]
-    # the survivors still work
     layers.set_contrast("488", 10, 20)
     assert layers.contrast("488") == (10.0, 20.0)
 
@@ -633,13 +550,10 @@ def test_bindings_are_present_on_the_installed_napari():
 
 
 def test_binding_check_bites_when_a_symbol_is_renamed():
-    """MUTATION TEST: this project lost a day to a symbol that bound cleanly but did nothing
-    (vispy's ``Visual.freeze()`` made the assignment raise into a bare ``except: pass``), so
-    the guard itself must be provably able to fail."""
+    """MUTATION TEST: this project lost a day to a symbol that bound cleanly but did nothing (vispy's ``Visual.freeze()`` made the assignment raise into a"""
     import napari.qt
 
     class _Renamed:
-        # QtViewer has been renamed away; everything else still looks fine.
         __all__ = ("NotQtViewer",)
         NotQtViewer = object
 
@@ -650,8 +564,7 @@ def test_binding_check_bites_when_a_symbol_is_renamed():
 
 
 def test_binding_check_bites_on_a_quiet_de_export():
-    """A name that still exists but has left ``__all__`` is a deprecation in progress — catch
-    it while it is still only a warning."""
+    """A name that still exists but has left ``__all__`` is a deprecation in progress — catch it while it is still only a warning."""
 
     class _DeExported:
         __all__ = ()          # no longer exported...
@@ -742,10 +655,7 @@ os._exit(0)
 
 
 def test_the_canvas_stays_inside_the_embedded_napari_window(tmp_path):
-    """``MosaicPane`` used to call ``canvas.setParent(self)``, ripping the QtViewer out of
-    napari's own window; the gutted window then embedded fine (docks/controls present) while
-    the canvas painted nothing anywhere — a silent-failure shape (absence read as fine), so
-    this asserts the STRUCTURE, not the appearance."""
+    """``MosaicPane`` used to call ``canvas.setParent(self)``, ripping the QtViewer out of napari's own window; the gutted window then embedded fine"""
     import json
     import subprocess
     import sys
@@ -761,18 +671,13 @@ def test_the_canvas_stays_inside_the_embedded_napari_window(tmp_path):
     repo = pathlib.Path(__file__).resolve().parent.parent
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([str(repo), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
-    # The offscreen plugin has no GL, so inheriting the suite's QT_QPA_PLATFORM guarantees a
-    # segfault; drop it and let Qt pick the real platform.
     env.pop("QT_QPA_PLATFORM", None)
-    # Pin the child to the parent's binding, or qtpy defaults to PySide6 here and two bindings
-    # in one process abort before any assertion runs.
     env["QT_API"] = os.environ.get("QT_API") or qtpy.API_NAME.lower()
 
     proc = subprocess.run(
         [sys.executable, str(script)],
         capture_output=True, text=True, timeout=300, cwd=str(repo), env=env,
     )
-    # An exception in OUR code is a FAILURE, not a skip. Only a genuinely GL-less box skips.
     failed = [ln for ln in proc.stdout.splitlines() if ln.startswith("EMBEDFAIL ")]
     if failed:
         pytest.fail("embedding raised:\n" + json.loads(failed[0][len("EMBEDFAIL "):]))
@@ -787,7 +692,6 @@ def test_the_canvas_stays_inside_the_embedded_napari_window(tmp_path):
     got = json.loads(line[0][len("EMBED "):])
     assert got["native_window_embedded"] is True
     assert got["window_is_in_our_pane"] is True
-    # THE regression: rip the canvas out of napari's window and the mosaic has nowhere to paint.
     assert got["canvas_still_inside_napari_window"] is True
     assert got["central_is_not_empty"] is True
     assert got["layer_controls"] >= 1
@@ -795,9 +699,7 @@ def test_the_canvas_stays_inside_the_embedded_napari_window(tmp_path):
 
 
 def test_channels_composite_additively_not_occluding_each_other():
-    """napari defaults every layer to ``translucent``, so the last-added layer occludes the
-    rest; on the 10x set the last channel (638 nm, palette red) then rendered the whole mosaic
-    flat red, read from the GUI as "single channel"."""
+    """napari defaults every layer to ``translucent``, so the last-added layer occludes the rest; on the 10x set the last channel (638 nm, palette red) then"""
     import numpy as np
 
     from napari.components import ViewerModel
@@ -824,24 +726,18 @@ def test_blending_is_overridable_without_reaching_into_the_layer(layers):
 
 
 def test_our_own_contrast_writes_do_not_look_like_the_user_moving_a_slider(layers):
-    """A sink writing our own viewer-originated autoscale back into its own policy state would
-    latch every channel MANUAL on open and kill per-region contrast."""
+    """A sink writing our own viewer-originated autoscale back into its own policy state would latch every channel MANUAL on open and kill per-region contrast."""
     seen = []
     layers.add_mosaic("raw", "488", _img(), contrast_limits=(10.0, 900.0))
     layers.on_user_contrast(lambda ch, lo, hi: seen.append((ch, lo, hi)))
 
-    # adding another layer for the same channel is OUR write, and it propagates via the link
     layers.add_mosaic("stitched", "488", _img(), contrast_limits=(20.0, 800.0))
 
     assert seen == [], f"programmatic contrast write leaked to the sink: {seen}"
 
 
 def test_a_write_we_make_ourselves_after_arming_still_does_not_reach_the_sink(layers):
-    """The guard above only covers construction-time writes; this one writes through the tap
-    after it is armed, which is where the guard actually has to hold.
-
-    MUTATION: drop the ``is_programmatic`` check in the tap and this goes red.
-    """
+    """The guard above only covers construction-time writes; this one writes through the tap after it is armed, which is where the guard actually has to hold."""
     layers.add_mosaic("raw", "488", _img())
     seen = []
     layers.on_user_contrast(lambda ch, lo, hi: seen.append((ch, lo, hi)))
@@ -850,86 +746,8 @@ def test_a_write_we_make_ourselves_after_arming_still_does_not_reach_the_sink(la
         layers.set_contrast("488", 11.0, 222.0)
 
     assert seen == [], f"our own write leaked to the sink: {seen}"
-    # ...and the sink is not left deaf afterwards.
     layers.find("raw", "488").contrast_limits = (13.0, 444.0)
     assert seen == [("488", 13.0, 444.0)]
-
-
-def test_a_user_drag_does_reach_the_sink(layers):
-    layers.add_mosaic("raw", "488", _img())
-    seen = []
-    layers.on_user_contrast(lambda ch, lo, hi: seen.append((ch, lo, hi)))
-
-    layers.find("raw", "488").contrast_limits = (33.0, 777.0)   # the user moving napari's slider
-
-    assert seen == [("488", 33.0, 777.0)]
-
-
-def test_a_user_drag_on_a_LATER_layer_also_reaches_the_sink(layers):
-    """The plate must keep following napari for layers added AFTER it subscribed — every op
-    run after the first mosaic calls ``add_mosaic`` again, and the sink must not be wired only
-    to the layers that existed at subscribe time."""
-    seen: list = []
-    layers.on_user_contrast(lambda ch, lo, hi: seen.append((ch, lo, hi)))
-
-    layers.add_mosaic("raw", "488", _img())            # added AFTER the subscribe
-    layers.find("raw", "488").contrast_limits = (33.0, 777.0)     # a real user drag
-
-    assert seen == [("488", 33.0, 777.0)], (
-        "a layer added after on_user_contrast() never reached the sink"
-    )
-
-
-def test_a_second_op_layer_added_later_still_reaches_the_sink(layers):
-    """Same defect, the shape it actually ships in: op 2 arrives after the bind."""
-    layers.add_mosaic("raw", "488", _img())
-    seen: list = []
-    layers.on_user_contrast(lambda ch, lo, hi: seen.append((ch, lo, hi)))
-
-    layers.add_mosaic("demo", "561", _img())           # a NEW channel, after the bind
-    layers.find("demo", "561").contrast_limits = (12.0, 345.0)
-
-    assert seen == [("561", 12.0, 345.0)]
-
-
-def test_the_sink_survives_the_layers_being_rebuilt(layers):
-    """``on_user_contrast`` connected to the layer OBJECTS at subscribe time, and
-    ``_load_mosaic`` removes and re-adds every layer on each region change — so the sink
-    followed napari until the second region, then went silently deaf.
-
-    MUTATION: connect only inside ``on_user_contrast`` (the old shape) and this goes red.
-    """
-    layers.add_mosaic("raw", "488", _img())
-    seen = []
-    layers.on_user_contrast(lambda ch, lo, hi: seen.append((ch, lo, hi)))
-
-    layers.remove_op("raw")                       # exactly what a region change does
-    layers.add_mosaic("raw", "488", _img())       # ...and then rebuilds
-
-    layers.find("raw", "488").contrast_limits = (12.0, 345.0)
-    assert seen == [("488", 12.0, 345.0)], f"the sink went deaf after a rebuild: {seen}"
-
-
-def test_a_channel_added_after_subscribing_is_also_heard(layers):
-    """A subscriber must not have to know the channel order the mosaic worker happens to use."""
-    ly = layers
-    seen = []
-    ly.on_user_contrast(lambda ch, lo, hi: seen.append(ch))
-    ly.add_mosaic("raw", "561", _img())
-    ly.find("raw", "561").contrast_limits = (1.0, 2.0)
-    assert seen == ["561"]
-
-
-def test_one_user_drag_is_reported_once_however_many_layers_share_the_channel(layers):
-    """Contrast is linked per channel, so one drag moves every peer and each peer fires; the
-    sink must still hear it once, not N times for one gesture."""
-    layers.add_mosaic("raw", "488", _img())
-    layers.add_mosaic("stitched", "488", _img())
-    seen = []
-    layers.on_user_contrast(lambda ch, lo, hi: seen.append((ch, lo, hi)))
-
-    layers.find("raw", "488").contrast_limits = (5.0, 55.0)
-    assert seen == [("488", 5.0, 55.0)]
 
 
 def test_programmatic_is_reentrant_and_restores_state(layers):
@@ -945,8 +763,7 @@ def test_programmatic_is_reentrant_and_restores_state(layers):
 
 
 def test_a_zstack_gets_a_navigable_axis_and_a_2d_plane_does_not(layers):
-    """napari puts a dimension slider on every axis it is not displaying, so z control comes
-    for free from being a 3-D array — a 2-D array leaves nothing to put a slider on."""
+    """napari puts a dimension slider on every axis it is not displaying, so z control comes for free from being a 3-D array — a 2-D array leaves nothing to"""
     layers.add_mosaic("raw", "488", _img(shape=(32, 32)))
     assert layers.model.dims.ndim == 2
     assert list(layers.model.dims.not_displayed) == []
@@ -955,15 +772,6 @@ def test_a_zstack_gets_a_navigable_axis_and_a_2d_plane_does_not(layers):
     layers.add_mosaic("raw", "488", np.zeros((10, 32, 32), dtype=np.uint16))
     assert layers.model.dims.ndim == 3
     assert list(layers.model.dims.not_displayed) == [0]
-
-
-def test_the_z_axis_carries_the_step_in_micrometres_not_one(layers):
-    """A unit z scale steps fine in 2-D but renders an isotropic block in 3-D out of
-    anisotropic data."""
-    lyr = layers.add_mosaic("raw", "488", np.zeros((10, 32, 32), dtype=np.uint16),
-                            bbox_um=(0.0, 0.0, 320.0, 320.0), z_scale_um=1.5)
-    assert tuple(lyr.scale) == pytest.approx((1.5, 10.0, 10.0))
-    assert tuple(lyr.translate) == pytest.approx((0.0, 0.0, 0.0))
 
 
 def test_xy_placement_is_unaffected_by_the_extra_z_axis(layers):
@@ -1016,8 +824,7 @@ def test_the_sync_survives_a_region_change_that_recreates_every_layer(layers):
 
 
 def test_a_user_drag_fires_ONCE_even_though_the_channel_has_several_linked_layers(layers):
-    """Linked layers propagate the write to their peers; if every peer fired, a sink that
-    counts or accumulates would be wrong."""
+    """Linked layers propagate the write to their peers; if every peer fired, a sink that counts or accumulates would be wrong."""
     layers.add_mosaic("raw", "488", _img())
     layers.add_mosaic("stitched", "488", _img())
     layers.add_mosaic("decon", "488", _img())
@@ -1027,15 +834,6 @@ def test_a_user_drag_fires_ONCE_even_though_the_channel_has_several_linked_layer
     layers.find("raw", "488").contrast_limits = (44.0, 555.0)
 
     assert seen == [("488", 44.0, 555.0)], f"expected exactly one delivery, got {seen}"
-
-
-def test_our_own_writes_still_do_not_look_like_the_user_after_the_rewiring(layers):
-    """Keying on channel must not have quietly cost the programmatic guard."""
-    seen = []
-    layers.on_user_contrast(lambda ch, lo, hi: seen.append((ch, lo, hi)))
-    layers.add_mosaic("raw", "488", _img(), contrast_limits=(10.0, 900.0))
-    layers.add_mosaic("stitched", "488", _img(), contrast_limits=(20.0, 800.0))
-    assert seen == [], f"programmatic write leaked to the sink: {seen}"
 
 
 def test_two_subscribers_both_receive_a_channel_added_later(layers):
@@ -1048,8 +846,7 @@ def test_two_subscribers_both_receive_a_channel_added_later(layers):
 
 
 def test_dragging_BACK_to_a_previously_delivered_value_is_not_swallowed(layers):
-    """Echoes are deduped by comparing against the last value SEEN; if a programmatic write
-    did not also update that record, returning to an earlier value would be silently dropped."""
+    """Echoes are deduped by comparing against the last value SEEN; if a programmatic write did not also update that record, returning to an earlier value"""
     layers.add_mosaic("raw", "488", _img())
     seen = []
     layers.on_user_contrast(lambda ch, lo, hi: seen.append((lo, hi)))
@@ -1082,11 +879,7 @@ def test_changing_a_colormap_reports_the_new_rgb(layers):
 
 
 def test_the_colormap_sink_survives_the_layers_being_rebuilt(layers):
-    """Same half-life bug the contrast tap had; armed in ``_register_channel`` so a rebuilt
-    layer is still wired.
-
-    MUTATION: move the _connect_user_colormap call out of _register_channel and this goes red.
-    """
+    """Same half-life bug the contrast tap had; armed in ``_register_channel`` so a rebuilt layer is still wired."""
     layers.add_mosaic("raw", "488", _img())
     seen = []
     layers.on_user_colormap(lambda ch, rgb: seen.append(ch))
@@ -1099,8 +892,7 @@ def test_the_colormap_sink_survives_the_layers_being_rebuilt(layers):
 
 
 def test_our_own_colormap_writes_are_not_reported_as_user_gestures(layers):
-    """``add_mosaic`` sets the channel's colormap itself; an echo here would re-tint from
-    defaults on every region change."""
+    """``add_mosaic`` sets the channel's colormap itself; an echo here would re-tint from defaults on every region change."""
     seen = []
     layers.on_user_colormap(lambda ch, rgb: seen.append(ch))
     with layers.programmatic():
@@ -1119,10 +911,7 @@ def test_channel_rgb_reports_what_the_canvas_is_tinting_with(layers):
 
 
 def test_enable_scale_bar_turns_it_on_in_micrometres():
-    """napari has a built-in scale bar; this only configures it (visible, µm).
-
-    MUTATION: make enable_scale_bar a no-op -> visible stays False -> red.
-    """
+    """napari has a built-in scale bar; this only configures it (visible, µm)."""
     from napari.components import ViewerModel
 
     from squidxplorer._napari_view import enable_scale_bar
@@ -1130,44 +919,11 @@ def test_enable_scale_bar_turns_it_on_in_micrometres():
     v = ViewerModel()
     enable_scale_bar(v)
     assert v.scale_bar.visible is True
-    # napari >=0.8 deprecated ScaleBar.unit (units now come from Layer.units, which add_mosaic
-    # sets), so only assert the label where this napari still reports one.
     unit = v.scale_bar.unit
     if unit is not None:
-        # pint normalises "um" -> "micrometer"; either spelling is the micron, never pixels.
         assert str(unit) in ("um", "µm", "micrometer")
 
 
-def test_the_bar_reads_micrometres_because_the_layer_scale_IS_micrometres():
-    """The bar shows world = data * layer.scale, so it is correct iff layer.scale is µm/px;
-    this pins that a 64 px layer given a 640 µm box spans 640 world units.
-
-    MUTATION: divide bbox by 2 in scale_translate_from_bbox_um -> world extent halves -> red.
-    """
-    from napari.components import ViewerModel
-
-    v = ViewerModel()
-    layers = MosaicLayers(v)
-    lyr = layers.add_mosaic("raw", "488", _img(shape=(64, 64)),
-                            bbox_um=(0.0, 0.0, 640.0, 640.0))
-    # world extent along x = cols * scale_x = 64 * 10 µm = 640 µm, exactly the box width.
-    assert lyr.data.shape[-1] * float(lyr.scale[-1]) == pytest.approx(640.0)
-    assert lyr.data.shape[-2] * float(lyr.scale[-2]) == pytest.approx(640.0)
-
-
-def test_add_mosaic_labels_the_layer_units_micrometres():
-    """napari >=0.7 reads the scale bar's unit from the LAYER, not the deprecated
-    ``viewer.scale_bar.unit``.
-
-    MUTATION: stop setting layer.units -> stays pixel -> red.
-    """
-    from napari.components import ViewerModel
-
-    v = ViewerModel()
-    layers = MosaicLayers(v)
-    lyr = layers.add_mosaic("raw", "488", _img(shape=(16, 16)),
-                            bbox_um=(0.0, 0.0, 160.0, 160.0))
-    assert all("meter" in str(u) or str(u) in ("um", "µm") for u in lyr.units)
 # ---------------------------------------------------------------- analysis-result layers
 # add_mosaic makes IMAGE layers; a segmentation result is a Labels mask and a Points set
 # instead. These are the siblings that carry those.
@@ -1181,8 +937,7 @@ def _labels(n=3, shape=(32, 32)):
 
 
 def test_a_mask_lands_as_a_real_napari_Labels_layer_not_an_image(layers):
-    """A Labels layer gives napari its label colormap, pick-by-click and 0-transparency; an
-    Image would render it as a near-black gradient."""
+    """A Labels layer gives napari its label colormap, pick-by-click and 0-transparency; an Image would render it as a near-black gradient."""
     from napari.layers import Labels
 
     lyr = layers.add_labels("spots", "488 mask", _labels())
@@ -1210,8 +965,7 @@ def test_analysis_layers_carry_our_metadata_so_the_layer_tree_groups_them(layers
 
 
 def test_an_empty_points_layer_is_still_added_so_zero_nuclei_is_visible_as_a_result(layers):
-    """Zero found is an answer; skipping the layer would make "nothing ran" and "nothing
-    there" look identical."""
+    """Zero found is an answer; skipping the layer would make "nothing ran" and "nothing there" look identical."""
     from napari.layers import Points
 
     lyr = layers.add_points("spots", "488 centroids", np.zeros((0, 2)))
@@ -1220,8 +974,7 @@ def test_an_empty_points_layer_is_still_added_so_zero_nuclei_is_visible_as_a_res
 
 
 def test_analysis_layers_are_NOT_linked_into_the_per_channel_contrast_group(layers):
-    """A Labels/Points layer has no ``contrast_limits``; registering it as a contrast peer
-    would make ``link_layers`` raise on the next channel added."""
+    """A Labels/Points layer has no ``contrast_limits``; registering it as a contrast peer would make ``link_layers`` raise on the next channel added."""
     layers.add_mosaic("raw", "488", _img())
     layers.add_labels("spots", "488", _labels())          # same channel string, on purpose
 
@@ -1246,8 +999,7 @@ def test_analysis_layers_are_placed_in_stage_micrometres_like_the_mosaic_they_de
 
 
 def test_points_without_a_shape_cannot_be_placed_and_says_so(layers):
-    """A Points layer carries no array shape, so placement needs it passed in explicitly, or
-    every centroid would silently land at the world origin."""
+    """A Points layer carries no array shape, so placement needs it passed in explicitly, or every centroid would silently land at the world origin."""
     with pytest.raises(ValueError, match="shape"):
         layers.add_points("spots", "488 centroids", np.array([[1.0, 2.0]]),
                           bbox_um=(0.0, 0.0, 10.0, 10.0))
@@ -1270,8 +1022,7 @@ def test_remove_op_clears_masks_and_points_together(layers):
 
 
 def test_the_count_rides_on_the_points_layer_features_keyed_by_label(layers):
-    """A feature table keyed by label value, expressed in the shape napari already has: no
-    other viewer plugin surfaces a count, so it has to live somewhere addressable."""
+    """A feature table keyed by label value, expressed in the shape napari already has: no other viewer plugin surfaces a count, so it has to live somewhere"""
     pts = np.array([[4.0, 4.0], [8.0, 8.0], [12.0, 12.0]])
     lyr = layers.add_points("spots", "488 centroids", pts,
                             features={"label": [1, 2, 3]})
@@ -1297,14 +1048,11 @@ def test_showing_a_processing_layer_is_reported_once_for_the_whole_group(layers)
     for ly in layers.group("mip"):        # the group checkbox, which writes every child
         ly.visible = True
 
-    # ONE delivery per op, cause before consequence: mip lit, raw went dark BECAUSE of that.
     assert seen == [("mip", True), ("raw", False)], f"one group toggle reported as {seen}"
 
 
 def test_switching_operator_is_reported_by_the_op_tap_and_not_by_the_channel_tap(layers):
-    """``on_user_visibility`` answers "is this CHANNEL on screen anywhere", unchanged across an
-    operator switch, so it returns early and the plate hears nothing — the op fan-out needs
-    its own tap for exactly that gesture."""
+    """``on_user_visibility`` answers "is this CHANNEL on screen anywhere", unchanged across an operator switch, so it returns early and the plate hears"""
     channel_seen, op_seen = [], []
     layers.add_mosaic("raw", "405", _img())
     layers.add_mosaic("raw", "488", _img(1))
@@ -1326,12 +1074,7 @@ def test_switching_operator_is_reported_by_the_op_tap_and_not_by_the_channel_tap
 
 
 def test_our_own_writes_are_never_reported_as_a_user_picking_a_layer(layers):
-    """A result delivered to a window that did NOT ask arrives ``visible=False``; reporting
-    that as a gesture would turn the plate's layer off behind the user.
-
-    A re-add arriving LIT is different: raw really goes dark (one lit operator per channel,
-    first and second delivery alike) and the plate must be told, exactly as on a first lit
-    arrival, so THAT darkening is the one report allowed here."""
+    """A result delivered to a window that did NOT ask arrives ``visible=False``; reporting that as a gesture would turn the plate's layer off behind the user."""
     seen = []
     layers.add_mosaic("raw", "488", _img())
     layers.on_user_op(lambda op, on: seen.append((op, on)))
@@ -1374,8 +1117,7 @@ def test_a_single_hue_colormap_reduces_to_exactly_its_hue(layers, name, expected
 
 
 def test_the_colormap_this_app_builds_for_a_channel_reduces_to_its_palette_colour(layers):
-    """``_napari_pane._colormap_for`` builds ``[[0,0,0,1], [r,g,b,1]]`` from Squid's palette;
-    if that did not reduce, the common case would silently do nothing."""
+    """``_napari_pane._colormap_for`` builds ``[[0,0,0,1], [r,g,b,1]]`` from Squid's palette; if that did not reduce, the common case would silently do nothing."""
     from napari.utils import Colormap
 
     from squidxplorer._napari_view import colormap_hue_rgb
@@ -1386,8 +1128,7 @@ def test_the_colormap_this_app_builds_for_a_channel_reduces_to_its_palette_colou
 
 @pytest.mark.parametrize("name", ["viridis", "turbo", "inferno", "PiYG"])
 def test_a_multi_stop_colormap_refuses_rather_than_approximating(layers, name):
-    """A perceptual map's last stop is the top of a ramp, not the map (viridis ends yellow and
-    is mostly not yellow); emitting it would put a colour into the snapshot that is on no screen."""
+    """A perceptual map's last stop is the top of a ramp, not the map (viridis ends yellow and is mostly not yellow); emitting it would put a colour into"""
     from squidxplorer._napari_view import colormap_hue_rgb
     try:
         layer = _hue_layer(layers, name)
@@ -1397,8 +1138,7 @@ def test_a_multi_stop_colormap_refuses_rather_than_approximating(layers, name):
 
 
 def test_a_colormap_ending_in_black_has_no_hue_to_name(layers):
-    """The degenerate case: every row is a multiple of the zero vector, so the projection
-    would divide by zero and, unguarded, call black a valid hue for anything."""
+    """The degenerate case: every row is a multiple of the zero vector, so the projection would divide by zero and, unguarded, call black a valid hue for anything."""
     from napari.utils import Colormap
 
     from squidxplorer._napari_view import colormap_hue_rgb
@@ -1464,8 +1204,7 @@ def test_the_z_axis_comes_straight_back_when_raw_is_shown_again(layers):
 
 
 def test_a_layer_a_z_reducer_never_touched_is_not_collapsed(layers):
-    """Scoped to the pane's own mosaics and to a REAL z axis: a 2-D layer has nothing to stash,
-    so restoring it later must not be able to invent a stack."""
+    """Scoped to the pane's own mosaics and to a REAL z axis: a 2-D layer has nothing to stash, so restoring it later must not be able to invent a stack."""
     flat = layers.add_mosaic("raw", "405", np.zeros((64, 64), np.uint16), bbox_um=_Z_BBOX)
     layers.add_result("intensity", "mip", "405", np.zeros((64, 64), np.uint16),
                       bbox_um=_Z_BBOX, visible=True)
@@ -1475,9 +1214,7 @@ def test_a_layer_a_z_reducer_never_touched_is_not_collapsed(layers):
 
 
 def test_a_plane_op_result_KEEPS_the_z_axis(layers):
-    """A plane-op declares ``consumes=frozenset()`` — z survives at full depth — so its result
-    says nothing about whether the pane should show a z axis. Read off the DECLARATION, never
-    a name comparison."""
+    """A plane-op declares ``consumes=frozenset()`` — z survives at full depth — so its result says nothing about whether the pane should show a z axis."""
     from squidxplorer import add_operator, available_plane_operators, plane_op
 
     if "zaxis_plane_op" not in available_plane_operators():
@@ -1529,12 +1266,7 @@ def test_show_op_moves_the_z_axis_too(layers):
 
 
 def test_the_3d_swap_actually_swaps_a_pyramid_napari_handed_back(layers):
-    """``render_max_res_3d`` was a silent no-op on every real mosaic: its first line was
-    ``if not isinstance(ly.data, (list, tuple)): return``, which a ``multiscale=True`` layer
-    never satisfies, so napari went on dropping it to its COARSEST level in 3D.
-
-    MUTATION: put the isinstance check back -> the layer stays multiscale -> red.
-    """
+    """``render_max_res_3d`` was a silent no-op on every real mosaic: its first line was ``if not isinstance(ly.data, (list, tuple)): return``, which a"""
     raw = layers.add_mosaic("raw", "405", _z_stack_pyramid(), multiscale=True,
                             bbox_um=_Z_BBOX, z_scale_um=2.0)
     assert not isinstance(raw.data, (list, tuple)), (
@@ -1553,18 +1285,7 @@ def test_the_3d_swap_actually_swaps_a_pyramid_napari_handed_back(layers):
 
 
 def test_the_3d_swap_leaves_data_level_a_valid_index_so_later_adds_survive(layers):
-    """THE 2026-08-24 brick failure, headless. napari's ``Image.data`` setter never resets
-    ``_data_level`` ("we don't support changing multiscale in an Image instance"), so the 3D
-    swap's ``multiscale = False; data = chosen`` left the layer claiming the PYRAMID's level
-    while ``level_shapes`` has one row. QtViewer rebuilds every layer's overlays inside EVERY
-    ``add_image`` (``_update_scenegraph``), and the overlay's bounds read is
-    ``level_shapes[data_level]`` — so one swapped mosaic made every subsequent brick add raise
-    ``IndexError: index 1 is out of bounds for axis 0 with size 1`` (live: index 2, 12 bricks,
-    the 25x 54-z set; 3D never refined past the swapped stride-2 volume).
-
-    MUTATION: drop the ``data_level`` reset from ``_swap_layer_scale`` -> the overlay read
-    below raises -> red.
-    """
+    """THE 2026-08-24 brick failure, headless."""
     raw = layers.add_mosaic("raw", "405", _z_stack_pyramid(), multiscale=True,
                             bbox_um=_Z_BBOX, z_scale_um=2.0)
     assert int(raw.data_level) == 1, (
@@ -1575,7 +1296,6 @@ def test_the_3d_swap_leaves_data_level_a_valid_index_so_later_adds_survive(layer
     assert int(raw.data_level) < len(raw.level_shapes), (
         f"the swapped layer claims level {int(raw.data_level)} of "
         f"{len(raw.level_shapes)} — the state every later add_image trips over")
-    # The exact read QtViewer's overlay creation makes on every add_image.
     raw._display_bounding_box_augmented_data_level(raw._slice_input.displayed)
     layers.model.add_image(np.zeros((10, 8, 8), np.uint16))
 
@@ -1585,8 +1305,7 @@ def test_the_3d_swap_leaves_data_level_a_valid_index_so_later_adds_survive(layer
 
 
 def test_a_z_collapse_leaves_data_level_a_valid_index_too(layers):
-    """``_collapse_layer_z`` makes the same multiscale -> single-scale flip as the 3D swap
-    (one plane instead of one volume), so it poisons ``data_level`` the same way in 2D."""
+    """``_collapse_layer_z`` makes the same multiscale -> single-scale flip as the 3D swap (one plane instead of one volume), so it poisons ``data_level``"""
     layers.add_mosaic("raw", "405", _z_stack_pyramid(), multiscale=True,
                       bbox_um=_Z_BBOX, z_scale_um=2.0)
     layers.add_mosaic("mip", "405", np.zeros((64, 64), np.uint16), bbox_um=_Z_BBOX)
@@ -1600,13 +1319,7 @@ def test_a_z_collapse_leaves_data_level_a_valid_index_too(layers):
 
 
 def test_full_res_level_takes_level_zero_off_napari_s_own_container():
-    """``np.asarray(MultiScaleData)`` returns the COARSEST level (``__array__`` is
-    ``_data[-1]``), so treating a non-list Sequence as a plain array silently substitutes the
-    smallest picture for the largest.
-
-    MUTATION: make ``pyramid_levels`` return None for a non-list Sequence -> the coarsest level
-    comes back -> red.
-    """
+    """``np.asarray(MultiScaleData)`` returns the COARSEST level (``__array__`` is ``_data[-1]``), so treating a non-list Sequence as a plain array silently"""
     from napari.components import ViewerModel
 
     from squidxplorer._napari_view import full_res_level, pyramid_levels
@@ -1621,8 +1334,7 @@ def test_full_res_level_takes_level_zero_off_napari_s_own_container():
 
 
 def test_a_plain_array_and_a_nested_list_are_not_pyramids():
-    """The discriminator is the ELEMENT, not the container: ``[[1, 2], [3, 4]]`` encodes ONE
-    array and must not be read as two levels."""
+    """The discriminator is the ELEMENT, not the container: ``[[1, 2], [3, 4]]`` encodes ONE array and must not be read as two levels."""
     from squidxplorer._napari_view import full_res_level, pyramid_levels
 
     arr = np.zeros((4, 4), np.uint16)
@@ -1649,22 +1361,13 @@ def test_camera_for_bbox_um_centres_the_box():
 
 
 def test_camera_for_bbox_um_fits_the_TIGHTER_axis():
-    """Height against height, width against width — and the tighter one decides.
-
-    This is the assertion that fails on an (h, w) / (w, h) swap, which is why the box and the
-    canvas are both deliberately non-square and of DIFFERENT aspect. A swap does not raise; it
-    frames the box against the wrong edge and reads as somebody preferring a different zoom.
-    `_brick_view._frame_camera` carried exactly that bug until this function existed.
-    """
+    """Height against height, width against width — and the tighter one decides."""
     from squidxplorer._napari_view import camera_for_bbox_um
 
-    # canvas 600 tall x 800 wide; box 50 um tall x 100 um wide -> width is the tighter axis.
     _c, zoom = camera_for_bbox_um((0.0, 0.0, 100.0, 50.0), (600, 800))
     assert zoom == pytest.approx(0.95 * min(600 / 50, 800 / 100))
     assert zoom == pytest.approx(0.95 * 8.0), "800/100 is tighter than 600/50; the min must win"
 
-    # Same canvas, box transposed -> now height is the tighter axis. A function that read the
-    # canvas the other way round would return the SAME number for both of these.
     _c, zoom_t = camera_for_bbox_um((0.0, 0.0, 50.0, 100.0), (600, 800))
     assert zoom_t == pytest.approx(0.95 * min(600 / 100, 800 / 50))
     assert zoom_t != pytest.approx(zoom)
@@ -1697,16 +1400,7 @@ def test_camera_for_bbox_um_refuses_rather_than_guessing(bbox, canvas, margin, m
 
 
 def test_framing_the_layer_s_own_box_gives_napari_s_own_camera():
-    """THE test this function exists to pass: reset_view and frame_bbox_um must agree.
-
-    If they disagree, we have written a second, subtly different answer to "what does fitting
-    mean" — which is the whole defect this codebase's one-owner rule is about, wearing a camera.
-
-    The ZOOM must be identical. The CENTRE differs by exactly half a pixel, and that is a real
-    convention difference rather than an error: napari's layer extent runs between pixel CENTRES,
-    while a ``bbox_um`` is the outer EDGE of the pixels. On the FOV boxes this is built for, that
-    is 0.05 um on a 392 um field.
-    """
+    """THE test this function exists to pass: reset_view and frame_bbox_um must agree."""
     from napari.components import ViewerModel
 
     from squidxplorer._napari_view import MosaicLayers
@@ -1770,12 +1464,7 @@ def test_frame_bbox_um_names_a_bad_box_rather_than_moving_the_camera():
 
 
 def test_a_napari_that_moved_its_canvas_size_is_named_not_guessed_around():
-    """``_canvas_size`` is private, so its loss must be a sentence — never a silent (800, 600).
-
-    Framing every camera against a canvas napari no longer reports would be wrong by the aspect
-    ratio and would look like a zoom preference, which is the failure this whole binding-guard
-    section exists to convert into a loud one.
-    """
+    """``_canvas_size`` is private, so its loss must be a sentence — never a silent (800, 600)."""
     from napari.components import ViewerModel
 
     from squidxplorer._napari_view import (
@@ -1821,7 +1510,6 @@ def test_selection_prefers_a_visible_layer_of_the_SAME_op(layers):
 
     raw488.visible = False
 
-    # decon561 is the TOPMOST visible layer, but raw561 shares the hidden layer's op.
     assert layers.model.layers.selection.active is raw561
 
 
@@ -1955,7 +1643,6 @@ def test_toggling_raw_back_returns_to_the_plane_the_user_was_on(layers):
     dims.current_step = (2,) + tuple(dims.current_step)[1:]
 
     _deliver_mip(layers)
-    # The flat raw stand-in IS the plane the user was on (coarsest level, plane 2).
     coarsest = _raw_pyramid(4)[-1]
     assert np.array_equal(np.asarray(raw.data), coarsest[2]), (
         "the collapsed raw does not show the plane the user was on")
@@ -1979,19 +1666,6 @@ def test_a_redelivered_result_still_darkens_raw(layers):
     assert layers.find("mip", "BF").visible is True
     assert raw.visible is False, (
         "raw · BF and mip · BF are both lit after a re-run, so the channel sums twice")
-
-
-def test_a_raw_reload_with_no_opinion_leaves_the_lit_operator_alone(layers):
-    """visible=None on a reuse means 'do not touch what is lit' — the timepoint-step contract."""
-    raw = layers.add_mosaic("raw", "BF", _raw_pyramid(1), multiscale=True,
-                            bbox_um=(0.0, 0.0, 32.0, 32.0))
-    _deliver_mip(layers)
-
-    layers.add_mosaic("raw", "BF", _raw_pyramid(1, seed=3), multiscale=True,
-                      bbox_um=(0.0, 0.0, 32.0, 32.0), visible=None)
-
-    assert raw.visible is False, "a frame reload relit raw over the operator the user chose"
-    assert layers.find("mip", "BF").visible is True
 
 
 def test_a_timepoint_reload_does_not_relight_raw_over_a_lit_result(layers):

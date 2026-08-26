@@ -1,9 +1,4 @@
-"""Gallery View: the scope, the crop, the contrast, the thread, and the window.
-
-Complements test_viewer.py's "not implemented" pin; this covers what Gallery View actually
-builds: real FOV subsetting, contrast over covered pixels only, incremental cell delivery,
-and that nothing decodes on the Qt thread.
-"""
+"""Gallery View: the scope, the crop, the contrast, the thread, and the window."""
 from __future__ import annotations
 
 import os
@@ -33,8 +28,7 @@ from squidxplorer.reader import open_reader                                   # 
 
 @pytest.fixture(scope="module")
 def qapp():
-    """This module's QApplication, not pytest-qt's — the chunked suite disables plugin
-    autoload, so pytest-qt's fixture of the same name does not exist there."""
+    """This module's QApplication, not pytest-qt's — the chunked suite disables plugin autoload, so pytest-qt's fixture of the same name does not exist there."""
     app = QApplication.instance() or QApplication([])
     app.setProperty("_squidxplorer_test", True)   # main() won't call exec_/exit under test
     return app
@@ -44,8 +38,7 @@ def qapp():
 
 
 class _RecordingReader:
-    """Wraps a real reader and records which thread each read happened on (not a fake reader,
-    so this still exercises real acquisition geometry)."""
+    """Wraps a real reader and records which thread each read happened on (not a fake reader, so this still exercises real acquisition geometry)."""
 
     def __init__(self, inner) -> None:
         self._inner = inner
@@ -74,8 +67,7 @@ def _meta(root):
 
 
 def _drain(qapp, win, timeout_s: float = 60.0):
-    """Spin the event loop until the gallery's worker finishes, then flush its budgeted
-    repaints until settled."""
+    """Spin the event loop until the gallery's worker finishes, then flush its budgeted repaints until settled."""
     import time
 
     deadline = time.time() + timeout_s
@@ -111,21 +103,13 @@ def test_the_whole_acquisition_is_a_scope_and_so_is_a_selection(squid_dataset):
     assert sel.crops(meta) == ("B3",), "1 of 2 FOVs is a crop and must be named as one"
 
 
-def test_a_stale_selection_drops_the_wells_that_are_gone_rather_than_refusing(squid_dataset):
-    """A selection outlives a re-ingest: ``run_plate`` drops an unknown region, so does this."""
+def test_a_selection_is_put_in_plate_order_and_unknown_wells_are_dropped(squid_dataset):
+    """A stale selection drops the unknown well like ``run_plate``; a marquee arrives in drag order."""
     root, _arrays = squid_dataset
     _reader, meta = _meta(root)
-    sel = G.GalleryScope.from_region_fovs(meta, [("B2", 0), ("Z99", 0), ("B3", 47)])
-    assert sel.regions == ("B2",)
-    assert sel.fovs_of("B2") == (0,)
-
-
-def test_the_scope_is_in_plate_order_whatever_order_the_selection_arrives_in(squid_dataset):
-    """Rows read down the plate; a marquee reports cells in drag order, not plate order."""
-    root, _arrays = squid_dataset
-    _reader, meta = _meta(root)
-    sel = G.GalleryScope.from_region_fovs(meta, [("B3", 0), ("B2", 1), ("B3", 1), ("B2", 0)])
+    sel = G.GalleryScope.from_region_fovs(meta, [("B3", 0), ("Z99", 0), ("B2", 1), ("B3", 47)])
     assert sel.regions == ("B2", "B3")
+    assert sel.fovs_of("B3") == (0,)
 
 
 def test_cells_are_queued_region_major_so_a_whole_row_lands_first(squid_dataset):
@@ -149,7 +133,6 @@ def test_the_cell_cap_truncates_whole_regions_and_never_half_a_row():
     assert capped.regions == ("A0", "A1", "A2")
     assert capped.cell_count == 9 <= 10
     assert all(len(capped.fovs_of(r)) == 1 for r in capped.regions)
-    # Under the cap it is the same object's content, untouched.
     same, none_dropped = scope.capped(max_cells=1000)
     assert none_dropped == 0 and same.regions == scope.regions
 
@@ -174,8 +157,7 @@ def test_an_unknown_projection_is_refused_at_construction():
 
 
 def test_a_fov_subset_fuses_a_smaller_cell_than_the_whole_region(squid_dataset):
-    """Same FOV mapping ``run_plate`` takes; the crop comes for free from
-    ``_placement.fov_offsets_px``, which normalises whatever FOV set it is handed."""
+    """Same FOV mapping ``run_plate`` takes; the crop comes for free from ``_placement.fov_offsets_px``, which normalises whatever FOV set it is handed."""
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
     channel = meta["channels"][0]
@@ -192,8 +174,7 @@ def test_a_fov_subset_fuses_a_smaller_cell_than_the_whole_region(squid_dataset):
 
 
 def test_a_cell_reports_the_decimation_it_was_fused_at(squid_dataset):
-    """``step`` is how the cell relates to the acquisition, so the caption can say "1/23 of
-    11462x9587"."""
+    """``step`` is how the cell relates to the acquisition, so the caption can say "1/23 of 11462x9587"."""
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
     ch = G.channel_field(meta["channels"][0], "name")
@@ -214,8 +195,7 @@ def test_a_geometry_that_is_not_derivable_returns_none_rather_than_a_guess(squid
 
 
 def test_a_cell_whose_every_fov_is_unreadable_raises_instead_of_going_black(squid_dataset):
-    """A black cell would read a failure as empty tissue; one bad FOV is a hole, all of them
-    is not a picture."""
+    """A black cell would read a failure as empty tissue; one bad FOV is a hole, all of them is not a picture."""
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
     with pytest.raises(ValueError, match="not one of the"):
@@ -224,8 +204,7 @@ def test_a_cell_whose_every_fov_is_unreadable_raises_instead_of_going_black(squi
 
 def test_a_ragged_z_is_cropped_to_the_common_shape_rather_than_losing_the_whole_cell(
         squid_dataset, monkeypatch):
-    """``fuse_region_pyramid`` raises on a ragged z, correctly. Here z is being reduced, so
-    crop to the common shape instead of losing the whole cell to one bad plane."""
+    """``fuse_region_pyramid`` raises on a ragged z, correctly."""
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
     ch = G.channel_field(meta["channels"][0], "name")
@@ -242,8 +221,7 @@ def test_a_ragged_z_is_cropped_to_the_common_shape_rather_than_losing_the_whole_
 
 
 def test_one_unreadable_fov_leaves_a_counted_hole_in_its_own_place(squid_dataset, monkeypatch):
-    """Dropping the failed FOV instead would shift its neighbours and misregister the region,
-    not merely leave it incomplete."""
+    """Dropping the failed FOV instead would shift its neighbours and misregister the region, not merely leave it incomplete."""
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
     ch = G.channel_field(meta["channels"][0], "name")
@@ -285,16 +263,14 @@ def test_the_window_is_taken_over_the_covered_pixels_only():
 
 
 def test_a_flat_channel_gets_no_window_at_all_rather_than_a_fabricated_one():
-    """``auto_contrast`` refuses for a blank channel — a narrow window would render its noise
-    at full intensity, i.e. as signal — and the gallery must carry the refusal, not undo it."""
+    """``auto_contrast`` refuses for a blank channel — a narrow window would render its noise at full intensity, i.e."""
     flat = np.full((64, 64), 700, dtype=np.uint16)
     assert G.cell_window(flat, np.ones_like(flat, dtype=bool)) is None
     assert G.cell_window(np.zeros((0, 0), dtype=np.uint16)) is None
 
 
 def test_shared_windows_is_the_union_and_omits_channels_that_refused():
-    """The default, diverging from gallery-view: per-cell contrast would make a dim well and
-    a bright well look the same."""
+    """The default, diverging from gallery-view: per-cell contrast would make a dim well and a bright well look the same."""
     def cell(region, channel, window):
         return G.GalleryCell(region, channel, np.zeros((2, 2), np.uint16),
                              np.ones((2, 2), bool), window, 1.0, (2, 2), 1)
@@ -330,15 +306,13 @@ def test_a_gallery_cell_keys_into_the_shared_plane_cache_and_a_second_fuse_reads
     assert reader.reads == cold, "a warm gallery cell decoded planes again"
     np.testing.assert_array_equal(first.image, second.image)
 
-    # A DIFFERENT FOV subset is a different picture and must not be served the cached one.
     subset = G.fuse_gallery_cell(reader, meta, "B2", (0,), ch, cache=cache, token=token)
     assert reader.reads > cold
     assert subset.full_shape != first.full_shape
 
 
 def test_a_cell_with_a_hole_in_it_is_not_cached(squid_dataset, monkeypatch):
-    """A degraded read is a read to retry, not a picture to keep: caching it would also drop
-    the hole silently on a later hit, since the cache stores pixels only."""
+    """A degraded read is a read to retry, not a picture to keep: caching it would also drop the hole silently on a later hit, since the cache stores pixels only."""
     from squidxplorer._mosaic_source import plane_cache, source_token
 
     root, _arrays = squid_dataset
@@ -359,7 +333,6 @@ def test_a_cell_with_a_hole_in_it_is_not_cached(squid_dataset, monkeypatch):
     assert holed.unreadable == (1,)
     after_first = reader.reads
 
-    # Second fuse must go back to the reader rather than being served the degraded cell.
     again = G.fuse_gallery_cell(reader, meta, "B2", (0, 1), ch, cache=cache, token=token)
     assert reader.reads > after_first, "a cell with a hole in it was cached"
     assert again.unreadable == (1,), "the retry lost the hole count"
@@ -379,8 +352,7 @@ def test_a_reader_with_no_identity_runs_uncached_rather_than_risking_another_acq
 
 
 def test_the_gallery_never_reads_a_plane_on_the_qt_thread(qapp, squid_dataset):
-    """``sample_plane`` costs a measured ~493 ms per region on the UI thread; a gallery of N
-    regions would pay that N times, so the reader is instrumented rather than trusted by inspection."""
+    """``sample_plane`` costs a measured ~493 ms per region on the UI thread; a gallery of N regions would pay that N times, so the reader is instrumented"""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
@@ -402,8 +374,7 @@ def test_the_gallery_never_reads_a_plane_on_the_qt_thread(qapp, squid_dataset):
 
 
 def test_cells_are_emitted_one_at_a_time_as_they_are_fused(qapp, squid_dataset):
-    """Driven against ``GalleryWorker`` directly, connected before ``start()`` — connecting
-    after ``GalleryWindow.__init__`` starts it would race the first cell."""
+    """Driven against ``GalleryWorker`` directly, connected before ``start()`` — connecting after ``GalleryWindow.__init__`` starts it would race the first cell."""
     from squidxplorer._gallery_window import GalleryWorker
 
     root, _arrays = squid_dataset
@@ -428,7 +399,6 @@ def test_cells_are_emitted_one_at_a_time_as_they_are_fused(qapp, squid_dataset):
             "batched instead of arriving as they are fused")
         assert len(set(seen)) == len(seen), "a cell was emitted twice"
         assert seen == scope.cells(), "cells did not arrive region-major, so a row completes late"
-        # Progress is reported per cell too, not once at the end.
         assert len(progress) == scope.cell_count
         assert progress[-1] == (scope.cell_count, scope.cell_count)
     finally:
@@ -436,37 +406,23 @@ def test_cells_are_emitted_one_at_a_time_as_they_are_fused(qapp, squid_dataset):
         worker.wait(5000)
 
 
-def test_every_cell_of_the_scope_ends_up_painted(qapp, squid_dataset):
-    """The window half of the same property: nothing is left as an empty grey square."""
+def test_every_cell_is_painted_regions_down_and_channels_across(qapp, squid_dataset):
+    """A channel must stay in ONE column across regions, and no cell is left an empty grey square."""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
     scope = G.GalleryScope.whole(meta)
-
     win = GalleryWindow(reader, meta, scope, title="t")
     try:
+        assert win.first_paint_ms() is None or win.first_paint_ms() >= 0
         _drain(qapp, win)
+        fp = win.first_paint_ms()
+        assert fp is not None and fp >= 0 and "first paint" in win._status.text()
         painted = [k for k, lab in win._labels.items()
                    if lab.pixmap() is not None and not lab.pixmap().isNull()]
         assert len(painted) == scope.cell_count, (
             f"{len(painted)} of {scope.cell_count} cells carry a pixmap")
-    finally:
-        win.close()
-        qapp.processEvents()
-
-
-def test_the_grid_is_regions_down_and_channels_across(qapp, squid_dataset):
-    """A channel must stay in ONE column across regions, or the two wells being compared are
-    not side by side."""
-    from squidxplorer._gallery_window import GalleryWindow
-
-    root, _arrays = squid_dataset
-    reader, meta = _meta(root)
-    scope = G.GalleryScope.whole(meta)
-    win = GalleryWindow(reader, meta, scope, title="t")
-    try:
-        _drain(qapp, win)
         positions = {}
         for (region, channel), label in win._labels.items():
             idx = win._grid.indexOf(label)
@@ -484,8 +440,7 @@ def test_the_grid_is_regions_down_and_channels_across(qapp, squid_dataset):
 
 
 def test_a_rescope_leaves_no_orphan_widgets_painting_over_the_new_grid(qapp, squid_dataset):
-    """Removing a widget from a QGridLayout does not reparent it, and ``deleteLater`` only
-    SCHEDULES — so a rescoped gallery drew the previous layout on top of the new one."""
+    """Removing a widget from a QGridLayout does not reparent it, and ``deleteLater`` only SCHEDULES — so a rescoped gallery drew the previous layout on top"""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
@@ -513,8 +468,7 @@ def test_a_rescope_leaves_no_orphan_widgets_painting_over_the_new_grid(qapp, squ
 
 
 def test_a_column_header_never_overruns_its_column(qapp, squid_dataset):
-    """The header is fixed to the cell width and labelled by excitation wavelength rather than
-    the full channel name, which used to run several headers together into one line."""
+    """The header is fixed to the cell width and labelled by excitation wavelength rather than the full channel name, which used to run several headers"""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
@@ -527,13 +481,10 @@ def test_a_column_header_never_overruns_its_column(qapp, squid_dataset):
                 f"header {head.text()!r} is {head.width()} px wide in a {win._cell_px} px column")
             assert head.toolTip(), "the short header dropped the full channel name entirely"
 
-        # The fixture's channels are 488 nm and 638 nm; headings are the wavelength, not the
-        # 22-character filename channel.
         headings = {h.text() for h in win._headers}
         assert any(t.endswith(" nm") for t in headings), headings
         assert not any("Fluorescence" in t for t in headings), headings
 
-        # A size change moves the columns; the headers must move with them or they overrun again.
         win._size.setCurrentIndex(2)              # Large
         qapp.processEvents()
         for head in win._headers:
@@ -545,9 +496,7 @@ def test_a_column_header_never_overruns_its_column(qapp, squid_dataset):
 
 def test_a_repaint_is_budgeted_so_a_big_gallery_stutters_no_more_than_a_small_one(
         qapp, squid_dataset):
-    """Measured 159-190 ms of frozen Qt thread on a 1536-well plate: not decoding (that's on
-    the worker) but repainting, since each widened shared window invalidates every cell of
-    that channel. Work per tick is now bounded by a budget, not by scope size."""
+    """Measured 159-190 ms of frozen Qt thread on a 1536-well plate: not decoding (that's on the worker) but repainting, since each widened shared window"""
     from squidxplorer import _gallery_window as GW
 
     root, _arrays = squid_dataset
@@ -567,7 +516,6 @@ def test_a_repaint_is_budgeted_so_a_big_gallery_stutters_no_more_than_a_small_on
             f"one flush painted {len(painted)} cells, over the {GW.REPAINT_BUDGET} budget — "
             "the stall scales with the gallery again")
 
-        # And it must not stop half-done: the timer re-arms while work remains.
         if win._dirty:
             assert win._repaint_timer.isActive(), "a partial flush left cells dirty and disarmed"
         guard = 0
@@ -582,8 +530,7 @@ def test_a_repaint_is_budgeted_so_a_big_gallery_stutters_no_more_than_a_small_on
 
 
 def test_compositing_at_display_resolution_never_starves_the_label(qapp, squid_dataset):
-    """The invariant behind the 2.5x paint speed-up: the strided view must stay >= 1 source
-    pixel per drawn pixel, or cells go visibly soft with nothing else to notice."""
+    """The invariant behind the 2.5x paint speed-up: the strided view must stay >= 1 source pixel per drawn pixel, or cells go visibly soft with nothing"""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
@@ -633,8 +580,7 @@ def test_a_size_change_re_renders_from_ram_and_reads_nothing(qapp, squid_dataset
 
 
 def test_a_subset_gallery_shows_the_crop_on_the_row_label(qapp, squid_dataset):
-    """Only the label can tell a marquee'd corner apart from the whole well, so it carries the
-    FOV count in scope against the region's own."""
+    """Only the label can tell a marquee'd corner apart from the whole well, so it carries the FOV count in scope against the region's own."""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
@@ -644,6 +590,7 @@ def test_a_subset_gallery_shows_the_crop_on_the_row_label(qapp, squid_dataset):
     try:
         assert win._region_label("B2") == "B2\n1/2 FOV"
         assert G.GalleryScope.whole(meta).cell_count > scope.cell_count
+        assert not win._t.isVisibleTo(win), "a single-timepoint acquisition shows no t control"
     finally:
         win.close()
         qapp.processEvents()
@@ -651,8 +598,7 @@ def test_a_subset_gallery_shows_the_crop_on_the_row_label(qapp, squid_dataset):
 
 def test_more_than_one_timepoint_gets_a_control_and_changing_it_changes_the_pixels(
         qapp, multi_time_point_dataset):
-    """The bar is hidden at n_t == 1 (a spin pinned to 0..0 implies an axis that doesn't exist)
-    and shown with real range otherwise."""
+    """The bar is hidden at n_t == 1 (a spin pinned to 0..0 implies an axis that doesn't exist) and shown with real range otherwise."""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _planes = multi_time_point_dataset
@@ -679,44 +625,12 @@ def test_more_than_one_timepoint_gets_a_control_and_changing_it_changes_the_pixe
         qapp.processEvents()
 
 
-def test_a_single_timepoint_acquisition_shows_no_timepoint_control(qapp, squid_dataset):
-    from squidxplorer._gallery_window import GalleryWindow
-
-    root, _arrays = squid_dataset
-    reader, meta = _meta(root)
-    win = GalleryWindow(reader, meta, G.GalleryScope.whole(meta), title="t")
-    try:
-        assert not win._t.isVisibleTo(win)
-    finally:
-        win.close()
-        qapp.processEvents()
-
-
-def test_the_gallery_reports_its_own_first_paint(qapp, squid_dataset):
-    """First paint (CONTEXT.md's term) is distinct from the total; the status line adds the total."""
-    from squidxplorer._gallery_window import GalleryWindow
-
-    root, _arrays = squid_dataset
-    reader, meta = _meta(root)
-    win = GalleryWindow(reader, meta, G.GalleryScope.whole(meta), title="t")
-    try:
-        assert win.first_paint_ms() is None or win.first_paint_ms() >= 0
-        _drain(qapp, win)
-        fp = win.first_paint_ms()
-        assert fp is not None and fp >= 0
-        assert "first paint" in win._status.text()
-    finally:
-        win.close()
-        qapp.processEvents()
-
-
 # --- the command ------------------------------------------------------------------------------
 
 
 def test_the_view_menu_opens_a_gallery_on_the_selection_and_rescopes_on_a_second_click(
         qapp, squid_dataset):
-    """Scope comes from ``selected_region_fovs()``, the same plumbing the marquee and
-    shift-click already feed."""
+    """Scope comes from ``selected_region_fovs()``, the same plumbing the marquee and shift-click already feed."""
     import squidxplorer._viewer as V
     from tests.conftest import shutdown_plate_window
 
@@ -726,7 +640,6 @@ def test_the_view_menu_opens_a_gallery_on_the_selection_and_rescopes_on_a_second
         win.ingest(str(root))
         qapp.processEvents()
 
-        # No selection -> the WHOLE acquisition.
         assert win.gallery_scope().regions == ("B2", "B3")
         assert win.gallery_scope().from_selection is False
 
@@ -735,7 +648,6 @@ def test_the_view_menu_opens_a_gallery_on_the_selection_and_rescopes_on_a_second
         assert gallery is not None and gallery.isVisible()
         assert gallery._scope.regions == ("B2", "B3")
 
-        # A selection -> that subset, in the SAME window.
         win._selected_regions = ["B3"]
         scope = win.gallery_scope()
         assert scope.from_selection is True and scope.regions == ("B3",)

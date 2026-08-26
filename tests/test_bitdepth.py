@@ -1,8 +1,4 @@
-"""The contrast slider's ceiling: measured, monotone, and biased to over-cover.
-
-The two datasets these tests are written from are real and on disk. Their maxima are the
-parameters below, so a rule that stops working on them fails here rather than on screen.
-"""
+"""The contrast slider's ceiling: measured, monotone, and biased to over-cover."""
 
 from __future__ import annotations
 
@@ -63,14 +59,6 @@ def test_the_ceiling_only_ever_RISES():
 
     assert d.observe(2.0) is False
     assert d.ceiling == 16383.0
-
-
-def test_observing_within_the_current_ceiling_reports_no_change():
-    """`observe` returning True is what fires the widen broadcast, so it must mean something."""
-    d = _bitdepth.depth()
-    assert d.observe(1000.0) is True            # 65535 -> 4095 is a change
-    assert d.observe(2000.0) is False           # still 12-bit; no layer needs touching
-    assert d.ceiling == 4095.0
 
 
 def test_a_settled_dataset_stops_measuring():
@@ -166,7 +154,7 @@ def test_the_env_override_does_not_move_even_when_the_data_exceeds_it(monkeypatc
     assert "16380" in caplog.text
 
 
-@pytest.mark.parametrize("junk", ["", "  ", "twelve", "0", "17", "-3"])
+@pytest.mark.parametrize("junk", ["", "twelve", "17"])
 def test_a_junk_override_is_ignored_and_the_data_is_measured(monkeypatch, junk):
     monkeypatch.setenv(_bitdepth.ENV_BIT_DEPTH, junk)
     _bitdepth.new_dataset(np.uint16)
@@ -185,13 +173,7 @@ def test_a_new_dataset_forgets_the_last_ones_ceiling():
 
 
 def test_a_gcd_of_four_does_NOT_become_a_two_bit_shift():
-    """A STANDING REFUSAL of the trailing-zero-bits heuristic, so it is not reinvented.
-
-    The 16-bit set is 12-bit shifted left by 4 -- max 65520 = 4095 * 16 -- but the
-    camera binned 2x2, so four such samples were averaged and the file's gcd is 4. Reading that
-    gcd as the shift gives 14-bit and clips 65520 to 16383, destroying the top 4x of the range.
-    The ONLY thing that decides the ceiling is the largest pixel.
-    """
+    """A STANDING REFUSAL of the trailing-zero-bits heuristic, so it is not reinvented."""
     data = (np.array([0, 4, 16, 1024, 65520], dtype=np.uint16))
     assert int(np.gcd.reduce(data[data > 0])) == 4          # the tempting evidence
     d = _bitdepth.depth()

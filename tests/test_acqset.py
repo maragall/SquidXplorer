@@ -56,38 +56,25 @@ def test_a_folder_of_acquisitions_discovers_name_sorted(tmp_path):
     a = _min_acq(parent / "a_acq")
     (parent / "notes").mkdir()                                   # junk dir: not a member
     (parent / "README.txt").write_text("x")                      # a file: never a member
+    (parent / "out.hcs" / "plate.ome.zarr").mkdir(parents=True)  # an OUTPUT, not a member
     assert _acqset.discover_acquisitions(parent) == [a, b]
 
 
-def test_a_folder_that_is_neither_is_refused_by_name(tmp_path):
+def test_a_folder_with_fewer_than_two_immediate_child_acquisitions_is_refused_by_name(tmp_path):
     empty = tmp_path / "nothing_here"
     (empty / "notes").mkdir(parents=True)
     with pytest.raises(_acqset.AcqSetError) as e:
         _acqset.discover_acquisitions(empty)
     assert "nothing_here" in str(e.value) and "at least 2" in str(e.value)
-
-
-def test_one_child_acquisition_is_not_a_set(tmp_path):
-    parent = tmp_path / "wrapper"
-    _min_acq(parent / "only_acq")
+    wrapper = tmp_path / "wrapper"
+    _min_acq(wrapper / "only_acq")
     with pytest.raises(_acqset.AcqSetError):
-        _acqset.discover_acquisitions(parent)
-
-
-def test_nesting_beyond_one_level_never_counts(tmp_path):
-    parent = tmp_path / "deep"
-    _min_acq(parent / "sub" / "acq1")                            # grandchild: one level too far
-    _min_acq(parent / "sub" / "acq2")
+        _acqset.discover_acquisitions(wrapper)
+    deep = tmp_path / "deep"
+    _min_acq(deep / "sub" / "acq1")                              # grandchild: one level too far
+    _min_acq(deep / "sub" / "acq2")
     with pytest.raises(_acqset.AcqSetError):
-        _acqset.discover_acquisitions(parent)
-
-
-def test_a_written_plate_is_not_a_set_member(tmp_path):
-    parent = tmp_path / "runs"
-    a = _min_acq(parent / "a_acq")
-    b = _min_acq(parent / "b_acq")
-    (parent / "out.hcs" / "plate.ome.zarr").mkdir(parents=True)  # an OUTPUT, not a member
-    assert _acqset.discover_acquisitions(parent) == [a, b]
+        _acqset.discover_acquisitions(deep)
 
 
 # -- the bulk save loop ---------------------------------------------------------------------

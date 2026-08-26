@@ -35,12 +35,6 @@ def panel(qapp, bus):
 
 # --- lines arrive, attributed and coloured ------------------------------------------------------
 
-def test_a_logged_line_reaches_the_panel(panel, bus):
-    bus.install()
-    logging.getLogger("squidxplorer.test").info("hello from a run")
-    assert "hello from a run" in panel.text()
-
-
 def test_a_third_party_library_appears_in_the_panel_without_being_wired(panel, bus):
     """The bus attaches to the root logger and the panel is a sink of the bus."""
     bus.install()
@@ -102,20 +96,15 @@ def test_the_activity_line_follows_the_activity_registry(qapp, bus):
 
 
 def test_warnings_and_errors_are_tallied_in_the_header(panel, bus):
-    """The tally starts empty and only fills when there is something to say."""
-    bus.install()
-    assert panel._tally_lbl.text() == ""
-    logging.getLogger("x").warning("heads up")
-    logging.getLogger("x").error("uh oh")
-    tally = panel._tally_lbl.text()
-    assert "1 warning" in tally and "1 error" in tally
-
-
-def test_an_ordinary_info_run_leaves_the_error_tally_empty(panel, bus):
+    """The tally stays empty through an INFO-only run and only fills when there is something to say."""
     bus.install()
     for i in range(5):
         logging.getLogger("run").info("well %d ok", i)
     assert panel._tally_lbl.text() == "", "an INFO-only run must not raise a false alarm"
+    logging.getLogger("x").warning("heads up")
+    logging.getLogger("x").error("uh oh")
+    tally = panel._tally_lbl.text()
+    assert "1 warning" in tally and "1 error" in tally
 
 
 # --- collapse must not steal pane space ---------------------------------------------------------

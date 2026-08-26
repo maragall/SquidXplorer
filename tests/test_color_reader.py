@@ -1,14 +1,4 @@
-"""Color-camera acquisitions: uint8 .bmp/.png planes, including (Y, X, 3) RGB.
-
-Squid picks the extension by DTYPE (utils_acquisition.get_image_filepath): uint16 -> .tiff,
-everything else -> IMAGE_FORMAT (.bmp default) — the color-camera path. Measured on the real set
-`_2026-08-13_18-07-54.442667` (22 uint8 grayscale BMPs), which the reader previously refused as
-"contains no ...tiff".
-
-A COLOR plane is served as three channels tinted pure R/G/B: additive blending reconstructs the
-file's exact color on screen, and every operator, fuser and cache keeps receiving the 2-D
-grayscale planes the whole pipeline is written for. No second render path.
-"""
+"""Color-camera acquisitions: uint8 .bmp/.png planes, including (Y, X, 3) RGB."""
 
 from __future__ import annotations
 
@@ -63,9 +53,7 @@ def test_a_grayscale_bmp_acquisition_opens(tmp_path):
 
 
 def test_an_rgb_bmp_becomes_three_primary_tinted_channels(tmp_path):
-    """(Y, X, 3) color splits into (R)/(G)/(B) channels whose display colors are the pure
-    primaries — additively blended they ARE the original color, and read() hands each consumer
-    the 2-D plane the pipeline contract promises."""
+    """(Y, X, 3) color splits into (R)/(G)/(B) channels whose display colors are the pure primaries — additively blended they ARE the original color, and"""
     rgb = np.stack([_gray(1), _gray(2), _gray(3)], axis=-1)
     root = tmp_path / "acq"
     _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", rgb)
@@ -80,24 +68,13 @@ def test_an_rgb_bmp_becomes_three_primary_tinted_channels(tmp_path):
         plane = r.read("manual", 0, name, 0)
         assert plane.ndim == 2 and np.array_equal(plane, rgb[..., i]), name
     assert r.plane_path("manual", 0, names[0], 0).name == "manual_0_0_BF_LED_matrix_full.bmp"
-
-
-def test_reading_a_color_channel_by_its_base_name_fails_by_name(tmp_path):
-    """The base name is not a channel once expanded — half-supporting it would hand a 3-D array
-    to consumers whose contract is 2-D."""
-    rgb = np.stack([_gray(1), _gray(2), _gray(3)], axis=-1)
-    root = tmp_path / "acq"
-    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", rgb)
-    _sidecars(root)
-    r = open_reader(root)
-    _ = r.metadata
+    assert [c.get("color_source") for c in m["channels"]] == ["file", "file", "file"]
     with pytest.raises(ValueError, match="color plane"):
         r.read("manual", 0, "BF_LED_matrix_full", 0)
 
 
 def test_mixed_color_and_mono_channels_coexist(tmp_path):
-    """Squid writes color BF beside mono fluorescence in one acquisition — same dtype, two
-    plane shapes; the color one expands, the mono one is untouched."""
+    """Squid writes color BF beside mono fluorescence in one acquisition — same dtype, two plane shapes; the color one expands, the mono one is untouched."""
     root = tmp_path / "acq"
     rgb = np.stack([_gray(1), _gray(2), _gray(3)], axis=-1)
     _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", rgb)
@@ -109,28 +86,31 @@ def test_mixed_color_and_mono_channels_coexist(tmp_path):
     assert len(names) == 4
 
 
-def test_colormap_prefers_the_acquisitions_display_color():
-    """The RGB component channels carry pure primaries in their resolved display_color; the
-    window's colormap must read THAT, not the wavelength palette (which cannot know '(R)')."""
+def test_colormap_prefers_the_acquisitions_display_color_else_the_name_palette():
+    """The RGB component channels carry pure primaries in their resolved display_color; the window's colormap must read THAT, not the wavelength palette"""
     pytest.importorskip("napari")
+    from squidxplorer._acquisition import DisplayChannel
+    from squidxplorer._channels import fallback_color
     from squidxplorer._napari_pane import _colormap_for
 
-    from squidxplorer._acquisition import DisplayChannel
-
-    # the REAL metadata type: DisplayChannel records, which duck-type .get but are not dicts
     channels = [DisplayChannel(name="BF_LED_matrix_full (R)",
                                display_name="BF LED matrix full (R)",
                                display_color="#FF0000")]
     cm = _colormap_for("BF_LED_matrix_full (R)", channels)
     assert tuple(np.asarray(cm.colors)[-1][:3]) == (1.0, 0.0, 0.0)
-    # matched by display_name too: results deliver whichever spelling the layer carries
     cm2 = _colormap_for("BF LED matrix full (R)", channels)
     assert tuple(np.asarray(cm2.colors)[-1][:3]) == (1.0, 0.0, 0.0)
 
+    cm = _colormap_for("Fluorescence_488_nm_Ex", None)
+    h = fallback_color("Fluorescence_488_nm_Ex").lstrip("#")
+    want = tuple(int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    got = tuple(float(v) for v in np.asarray(cm.colors)[-1][:3])
+    assert got == pytest.approx(want)
+    assert _colormap_for("BF_LED_matrix_full (R)", None) == "gray"
+
 
 def test_rgb_components_seed_the_files_full_range(tmp_path):
-    """All three primaries share the FILE's own range: per-channel percentiles would tint the
-    additive reconstruction and read as 'completely dark' on brightfield."""
+    """All three primaries share the FILE's own range: per-channel percentiles would tint the additive reconstruction and read as 'completely dark' on brightfield."""
     root = tmp_path / "acq"
     rgb = np.stack([_gray(1), _gray(2), _gray(3)], axis=-1)
     _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", rgb)
@@ -149,9 +129,7 @@ def test_rgb_components_seed_the_files_full_range(tmp_path):
 
 
 def test_the_plate_windows_rgb_components_at_the_files_full_range(tmp_path, qapp):
-    """The plate composites additively; per-channel percentile windows distort the hue the
-    triplet exists to reconstruct (measured live: dark red/teal plate cell over a pink/blue
-    viewer). Components are latched to the file's full range, so streaming tiles cannot stomp."""
+    """The plate composites additively; per-channel percentile windows distort the hue the triplet exists to reconstruct (measured live: dark red/teal plate"""
     import squidxplorer._viewer as V
 
     root = tmp_path / "acq"
@@ -164,7 +142,6 @@ def test_the_plate_windows_rgb_components_at_the_files_full_range(tmp_path, qapp
         win.ingest(str(root))
         wins = win._overview.channel_windows()
         assert wins == [(0.0, 255.0)] * 3, wins
-        # the latch holds against the running histogram: a streamed tile changes nothing
         win._overview._contrast.add(0, np.full((8, 8), 40, dtype=np.uint8))
         assert win._overview.channel_windows()[0] == (0.0, 255.0)
     finally:
@@ -184,8 +161,7 @@ def _mosaic_sidecar(root, k_r=0.3, k_b=0.6):
 
 
 def test_a_color_channel_recorded_gray_is_detected_and_gets_the_stain_lut(tmp_path):
-    """The mosaic yaml says the channel was RGB live; its files are 2-D: the display gets the
-    stain colormap measured from the overview PNG. Detection is automatic, pixels untouched."""
+    """The mosaic yaml says the channel was RGB live; its files are 2-D: the display gets the stain colormap measured from the overview PNG."""
     root = tmp_path / "acq"
     _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", _gray(7))
     _sidecars(root)
@@ -198,17 +174,18 @@ def test_a_color_channel_recorded_gray_is_detected_and_gets_the_stain_lut(tmp_pa
     assert lut[-1] == (1.0, 1.0, 1.0)                       # background stays white
     assert abs(lut[128][0] - 0.5 ** 0.3) < 0.05             # the measured k_R reaches the LUT
     assert abs(lut[128][2] - 0.5 ** 0.6) < 0.05
+    assert chs[0].get("color_source") == "estimated"
     pytest.importorskip("napari")
     cm = _colormap_for(chs[0]["name"], chs)
     assert len(np.asarray(cm.colors)) == 256
 
 
-def test_without_an_overview_the_gray_channel_stays_gray(tmp_path):
+def test_without_an_overview_the_gray_channel_stays_gray_with_no_color_source(tmp_path):
     root = tmp_path / "acq"
     _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", _gray(7))
     _sidecars(root)
     chs = open_reader(root).metadata["channels"]
-    assert chs[0].get("display_lut") is None
+    assert chs[0].get("color_source") is None and chs[0].get("display_lut") is None
 
 
 def test_a_real_rgb_acquisition_expands_and_takes_no_stain_lut(tmp_path):
@@ -222,59 +199,8 @@ def test_a_real_rgb_acquisition_expands_and_takes_no_stain_lut(tmp_path):
     assert all(c.get("display_lut") is None for c in chs)   # true primaries need no model
 
 
-def test_rgb_components_declare_file_color_provenance(tmp_path):
-    """Case 1 of the color cascade: real (Y, X, 3) components are the file's own color."""
-    root = tmp_path / "acq"
-    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp",
-           np.stack([_gray(1), _gray(2), _gray(3)], axis=-1))
-    _sidecars(root)
-    chs = open_reader(root).metadata["channels"]
-    assert [c.get("color_source") for c in chs] == ["file", "file", "file"]
-
-
-def test_the_estimated_lut_declares_estimated_provenance(tmp_path):
-    """Case 3: the density-fit LUT is derived, and the entry says so."""
-    root = tmp_path / "acq"
-    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", _gray(7))
-    _sidecars(root)
-    _mosaic_sidecar(root)
-    chs = open_reader(root).metadata["channels"]
-    assert chs[0].get("display_lut") is not None
-    assert chs[0].get("color_source") == "estimated"
-
-
-def test_a_plain_channel_carries_no_color_source(tmp_path):
-    """Case 4: an ordinary channel shows its own yaml color, which needs no label."""
-    root = tmp_path / "acq"
-    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", _gray(7))
-    _sidecars(root)
-    chs = open_reader(root).metadata["channels"]
-    assert chs[0].get("color_source") is None and chs[0].get("display_lut") is None
-
-
-def test_the_env_flag_kills_reconstruction_to_honest_gray(tmp_path, monkeypatch):
-    """SQUIDXPLORER_NO_RECONSTRUCTED_COLOR=1: no stain LUT, the mono channel with its yaml
-    color. Real RGB still expands, because the file's own color is not a reconstruction."""
-    monkeypatch.setenv("SQUIDXPLORER_NO_RECONSTRUCTED_COLOR", "1")
-    root = tmp_path / "acq"
-    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", _gray(7))
-    _sidecars(root)
-    _mosaic_sidecar(root)
-    chs = open_reader(root).metadata["channels"]
-    assert len(chs) == 1
-    assert chs[0].get("display_lut") is None and chs[0].get("color_source") is None
-    assert chs[0]["display_color"] == "#FFFFFF"
-
-    rgb_root = tmp_path / "acq_rgb"
-    _write(rgb_root / "0", "manual_0_0_BF_LED_matrix_full.bmp",
-           np.stack([_gray(1), _gray(2), _gray(3)], axis=-1))
-    _sidecars(rgb_root)
-    rgb_chs = open_reader(rgb_root).metadata["channels"]
-    assert [c.get("color_source") for c in rgb_chs] == ["file", "file", "file"]
-
-
-def test_set_reconstruction_round_trips_the_flag(tmp_path):
-    """The live override the View menu flips; None returns to the environment's answer."""
+def test_reconstruction_is_switched_off_by_the_env_flag_or_the_live_override(tmp_path, monkeypatch):
+    """SQUIDXPLORER_NO_RECONSTRUCTED_COLOR=1, or set_reconstruction(False): no stain LUT, the mono channel with its yaml color; file color is untouched."""
     from squidxplorer import _stain
 
     root = tmp_path / "acq"
@@ -292,6 +218,19 @@ def test_set_reconstruction_round_trips_the_flag(tmp_path):
     finally:
         _stain.set_reconstruction(None)
 
+    monkeypatch.setenv("SQUIDXPLORER_NO_RECONSTRUCTED_COLOR", "1")
+    chs = open_reader(root).metadata["channels"]
+    assert len(chs) == 1
+    assert chs[0].get("display_lut") is None and chs[0].get("color_source") is None
+    assert chs[0]["display_color"] == "#FFFFFF"
+
+    rgb_root = tmp_path / "acq_rgb"
+    _write(rgb_root / "0", "manual_0_0_BF_LED_matrix_full.bmp",
+           np.stack([_gray(1), _gray(2), _gray(3)], axis=-1))
+    _sidecars(rgb_root)
+    rgb_chs = open_reader(rgb_root).metadata["channels"]
+    assert [c.get("color_source") for c in rgb_chs] == ["file", "file", "file"]
+
 
 def test_color_note_names_each_provenance_once():
     """The shared sentence the window says and the tree pins; silent for plain channels."""
@@ -306,20 +245,6 @@ def test_color_note_names_each_provenance_once():
     note = color_note([ch("estimated"), ch("file"), ch("file")])
     assert note.startswith("color: ") and "estimated colormap" in note and "file color" in note
     assert color_sources([ch("file"), ch("estimated")]) == ["estimated", "file"]
-
-
-def test_colormap_without_a_resolved_color_still_uses_the_name_palette():
-    pytest.importorskip("napari")
-    from squidxplorer._channels import fallback_color
-    from squidxplorer._napari_pane import _colormap_for
-
-    cm = _colormap_for("Fluorescence_488_nm_Ex", None)
-    h = fallback_color("Fluorescence_488_nm_Ex").lstrip("#")
-    want = tuple(int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
-    got = tuple(float(v) for v in np.asarray(cm.colors)[-1][:3])
-    assert got == pytest.approx(want)
-    # an unrecognised channel with no resolved color stays gray, never a guess
-    assert _colormap_for("BF_LED_matrix_full (R)", None) == "gray"
 
 
 # --- Virtual chroma components (color-recorded-gray + overview geometry) -----------------------
@@ -373,10 +298,8 @@ def _flat_png(shape, r, g, b):
 
 
 def test_chroma_components_reconstruct_the_overviews_known_ratios(tmp_path):
-    """With geometry + positions, a color-recorded-gray channel expands into (R)/(G)/(B):
-    (G) is the file's own plane, (R)/(B) scale it by the PNG's local R/G and B/G ratios."""
+    """With geometry + positions, a color-recorded-gray channel expands into (R)/(G)/(B): (G) is the file's own plane, (R)/(B) scale it by the PNG's local"""
     plane = np.full((16, 16), 80, dtype=np.uint8)
-    # PNG 40x60 at 2 um from (0, 0) mm; FOV window is 16x16 at rows 10..26, cols 20..36.
     png = _flat_png((40, 60), r=150, g=100, b=50)                # ratios 1.5 and 0.5
     root = _chroma_acq(tmp_path, [(0.056, 0.036)], planes=[plane])
     _chroma_sidecar(root, png, top_left_mm_yx=(0.0, 0.0))
@@ -392,13 +315,11 @@ def test_chroma_components_reconstruct_the_overviews_known_ratios(tmp_path):
 
 
 def test_chroma_is_neutral_outside_coverage_and_logged_once(tmp_path, caplog):
-    """A FOV the PNG does not cover reads neutral gray (ratio 1.0) — R equals the file's own
-    plane — and the shortfall is said in ONE log line naming how many FOVs lack chroma."""
+    """A FOV the PNG does not cover reads neutral gray (ratio 1.0) — R equals the file's own plane — and the shortfall is said in ONE log line naming how"""
     import logging
 
     plane = np.full((16, 16), 80, dtype=np.uint8)
     png = _flat_png((40, 60), r=150, g=100, b=50)
-    # FOV 0 inside the PNG, FOV 1 a long way outside it.
     root = _chroma_acq(tmp_path, [(0.056, 0.036), (9.0, 9.0)], planes=[plane, plane])
     _chroma_sidecar(root, png, top_left_mm_yx=(0.0, 0.0))
     r = open_reader(root)
@@ -415,7 +336,6 @@ def test_chroma_partial_coverage_is_neutral_only_where_uncovered(tmp_path):
     """A window half off the PNG keeps real chroma on the covered half, neutral on the rest."""
     plane = np.full((16, 16), 80, dtype=np.uint8)
     png = _flat_png((40, 60), r=150, g=100, b=50)
-    # Center at col 4 of the PNG: cols -4..12, so the left half of the window is off the PNG.
     root = _chroma_acq(tmp_path, [(0.008, 0.036)], planes=[plane])
     _chroma_sidecar(root, png, top_left_mm_yx=(0.0, 0.0))
     r = open_reader(root)
@@ -425,8 +345,7 @@ def test_chroma_partial_coverage_is_neutral_only_where_uncovered(tmp_path):
 
 
 def test_a_chroma_active_channel_takes_no_stain_lut(tmp_path):
-    """Where chroma expansion is active the components carry real color; a display LUT on top
-    would double-tint, so none is attached. (The LUT stays the geometry-less fallback.)"""
+    """Where chroma expansion is active the components carry real color; a display LUT on top would double-tint, so none is attached."""
     t = np.tile(np.linspace(0.2, 1.0, 60), (40, 1))
     png = np.stack([255 * t ** 0.3, 255 * t, 255 * t ** 0.6], axis=-1).astype(np.uint8)
     root = _chroma_acq(tmp_path, [(0.056, 0.036)])
@@ -437,8 +356,7 @@ def test_a_chroma_active_channel_takes_no_stain_lut(tmp_path):
 
 
 def test_chroma_needs_geometry_else_the_lut_fallback_stands(tmp_path):
-    """The same overview WITHOUT resolution_um/top_left_mm cannot place a FOV: no expansion,
-    and the stain LUT is attached exactly as before."""
+    """The same overview WITHOUT resolution_um/top_left_mm cannot place a FOV: no expansion, and the stain LUT is attached exactly as before."""
     root = _chroma_acq(tmp_path, [(0.056, 0.036)])
     _mosaic_sidecar(root)                        # geometry-less yaml, fittable stain PNG
     chs = open_reader(root).metadata["channels"]
@@ -447,9 +365,7 @@ def test_chroma_needs_geometry_else_the_lut_fallback_stands(tmp_path):
 
 
 def test_a_stain_lut_channel_seeds_the_zero_to_white_window(tmp_path):
-    """Fix 2: a channel displayed through the stain LUT windows [0, white] — white being the
-    LUT fit's own percentile — because the LUT's t is transmittance; the percentile auto-window
-    would crush dense tissue toward black."""
+    """Fix 2: a channel displayed through the stain LUT windows [0, white] — white being the LUT fit's own percentile — because the LUT's t is"""
     root = tmp_path / "acq"
     _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", _gray(7))
     _sidecars(root)
@@ -466,7 +382,6 @@ def test_a_stain_lut_channel_seeds_the_zero_to_white_window(tmp_path):
     plane = _gray(7).astype(np.uint16) * 3
     lo, hi = w._seed_window("BF_LED_matrix_full", [plane], lambda *a: (9.0, 10.0))
     assert lo == 0.0 and hi == pytest.approx(float(np.percentile(plane, STAIN_WHITE_PERCENTILE)))
-    # a LUT-less channel keeps the percentile auto-window
     root2 = tmp_path / "acq2"
     _write(root2 / "0", "manual_0_0_BF_LED_matrix_full.bmp", _gray(7))
     _sidecars(root2)
@@ -477,12 +392,9 @@ def test_a_stain_lut_channel_seeds_the_zero_to_white_window(tmp_path):
 
 
 def test_chroma_neutrality_and_ratios_survive_fractional_resampling(tmp_path):
-    """The ratio window is upsampled with fractional bilinear weights (real data: 2 um chroma
-    over 0.42 um pixels). float32 weights leave 1.0 as 0.99999994, so the cast must ROUND:
-    measured before the fix, a NEUTRAL (uncovered) FOV came back off by one on 9.5% of pixels."""
+    """The ratio window is upsampled with fractional bilinear weights (real data: 2 um chroma over 0.42 um pixels)."""
     plane = np.full((16, 16), 80, dtype=np.uint8)
     png = _flat_png((40, 60), r=150, g=100, b=50)
-    # pixel 0.5 um vs 2 um overview: an 8x8 ratio window upsamples 2x with fractional weights
     root = _chroma_acq(tmp_path, [(0.056, 0.036), (9.0, 9.0)], planes=[plane, plane])
     (root / "acquisition.yaml").write_text(
         "objective:\n  pixel_size_um: 0.5\nz_stack:\n  nz: 1\ntime_series:\n  nt: 1\n")

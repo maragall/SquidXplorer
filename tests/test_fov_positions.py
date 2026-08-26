@@ -1,7 +1,4 @@
-"""coordinates.csv -> metadata["fov_positions_um"], on both reader classes.
-
-The CSV records millimetres, the metadata key is micrometres; the conversion is the producer's job.
-"""
+"""coordinates.csv -> metadata["fov_positions_um"], on both reader classes."""
 
 from __future__ import annotations
 
@@ -18,63 +15,28 @@ def _csv(rows, header="region,x (mm),y (mm),z (mm)"):
 
 # --- the row-order mapping ------------------------------------------------------------------
 
-def test_positions_map_row_order_to_sorted_fovs(tmp_path):
+def test_positions_map_row_order_to_sorted_fov_ids_per_region(tmp_path):
+    """Non-contiguous FOV ids (7, 9, 11) still map in sorted order to rows 1, 2, 3; regions group independently."""
     (tmp_path / "coordinates.csv").write_text(_csv([
-        "A1,1.0,2.0,", "A1,1.5,2.0,", "A1,2.0,2.0,",
+        "A1,1.0,2.0,", "B2,50.0,60.0,", "A1,1.5,2.0,", "B2,50.5,60.0,", "A1,2.0,2.0,",
     ]))
-    pos = load_fov_positions_um(tmp_path, {"A1": [0, 1, 2]})
-    assert pos == {("A1", 0): (1000, 2000), ("A1", 1): (1500, 2000), ("A1", 2): (2000, 2000)}
+    pos = load_fov_positions_um(tmp_path, {"A1": [7, 9, 11], "B2": [0, 1]})
+    assert pos == {("A1", 7): (1000, 2000), ("A1", 9): (1500, 2000), ("A1", 11): (2000, 2000),
+                   ("B2", 0): (50000, 60000), ("B2", 1): (50500, 60000)}
 
 
-def test_mapping_follows_sorted_fov_ids_not_their_values(tmp_path):
-    """Non-contiguous FOV ids (7, 9, 11) still map in sorted order to rows 1, 2, 3."""
-    (tmp_path / "coordinates.csv").write_text(_csv([
-        "A1,1.0,2.0,", "A1,1.5,2.0,", "A1,2.0,2.0,",
-    ]))
-    pos = load_fov_positions_um(tmp_path, {"A1": [7, 9, 11]})
-    assert pos[("A1", 7)] == (1000, 2000)
-    assert pos[("A1", 9)] == (1500, 2000)
-    assert pos[("A1", 11)] == (2000, 2000)
-
-
-def test_multiple_regions_are_grouped_independently(tmp_path):
-    (tmp_path / "coordinates.csv").write_text(_csv([
-        "A1,1.0,2.0,", "B2,50.0,60.0,", "A1,1.5,2.0,", "B2,50.5,60.0,",
-    ]))
-    pos = load_fov_positions_um(tmp_path, {"A1": [0, 1], "B2": [0, 1]})
-    assert pos[("A1", 1)] == (1500, 2000)
-    assert pos[("B2", 1)] == (50500, 60000)
-
-
-# --- multi-z de-duplication (the check that would otherwise break every real z-stack) --------
-
-def test_repeated_positions_per_z_level_are_deduplicated(tmp_path):
-    """A 3-z acquisition writes each position 3x. That must still resolve to 2 FOVs, not fail."""
-    rows = []
-    for _z in range(3):
-        rows += ["A1,1.0,2.0,", "A1,1.5,2.0,"]
+def test_repeated_positions_per_z_level_are_deduplicated_in_first_seen_order(tmp_path):
+    """A 3-z acquisition writes each position 3x. That must still resolve to 2 FOVs, file order preserved."""
+    rows = ["A1,9.0,9.0,", "A1,1.0,1.0,"] * 3
     (tmp_path / "coordinates.csv").write_text(_csv(rows))
     pos = load_fov_positions_um(tmp_path, {"A1": [0, 1]})
-    assert pos == {("A1", 0): (1000, 2000), ("A1", 1): (1500, 2000)}
+    assert pos == {("A1", 0): (9000, 9000), ("A1", 1): (1000, 1000)}
 
 
-def test_dedup_preserves_first_seen_order(tmp_path):
-    rows = ["A1,9.0,9.0,", "A1,1.0,1.0,", "A1,9.0,9.0,", "A1,1.0,1.0,"]
-    (tmp_path / "coordinates.csv").write_text(_csv(rows))
-    pos = load_fov_positions_um(tmp_path, {"A1": [0, 1]})
-    assert pos[("A1", 0)] == (9000, 9000)      # first seen wins, file order preserved
-    assert pos[("A1", 1)] == (1000, 1000)
-
-
-# --- the cross-check ------------------------------------------------------------------------
-
-def test_too_few_positions_raises_named(tmp_path):
+def test_a_position_count_mismatch_raises_named(tmp_path):
     (tmp_path / "coordinates.csv").write_text(_csv(["A1,1.0,2.0,"]))
     with pytest.raises(ValueError, match="distinct stage position"):
         load_fov_positions_um(tmp_path, {"A1": [0, 1, 2]})
-
-
-def test_too_many_positions_raises_named(tmp_path):
     (tmp_path / "coordinates.csv").write_text(_csv([
         "A1,1.0,2.0,", "A1,1.5,2.0,", "A1,2.0,2.0,",
     ]))
@@ -84,50 +46,32 @@ def test_too_many_positions_raises_named(tmp_path):
 
 # --- degradation + malformed input ----------------------------------------------------------
 
-def test_absent_csv_returns_empty_not_missing(tmp_path):
-    """Empty-but-present: consumers use .get()/[] freely and degrade to single-FOV rendering."""
-    assert load_fov_positions_um(tmp_path, {"A1": [0]}) == {}
-
-
-def test_unknown_regions_in_csv_are_ignored(tmp_path):
-    (tmp_path / "coordinates.csv").write_text(_csv(["A1,1.0,2.0,", "ZZ9,5.0,5.0,"]))
-    pos = load_fov_positions_um(tmp_path, {"A1": [0]})
-    assert set(pos) == {("A1", 0)}
-
-
-def test_blank_coordinate_rows_are_skipped(tmp_path):
-    (tmp_path / "coordinates.csv").write_text(_csv(["A1,1.0,2.0,", "A1,,,", "A1,1.5,2.0,"]))
+def test_unknown_regions_blank_rows_and_header_case_are_tolerated(tmp_path):
+    (tmp_path / "coordinates.csv").write_text(
+        "region,X (MM),Y (mm),z\nA1,1.0,2.0,\nA1,,,\nZZ9,5.0,5.0,\nA1,1.5,2.0,\n")
     pos = load_fov_positions_um(tmp_path, {"A1": [0, 1]})
-    assert len(pos) == 2
+    assert pos == {("A1", 0): (1000, 2000), ("A1", 1): (1500, 2000)}
 
 
-def test_non_numeric_coordinate_raises_with_line_number(tmp_path):
+def test_a_malformed_csv_raises_naming_the_line_or_the_missing_columns(tmp_path):
     (tmp_path / "coordinates.csv").write_text(_csv(["A1,1.0,2.0,", "A1,oops,2.0,"]))
     with pytest.raises(ValueError, match="line 3.*non-numeric"):
         load_fov_positions_um(tmp_path, {"A1": [0, 1]})
-
-
-def test_missing_xy_columns_raises_named(tmp_path):
     (tmp_path / "coordinates.csv").write_text("region,foo,bar\nA1,1,2\n")
     with pytest.raises(ValueError, match="no recognisable x/y millimetre columns"):
         load_fov_positions_um(tmp_path, {"A1": [0]})
 
 
-def test_header_whitespace_and_case_tolerated(tmp_path):
-    (tmp_path / "coordinates.csv").write_text("region,X (MM),Y (mm),z\nA1,1.0,2.0,\n")
-    assert load_fov_positions_um(tmp_path, {"A1": [0]}) == {("A1", 0): (1000, 2000)}
+# --- reader integration (both classes expose the key, in MICROMETRES) ------------------------
 
-
-# --- reader integration (both classes expose the key) ---------------------------------------
-
-def test_squid_reader_exposes_fov_positions_um(squid_dataset):
+def test_squid_reader_exposes_fov_positions_in_micrometres(squid_dataset):
+    """conftest writes FOVs 0.5 mm apart. In µm that is 500, not 0.5 — the whole bug."""
     root, _ = squid_dataset
-    meta = open_reader(root).metadata
-    assert "fov_positions_um" in meta
-    # conftest writes 2 regions x 2 fovs, each repeated per z-level
-    assert len(meta["fov_positions_um"]) == 4
-    assert meta["fov_positions_um"][("B2", 0)] == (10000, 20000)
-    assert meta["fov_positions_um"][("B2", 1)] == (10500, 20000)
+    pos = open_reader(root).metadata["fov_positions_um"]
+    assert len(pos) == 4
+    assert pos[("B2", 0)] == (10000, 20000)
+    assert pos[("B2", 1)] == (10500, 20000)
+    assert all(isinstance(v, tuple) and len(v) == 2 for v in pos.values())
 
 
 def test_fov_positions_um_present_even_without_csv(squid_dataset):
@@ -160,40 +104,13 @@ def _ome_acquisition(root):
     return root
 
 
-def test_ome_reader_exposes_fov_positions_um_empty_without_csv(tmp_path):
-    """SquidOMEReader shares the interface, so it must carry the same key (empty is fine)."""
-    meta = open_reader(_ome_acquisition(tmp_path / "acq")).metadata
-    assert meta["fov_positions_um"] == {}
-
-
-def test_ome_reader_reads_a_sibling_coordinates_csv(tmp_path):
-    """An OME acquisition with a coordinates.csv beside it gets real placement for free."""
+def test_ome_reader_carries_the_key_empty_without_csv_and_placed_with_one(tmp_path):
+    """SquidOMEReader shares the interface: the same key, {} without a CSV, real placement with one."""
     root = _ome_acquisition(tmp_path / "acq")
+    assert open_reader(root).metadata["fov_positions_um"] == {}
     (root / "coordinates.csv").write_text(_csv(["A1,1.0,2.0,", "A1,1.5,2.0,"]))
     meta = open_reader(root).metadata
     assert meta["fov_positions_um"] == {("A1", 0): (1000, 2000), ("A1", 1): (1500, 2000)}
-
-
-# --- units invariant (world space is MICROMETRES, every key ends in _um) ---------------------
-
-def test_metadata_key_is_um_suffixed_and_no_mm_key_survives(squid_dataset):
-    """World space is µm and the key says so; the old un-suffixed mm key must be gone."""
-    root, _ = squid_dataset
-    meta = open_reader(root).metadata
-    assert "fov_positions_um" in meta
-    assert "fov_positions" not in meta
-    for key, value in meta.items():
-        if key.startswith("fov_positions"):
-            assert key.endswith("_um"), f"world-space key {key!r} must end in _um"
-            assert all(isinstance(v, tuple) and len(v) == 2 for v in value.values())
-
-
-def test_positions_are_micrometres_not_millimetres(squid_dataset):
-    """conftest writes FOVs 0.5 mm apart. In µm that is 500, not 0.5 — the whole bug."""
-    root, _ = squid_dataset
-    pos = open_reader(root).metadata["fov_positions_um"]
-    dx = pos[("B2", 1)][0] - pos[("B2", 0)][0]
-    assert dx == pytest.approx(500.0), f"0.5 mm pitch must read as 500 um, got {dx}"
 
 
 def test_placement_consumes_um_without_rescaling(squid_dataset):
@@ -206,38 +123,39 @@ def test_placement_consumes_um_without_rescaling(squid_dataset):
     assert off == {0: (0, 0), 1: (0, 1000)}
 
 
-# --- graceful degradation: a truncated CSV must not sink the whole acquisition ---------------
+# --- graceful degradation: a bad CSV must not sink the whole acquisition --------------------
 
-def test_truncated_coordinates_csv_still_yields_channels_and_dtype(squid_dataset):
+_MONKEY_HEADER = "region,fov,z_level,x (mm),y (mm),z (um),time"
+
+
+def _monkey_csv(rows):
+    return _csv(rows, header=_MONKEY_HEADER)
+
+
+@pytest.mark.parametrize("body", [
+    None,                                              # truncated: header + ONE row
+    "region,foo,bar\nB2,1,2\n",                        # no recognisable x/y columns
+    _monkey_csv(["B2,0,0,1.0,2.0,0,t"]),               # the monkey format, too few
+], ids=["truncated", "bad-header", "monkey-truncated"])
+def test_an_unusable_csv_still_yields_channels_dtype_and_regions(squid_dataset, body):
     """Placement may degrade; identity (regions/channels/dtype) may not."""
     root, _ = squid_dataset
-    lines = (root / "coordinates.csv").read_text().splitlines()
-    (root / "coordinates.csv").write_text("\n".join(lines[:2]) + "\n")   # header + ONE row
-
+    if body is None:
+        lines = (root / "coordinates.csv").read_text().splitlines()
+        body = "\n".join(lines[:2]) + "\n"
+    (root / "coordinates.csv").write_text(body)
     with pytest.warns(UserWarning, match="unusable"):
         meta = open_reader(root).metadata
-
     assert meta["channels"], "channels come from filenames + yaml; a short CSV cannot erase them"
     assert meta["dtype"] is not None
     assert meta["regions"] == ["B2", "B3"]
     assert meta["frame_shape"]
-    assert meta["fov_positions_um"] == {}    # the only thing lost: placement
-
-
-def test_malformed_coordinates_csv_header_still_yields_metadata(squid_dataset):
-    """Same containment for the other CSV failure mode (no recognisable x/y columns)."""
-    root, _ = squid_dataset
-    (root / "coordinates.csv").write_text("region,foo,bar\nB2,1,2\n")
-    with pytest.warns(UserWarning, match="unusable"):
-        meta = open_reader(root).metadata
-    assert [c["name"] for c in meta["channels"]]
-    assert meta["dtype"] is not None
     assert meta["fov_positions_um"] == {}
 
 
 # --- one truncated well must not cost the whole plate its mosaic ----------------------------
 
-def _plate_csv(good_regions, short_region=None, planned=3, written=1):
+def _plate_csv(good_regions, short_region=None, planned=3):
     """A CSV where every *good_regions* entry cross-checks and *short_region* is truncated."""
     rows = [f"{r},{1.0 + i * 0.5},2.0," for r in good_regions for i in range(planned)]
     if short_region:
@@ -245,14 +163,14 @@ def _plate_csv(good_regions, short_region=None, planned=3, written=1):
     return _csv(rows)
 
 
-def test_one_short_region_does_not_strip_positions_from_the_good_ones(tmp_path):
+def test_one_short_region_keeps_the_good_ones_and_the_warning_names_both(tmp_path):
     """The regression. C3 is unknowable; A1 and B2 are not, and they keep their positions."""
     (tmp_path / "coordinates.csv").write_text(
         _plate_csv(["A1", "B2"], short_region="C3", planned=3)
     )
     fovs = {"A1": [0, 1, 2], "B2": [0, 1, 2], "C3": [0]}   # C3: 3 rows, 1 FOV written
 
-    with pytest.warns(UserWarning, match="unusable"):
+    with pytest.warns(UserWarning) as rec:
         pos = _fov_positions_um_or_empty(tmp_path, fovs)
 
     assert pos[("A1", 0)] == (1000, 2000), "A1 cross-checks; it must keep its positions"
@@ -260,43 +178,18 @@ def test_one_short_region_does_not_strip_positions_from_the_good_ones(tmp_path):
     assert pos[("B2", 1)] == (1500, 2000)
     assert not any(region == "C3" for region, _ in pos), \
         "C3's mapping is unknowable — it must contribute nothing rather than guess"
-
-
-def test_the_warning_names_both_what_was_dropped_and_what_survived(tmp_path):
-    """A message that says only 'unusable' reads as a whole-plate failure. Name both halves."""
-    (tmp_path / "coordinates.csv").write_text(
-        _plate_csv(["A1", "B2"], short_region="C3", planned=3)
-    )
-    fovs = {"A1": [0, 1, 2], "B2": [0, 1, 2], "C3": [0]}
-
-    with pytest.warns(UserWarning) as rec:
-        _fov_positions_um_or_empty(tmp_path, fovs)
-
     msg = "\n".join(str(w.message) for w in rec)
-    assert "C3" in msg, "the refusal must name the region at fault"
+    assert "unusable" in msg and "C3" in msg, "the refusal must name the region at fault"
     assert "A1" in msg and "B2" in msg, "it must also say which regions kept their positions"
-
-
-def test_strict_loader_still_refuses_the_whole_mapping(tmp_path):
-    """load_fov_positions_um keeps its all-or-nothing contract; only the wrapper degrades."""
-    (tmp_path / "coordinates.csv").write_text(
-        _plate_csv(["A1", "B2"], short_region="C3", planned=3)
-    )
-    fovs = {"A1": [0, 1, 2], "B2": [0, 1, 2], "C3": [0]}
     with pytest.raises(ValueError, match="distinct stage position"):
-        load_fov_positions_um(tmp_path, fovs)
+        load_fov_positions_um(tmp_path, fovs)          # the strict loader stays all-or-nothing
 
 
-def test_every_region_short_still_degrades_to_empty(tmp_path):
-    """Nothing salvageable is still {} — the previous behaviour, when it is the right one."""
+def test_nothing_salvageable_still_degrades_to_empty(tmp_path):
+    """Per-REGION salvage, not per-row: every region short, or a header no region can be judged by, is {}."""
     (tmp_path / "coordinates.csv").write_text(_csv(["A1,1.0,2.0,", "B2,5.0,6.0,"]))
     with pytest.warns(UserWarning, match="unusable"):
-        pos = _fov_positions_um_or_empty(tmp_path, {"A1": [0, 1], "B2": [0, 1]})
-    assert pos == {}
-
-
-def test_a_malformed_file_is_still_all_or_nothing(tmp_path):
-    """Per-REGION salvage, not per-row. A header with no x/y columns cannot judge any region."""
+        assert _fov_positions_um_or_empty(tmp_path, {"A1": [0, 1], "B2": [0, 1]}) == {}
     (tmp_path / "coordinates.csv").write_text("region,foo,bar\nA1,1,2\nB2,3,4\n")
     with pytest.warns(UserWarning, match="unusable"):
         assert _fov_positions_um_or_empty(tmp_path, {"A1": [0], "B2": [0]}) == {}
@@ -321,36 +214,26 @@ def test_degradation_does_not_swallow_unexpected_errors(squid_dataset, monkeypat
 #   (b) 20x-style      region,x (mm),y (mm),z (mm)
 # ============================================================================================
 
-_MONKEY_HEADER = "region,fov,z_level,x (mm),y (mm),z (um),time"
 
-
-def _monkey_csv(rows):
-    return _csv(rows, header=_MONKEY_HEADER)
-
-
-def test_monkey_header_uses_the_fov_column(tmp_path):
-    """The explicit fov id wins: row order is irrelevant when the schema states the mapping."""
+def test_monkey_header_uses_the_fov_column_whatever_the_row_order(tmp_path):
+    """The explicit fov id wins: rows shuffled, regions grouped independently, detected by header not row count."""
     (tmp_path / "coordinates.csv").write_text(_monkey_csv([
         "A1,2,0,3.0,4.0,100.0,t",
+        "manual1,0,0,50.0,60.0,0,t",
         "A1,0,0,1.0,2.0,100.0,t",
         "A1,1,0,1.5,2.0,100.0,t",
     ]))
-    pos = load_fov_positions_um(tmp_path, {"A1": [0, 1, 2]})
-    assert pos == {("A1", 0): (1000, 2000), ("A1", 1): (1500, 2000), ("A1", 2): (3000, 4000)}
+    pos = load_fov_positions_um(tmp_path, {"A1": [0, 1, 2], "manual1": [0]})
+    assert pos == {("A1", 0): (1000, 2000), ("A1", 1): (1500, 2000), ("A1", 2): (3000, 4000),
+                   ("manual1", 0): (50000, 60000)}
 
 
-def test_monkey_positions_are_micrometres(tmp_path):
-    """Same units contract as the 20x format: the file says mm, the key says _um."""
+def test_monkey_positions_are_micrometres_and_z_um_is_not_smuggled_in(tmp_path):
+    """The file says mm, the key says _um; ``z (um)`` is not stored, so no key can carry a doubled conversion."""
     (tmp_path / "coordinates.csv").write_text(_monkey_csv(["A1,0,0,98.2245316296875,10.1854,3930.75,t"]))
     pos = load_fov_positions_um(tmp_path, {"A1": [0]})
     assert pos[("A1", 0)] == pytest.approx((98224.5316296875, 10185.4))
-
-
-def test_monkey_z_um_column_is_not_multiplied_by_1000(tmp_path):
-    """``z (um)`` is ALREADY µm. It is not stored, so no key can carry a doubled conversion."""
-    (tmp_path / "coordinates.csv").write_text(_monkey_csv(["A1,0,0,1.0,2.0,3930.75,t"]))
-    pos = load_fov_positions_um(tmp_path, {"A1": [0]})
-    assert all(len(v) == 2 for v in pos.values())     # x,y only — z is not smuggled in
+    assert all(len(v) == 2 for v in pos.values())
 
 
 def test_monkey_z_levels_are_deduplicated_per_fov(tmp_path):
@@ -362,73 +245,17 @@ def test_monkey_z_levels_are_deduplicated_per_fov(tmp_path):
     assert pos == {("A1", 0): (1000, 2000), ("A1", 1): (1500, 2000)}
 
 
-def test_monkey_format_detected_by_header_not_row_count(tmp_path):
-    """Row count == FOV count, yet the fov column still decides the mapping (rows are shuffled)."""
-    (tmp_path / "coordinates.csv").write_text(_monkey_csv([
-        "A1,1,0,9.0,9.0,0,t",
-        "A1,0,0,1.0,1.0,0,t",
-    ]))
-    pos = load_fov_positions_um(tmp_path, {"A1": [0, 1]})
-    assert pos[("A1", 0)] == (1000, 1000)
-    assert pos[("A1", 1)] == (9000, 9000)
-
-
-def test_twenty_x_format_still_positional_when_no_fov_column(tmp_path):
-    """The (b) path is untouched: no fov column -> Nth distinct position is the Nth sorted FOV."""
-    (tmp_path / "coordinates.csv").write_text(_csv(["A1,9.0,9.0,", "A1,1.0,1.0,"]))
-    pos = load_fov_positions_um(tmp_path, {"A1": [0, 1]})
-    assert pos[("A1", 0)] == (9000, 9000)
-
-
-def test_monkey_multiple_regions_grouped_independently(tmp_path):
-    (tmp_path / "coordinates.csv").write_text(_monkey_csv([
-        "manual0,0,0,1.0,2.0,0,t", "manual1,0,0,50.0,60.0,0,t", "manual0,1,0,1.5,2.0,0,t",
-    ]))
-    pos = load_fov_positions_um(tmp_path, {"manual0": [0, 1], "manual1": [0]})
-    assert pos[("manual0", 1)] == (1500, 2000)
-    assert pos[("manual1", 0)] == (50000, 60000)
-
-
-def test_monkey_cross_check_missing_fov_raises(tmp_path):
-    """A truncated monkey CSV is still a mismatch — fail loud, same as the positional path."""
-    (tmp_path / "coordinates.csv").write_text(_monkey_csv(["A1,0,0,1.0,2.0,0,t"]))
-    with pytest.raises(ValueError, match="stage position"):
-        load_fov_positions_um(tmp_path, {"A1": [0, 1, 2]})
-
-
-def test_monkey_fov_id_not_in_filenames_raises(tmp_path):
-    """A CSV fov id with no matching image is unknowable, not silently dropped."""
-    (tmp_path / "coordinates.csv").write_text(_monkey_csv([
-        "A1,0,0,1.0,2.0,0,t", "A1,7,0,1.5,2.0,0,t",
-    ]))
-    with pytest.raises(ValueError, match="stage position|fov"):
-        load_fov_positions_um(tmp_path, {"A1": [0, 1]})
-
-
-def test_monkey_non_numeric_fov_raises_with_line_number(tmp_path):
-    (tmp_path / "coordinates.csv").write_text(_monkey_csv(["A1,oops,0,1.0,2.0,0,t"]))
-    with pytest.raises(ValueError, match="line 2"):
-        load_fov_positions_um(tmp_path, {"A1": [0]})
-
-
-def test_monkey_conflicting_positions_for_one_fov_raises(tmp_path):
-    """Same fov id at two DIFFERENT stage positions is a corrupt file, not a dedup case."""
-    (tmp_path / "coordinates.csv").write_text(_monkey_csv([
-        "A1,0,0,1.0,2.0,0,t", "A1,0,1,5.0,6.0,0,t",
-    ]))
-    with pytest.raises(ValueError, match="conflicting|differing"):
-        load_fov_positions_um(tmp_path, {"A1": [0]})
-
-
-def test_monkey_malformed_csv_still_yields_metadata(squid_dataset):
-    """The containment holds for the new format too: identity survives, placement degrades."""
-    root, _ = squid_dataset
-    (root / "coordinates.csv").write_text(_monkey_csv(["B2,0,0,1.0,2.0,0,t"]))   # too few
-    with pytest.warns(UserWarning, match="unusable"):
-        meta = open_reader(root).metadata
-    assert meta["regions"] == ["B2", "B3"]
-    assert meta["channels"] and meta["dtype"] is not None
-    assert meta["fov_positions_um"] == {}
+@pytest.mark.parametrize("rows, fovs, match", [
+    (["A1,0,0,1.0,2.0,0,t"], [0, 1, 2], "stage position"),
+    (["A1,0,0,1.0,2.0,0,t", "A1,7,0,1.5,2.0,0,t"], [0, 1], "stage position|fov"),
+    (["A1,oops,0,1.0,2.0,0,t"], [0], "line 2"),
+    (["A1,0,0,1.0,2.0,0,t", "A1,0,1,5.0,6.0,0,t"], [0], "conflicting|differing"),
+], ids=["missing-fov", "fov-not-in-filenames", "non-numeric-fov", "conflicting-positions"])
+def test_a_bad_monkey_csv_fails_loud(tmp_path, rows, fovs, match):
+    """A truncated, unknown, unparseable or self-contradicting fov column is a refusal, never a guess."""
+    (tmp_path / "coordinates.csv").write_text(_monkey_csv(rows))
+    with pytest.raises(ValueError, match=match):
+        load_fov_positions_um(tmp_path, {"A1": fovs})
 
 
 # --- real data: both formats, real numbers ---------------------------------------------------
@@ -467,7 +294,6 @@ def test_real_monkey_format_parses_with_fov_column(tmp_path):
     assert "fov" in [h.strip() for h in header.split(",")], "expected the monkey header"
 
     fovs_per_region = open_reader(_REAL_MONKEY).metadata["fovs_per_region"]
-    # Parse the monkey file in isolation (link it into a scratch dir; the source is never written).
     (tmp_path / "coordinates.csv").write_text(src.read_text())
     pos = load_fov_positions_um(tmp_path, fovs_per_region)
     assert len(pos) == sum(len(v) for v in fovs_per_region.values())

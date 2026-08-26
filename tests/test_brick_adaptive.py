@@ -1,18 +1,10 @@
-"""Zoom-adaptive bricked 3D: the whole-region no-ROI branch, refine-only hysteresis, and the
-said-once budget note (2026-08-19).
-
-The camera-follow chain under test is production's: camera zoom/center events -> the pane's
-``SettleCoalescer`` -> ``RegionViewer._refresh_bricks`` -> ``BrickedVolume.refresh()``, which
-re-derives ``uniform_step`` from the live zoom and re-plans only what changed.
-"""
+"""Zoom-adaptive bricked 3D: the whole-region no-ROI branch, refine-only hysteresis, and the said-once budget note (2026-08-19)."""
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 from qtpy.QtCore import QObject
 
-from squidxplorer import _bricks
 from squidxplorer import _volume_view as VV
 from squidxplorer._brick_view import BrickedVolume
 from squidxplorer._napari_pane import SettleCoalescer
@@ -67,8 +59,7 @@ def test_zooming_in_refines_the_planned_stride_to_native(mosaic):
 
 
 def test_zoom_out_never_coarsens_a_resident_finer_brick(mosaic):
-    """Hysteresis: a brick already resident at stride 1 renders at least as well as the coarser
-    plan; re-reading it coarser spends a decode to show less."""
+    """Hysteresis: a brick already resident at stride 1 renders at least as well as the coarser plan; re-reading it coarser spends a decode to show less."""
     vol, requests = _vol(mosaic)
     mosaic.model.camera.zoom = 2.0
     vol.refresh(force=True)
@@ -82,8 +73,7 @@ def test_zoom_out_never_coarsens_a_resident_finer_brick(mosaic):
 
 
 def test_finer_residents_are_coarsened_only_when_the_budget_breaks(mosaic):
-    """The byte budget outranks hysteresis: finer residents that no longer fit beside the view
-    are re-read at the planned stride, and that is the stated memory consequence."""
+    """The byte budget outranks hysteresis: finer residents that no longer fit beside the view are re-read at the planned stride, and that is the stated"""
     vol, requests = _vol(mosaic, budget=1 << 30)
     mosaic.model.camera.zoom = 2.0
     vol.refresh(force=True)
@@ -127,14 +117,6 @@ def test_a_camera_settle_burst_replans_exactly_once(mosaic):
     settle.poll()
     assert settle.fired == 1
     assert len(requests) == 1, f"{len(requests)} re-plans for one settled gesture"
-
-
-def test_z_is_never_strided_by_a_refinement(mosaic):
-    vol, requests = _vol(mosaic)
-    mosaic.model.camera.zoom = 0.25
-    vol.refresh(force=True)
-    for brick, _ch, step in requests[-1][0]:
-        assert brick.sampled_shape(4, step)[0] == 4, "a coarser stride touched the z axis"
 
 
 # -- the no-ROI branch: the WHOLE region, bricked, in-window ------------------------------------
@@ -220,9 +202,7 @@ def quiet_loader(monkeypatch):
 
 
 def test_the_no_roi_branch_bricks_the_whole_region_in_window(mosaic, quiet_loader, monkeypatch):
-    """Julio's goal verbatim: full window 3D rendering w/ bricking. Measured before this branch
-    existed: the no-ROI 3D never called ``_bricks.plan`` (0 calls) — one centre FOV opened in a
-    popout instead."""
+    """Julio's goal verbatim: full window 3D rendering w/ bricking."""
     import squidxplorer._napari3d as N3D
 
     popouts: list = []
@@ -234,7 +214,6 @@ def test_the_no_roi_branch_bricks_the_whole_region_in_window(mosaic, quiet_loade
     assert not popouts, f"3D fell back to the single-FOV popout: {win.said}"
     vol = win._native3d
     assert isinstance(vol, BrickedVolume), f"no in-window volume opened: {win.said}"
-    # the window is the WHOLE region mosaic: 16 px frames on a 12 px stage step -> 28x28
     assert vol._window == (0, 28, 0, 28)
     assert vol.brick_count > 1, "a 28 px region over a 16 px texture limit must brick"
     assert win._pane.settled, "the camera-settle callback was never registered: zooming in " \

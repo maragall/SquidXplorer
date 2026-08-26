@@ -1,11 +1,4 @@
-"""napari's async slicing is ON for this app: a viewport reslice decodes off the Qt thread.
-
-Julio, live on the 900-FOV 20x set: "when I zoom in rapidly, it's not responsive." The stall
-is the Qt thread: sync slicing materialises the viewport's FOV decodes inside the draw.
-``squidxplorer/__init__`` sets ``NAPARI_ASYNC=1`` (the one NON-persisting channel — see
-``_async_slicing``) before napari's settings are born, so every viewer in the process slices
-on the pool. These tests run under exactly that configuration, like production.
-"""
+"""napari's async slicing is ON for this app: a viewport reslice decodes off the Qt thread."""
 from __future__ import annotations
 
 import threading
@@ -80,8 +73,7 @@ def _scene(qapp):
 
 
 def _zoom_to_native(layer) -> None:
-    """The real zoom entry: the canvas hands the layer its viewport on every camera move,
-    and ``_update_draw`` picks the data level, sets the corners and triggers the reslice."""
+    """The real zoom entry: the canvas hands the layer its viewport on every camera move, and ``_update_draw`` picks the data level, sets the corners and"""
     layer._update_draw(scale_factor=1.0,
                        corner_pixels_displayed=np.array([[0.0, 0.0], [255.0, 255.0]]),
                        shape_threshold=(256, 256))

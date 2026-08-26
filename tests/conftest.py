@@ -1,5 +1,4 @@
-"""Shared test fixtures: tiny on-disk Squid acquisitions, Qt lifecycle pins, and the
-headless region-window stubs."""
+"""Shared test fixtures: tiny on-disk Squid acquisitions, Qt lifecycle pins, and the headless region-window stubs."""
 
 from __future__ import annotations
 
@@ -148,15 +147,7 @@ def _cold_result_cache():
 
 @pytest.fixture(autouse=True)
 def _cold_dataset_depth():
-    """Every test starts on an UNMEASURED contrast ceiling (``squidxplorer._bitdepth``).
-
-    The ceiling is process-wide -- one app, one open
-    acquisition -- and in production ``ViewerManager.set_dataset`` is what clears it. A test that
-    fuses a 12-bit fixture leaves the module saying 4095, and the next test to assert a contrast
-    window of 9000 (``test_view_settings``) would then see it clamped by a dataset it never
-    loaded. Cleared on the way out too, so the failing test is the one that measured, not the one
-    after it.
-    """
+    """Every test starts on an UNMEASURED contrast ceiling (``squidxplorer._bitdepth``)."""
     from squidxplorer import _bitdepth
 
     _bitdepth.new_dataset(None)
@@ -192,11 +183,7 @@ def _restore_operator_registries():
 
 @pytest.fixture
 def blob_operator():
-    """A cardless, core, params-declaring LABELS plane-op — the panel/CLI/runner exemplar.
-
-    min_area_px=1 finds objects on any noisy fixture; a huge min_area_px finds none, so the
-    parameter provably changes the pixels.
-    """
+    """A cardless, core, params-declaring LABELS plane-op — the panel/CLI/runner exemplar."""
     import numpy as np
 
     from squidxplorer import add_operator
@@ -230,8 +217,7 @@ def blob_operator():
 
 @pytest.fixture
 def identity_operator():
-    """A core identity plane-op ('planes'): keeps every z plane, no pixel changed — what the
-    shelved `keepz` was for the acquisition-format writer tests."""
+    """A core identity plane-op ('planes'): keeps every z plane, no pixel changed — what the shelved `keepz` was for the acquisition-format writer tests."""
     from squidxplorer import add_operator
     from squidxplorer.projection import plane_op
 
@@ -472,22 +458,6 @@ def zarr_hcs_dataset(tmp_path):
 
 
 @pytest.fixture
-def zarr_per_fov_dataset(tmp_path):
-    """SaveZarrJob non-HCS default: ``zarr/{region}/fov_{n}.ome.zarr/0``, 5-D TCZYX."""
-    from tests import writer_fixtures
-
-    return _writer_fixture(tmp_path, writer_fixtures.build_zarr_per_fov, "acq_zarr_fov")
-
-
-@pytest.fixture
-def zarr_6d_dataset(tmp_path):
-    """SaveZarrJob non-HCS 6D: ``zarr/{region}/acquisition.zarr``, 6-D FTCZYX (non-standard)."""
-    from tests import writer_fixtures
-
-    return _writer_fixture(tmp_path, writer_fixtures.build_zarr_6d, "acq_zarr_6d")
-
-
-@pytest.fixture
 def real_dataset():
     """The real 10x laser-AF tissue acquisition; else skip (used by integration tests)."""
     path = Path("/Users/julioamaragall/Downloads/"
@@ -546,11 +516,7 @@ def sim_1536wp():
 # Headless RegionViewer support: `napari_pane_stub` replaces the one seam that needs a GL context
 # (make_pane) with a recording stand-in; everything downstream is production code.
 def _stub_pane_classes():
-    """The headless pane class: squidxplorer's OWN ModelPane — a real Qt-free ``ViewerModel``
-    with a real ``MosaicLayers`` over it. The hand-synced StubMosaic/StubLayer reimplementation
-    is deleted: it had to mirror every MosaicLayers change by hand, and its last drift let four
-    sites go wrong with the suite green. Tests now cross the same interface production crosses.
-    """
+    """The headless pane class: squidxplorer's OWN ModelPane — a real Qt-free ``ViewerModel`` with a real ``MosaicLayers`` over it."""
     from squidxplorer._napari_pane import model_pane_class
 
     return model_pane_class()
@@ -604,11 +570,7 @@ def build_flat_scene(mosaic, op="raw", channels=("488", "561")):
 
 
 def build_volume_scene(mosaic, op="raw", channels=("488", "561"), bricks=3):
-    """THE 3D SCENE: a bricked volume of the same op and channels, in the same viewer.
-
-    Uses the real `BrickedVolume._add_layer` path; only the loader thread is stubbed (a real
-    QThread with no QApplication aborts the interpreter). Several bricks by default on purpose.
-    """
+    """THE 3D SCENE: a bricked volume of the same op and channels, in the same viewer."""
     from squidxplorer._brick_view import BrickedVolume
 
     vol = BrickedVolume(
@@ -627,12 +589,7 @@ def build_volume_scene(mosaic, op="raw", channels=("488", "561"), bricks=3):
 
 
 class FakeReader:
-    """THE canonical reader double: the full contract (source_id included), no disk.
-
-    16 test files carry ~26 hand-rolled reader stubs, each re-deriving `_path`/`metadata`/
-    `read` — and three of them fork the contract (a `z_level=0` default `read` does not have).
-    New tests take this one; existing stubs migrate as they are touched.
-    """
+    """THE canonical reader double: the full contract (source_id included), no disk."""
 
     def __init__(self, metadata: dict, planes=None, source_id: str = "/fake/acq"):
         self._metadata = dict(metadata)

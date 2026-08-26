@@ -43,17 +43,14 @@ def test_resolve_plate_dir_takes_the_store_or_the_folder_holding_it(tmp_path):
 
 
 def test_the_contract_names_the_walk_the_DOC_promises():
-    """docs/plate-contract.md names `_tilesource.plate_layout_from_store` as the canonical
-    plate walk; the name must exist where the doc points."""
+    """docs/plate-contract.md names `_tilesource.plate_layout_from_store` as the canonical plate walk; the name must exist where the doc points."""
     from squidxplorer._tilesource import plate_layout_from_store
 
     assert callable(plate_layout_from_store)
 
 
 def test_the_readers_identity_is_DECLARED_and_the_zarr_readers_is_the_acquisition_root(tmp_path):
-    """`source_id` is the contract's identity member. The Zarr reader's is the acquisition
-    ROOT (where the sidecars live) — its `_path` is the STORE, and keying the staleness token
-    on the store statted acquisition.yaml/coordinates.csv files that never exist there."""
+    """`source_id` is the contract's identity member."""
     from squidxplorer.contract.reader import SquidAcquisitionReader
     from squidxplorer.reader import SquidZarrReader
 

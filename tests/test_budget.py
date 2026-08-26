@@ -1,8 +1,4 @@
-"""The memory budget's rules.
-
-The property under test: the budget SCALES with the machine, is never so small that the cache
-thrashes, is never unbounded, and a human can override it.
-"""
+"""The memory budget's rules."""
 
 from __future__ import annotations
 
@@ -20,8 +16,7 @@ MIB = 1 << 20
 
 
 def test_the_budget_SCALES_with_the_machine():
-    """A fixed 256 MiB is ~5% of available on a 16 GB laptop and ~0.5% on a 96 GB machine:
-    simultaneously too timid to use the machine and too blunt to protect a small one."""
+    """A fixed 256 MiB is ~5% of available on a 16 GB laptop and ~0.5% on a 96 GB machine: simultaneously too timid to use the machine and too blunt to"""
     small = cache_budget(available=8 * GIB, env={})
     large = cache_budget(available=64 * GIB, env={})
     assert large > small * 4, (
@@ -31,19 +26,14 @@ def test_the_budget_SCALES_with_the_machine():
 
 
 def test_it_never_thrashes_on_a_small_machine():
-    """Below the floor a fused-plane cache holds fewer than two 5731x4793 planes (54.9 MB each)
-    and evicts the one it is about to be asked for again."""
+    """Below the floor a fused-plane cache holds fewer than two 5731x4793 planes (54.9 MB each) and evicts the one it is about to be asked for again."""
     assert cache_budget(available=64 * MIB, env={}) >= FLOOR_BYTES
     assert cache_budget(available=0, env={}) == FLOOR_BYTES
-
-
-def test_it_is_never_unbounded_however_big_the_machine():
-    assert cache_budget(available=512 * GIB, env={}) == CEILING_BYTES
+    assert cache_budget(available=512 * GIB, env={}) == CEILING_BYTES, "never unbounded either"
 
 
 def test_a_human_override_WINS_and_is_not_silently_capped():
-    """Precedence: explicit override > measurement > default. Capping it silently would make the
-    control a lie."""
+    """Precedence: explicit override > measurement > default."""
     assert cache_budget(env={ENV_VAR: "128"}, available=64 * GIB) == 128 * MIB
     huge = cache_budget(env={ENV_VAR: "16384"}, available=8 * GIB)
     assert huge == 16384 * MIB, "the override was silently clamped"
@@ -58,8 +48,7 @@ def test_a_nonsense_override_falls_back_to_MEASURING_rather_than_to_zero():
 
 
 def test_it_sizes_off_AVAILABLE_not_total():
-    """A viewer that sizes off TOTAL RAM on a laptop already running a browser and an IDE wins the
-    allocation and loses the machine."""
+    """A viewer that sizes off TOTAL RAM on a laptop already running a browser and an IDE wins the allocation and loses the machine."""
     import inspect
 
     assert "available" in inspect.signature(cache_budget).parameters

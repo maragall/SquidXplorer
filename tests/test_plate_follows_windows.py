@@ -119,6 +119,8 @@ def test_a_gesture_in_a_window_leaves_the_plate_alone(qapp, squid_dataset):
 
         child.mosaic.user_drags_contrast(ch_name, 11.0, 222.0)
         child.mosaic.user_clicks_eye(ch_name, False)
+        child.mosaic.user_drags_contrast("a channel that is not in this acquisition", 1.0, 2.0)
+        child.mosaic.user_clicks_eye("a channel that is not in this acquisition", False)
 
         assert win._overview._contrast.window(0) == before_window, (
             "a contrast drag in a window still reaches the plate")
@@ -126,18 +128,6 @@ def test_a_gesture_in_a_window_leaves_the_plate_alone(qapp, squid_dataset):
             "an eye icon in a window still reaches the plate")
         assert not win._overview._contrast.is_followed(0), (
             "the plate is still following a window's resolved window")
-    finally:
-        win.close()
-
-
-def test_a_channel_the_plate_does_not_have_is_ignored_rather_than_raising(qapp, squid_dataset):
-    """An unknown channel must be dropped quietly — an exception here dies inside a Qt slot."""
-    win = _open_plate(squid_dataset)
-    try:
-        child = _spawn(win)
-        child.mosaic.user_drags_contrast("a channel that is not in this acquisition", 1.0, 2.0)
-        child.mosaic.user_clicks_eye("a channel that is not in this acquisition", False)
-        assert not win._overview._contrast.is_followed(0)
     finally:
         win.close()
 
@@ -153,22 +143,12 @@ def test_picking_an_operator_layer_in_a_window_moves_the_plate_onto_it(qapp, squ
         child.mosaic.user_shows_layer("mip", False)
         assert win._overview._active == "raw", (
             "hiding the operator layer in the window left the plate on it")
+        assert [ly.enabled for ly in win._op_stack.layers() if ly.key == "mip"] == [False], (
+            "the plate's Layers tab disagrees with what the window asked for")
 
         child.mosaic.user_shows_layer("mip", True)
         assert win._overview._active == "mip", (
             "showing the operator layer in the window did not bring the plate back to it")
-    finally:
-        win.close()
-
-
-def test_the_plate_layers_tab_agrees_with_what_the_window_asked_for(qapp, squid_dataset):
-    win = _open_plate(squid_dataset)
-    try:
-        win._op_stack.add("mip", "Maximum Intensity Projection")
-        win._apply_layers()
-        child = _spawn(win)
-        child.mosaic.user_shows_layer("mip", False)
-        assert [ly.enabled for ly in win._op_stack.layers() if ly.key == "mip"] == [False]
     finally:
         win.close()
 
@@ -184,18 +164,6 @@ def test_a_window_layer_the_plate_never_ran_is_ignored_rather_than_raising(qapp,
         win.close()
 
 
-def test_every_open_window_is_bound_not_only_the_first(qapp, squid_dataset):
-    win = _open_plate(squid_dataset)
-    try:
-        first, second = _spawn(win, 1), _spawn(win, 2)
-        assert 1 in win._followed_windows and 2 in win._followed_windows, (
-            "a second window was not bound")
-        assert len(first.mosaic.op_cbs) == 1 and len(second.mosaic.op_cbs) == 1, (
-            "the plate did not subscribe to both windows")
-    finally:
-        win.close()
-
-
 def test_the_last_gesture_wins_when_two_windows_touch_one_channel(qapp, squid_dataset):
     """Deliberate: the plate paints with whatever window the user last resolved."""
     win = _open_plate(squid_dataset)
@@ -203,6 +171,9 @@ def test_the_last_gesture_wins_when_two_windows_touch_one_channel(qapp, squid_da
         win._op_stack.add("mip", "Maximum Intensity Projection")
         win._apply_layers()
         first, second = _spawn(win, 1), _spawn(win, 2)
+        assert 1 in win._followed_windows and 2 in win._followed_windows, (
+            "a second window was not bound")
+        assert len(first.mosaic.op_cbs) == 1 and len(second.mosaic.op_cbs) == 1
 
         first.mosaic.user_shows_layer("mip", False)
         assert win._overview._active == "raw", "the FIRST window's layer choice was not followed"

@@ -46,8 +46,6 @@ def test_the_menu_groups_operators_by_their_declared_extra():
     stitch = _row(rows, "stitch")
     assert {"stitch", "register"} <= set(stitch.operators)
     assert "tilefusion" in stitch.requires
-    # segment (cellpose) was shelved 2026-08-24 with the spot/cellpose operators: the menu is
-    # registry-derived, so the row disappears with them rather than offering a dead install.
     assert not [r for r in rows if r.extra == "segment"]
 
 
@@ -131,12 +129,6 @@ def test_the_real_probe_answers_for_this_machine():
 
 # click-path defaults: double-clicked with no flags, every argument resolves itself
 
-def test_the_default_source_is_the_wheel_beside_the_program(tmp_path):
-    assert bootstrap.default_source(tmp_path) is None
-    (tmp_path / "squidxplorer-0.1.0-py3-none-any.whl").touch()
-    assert bootstrap.default_source(tmp_path).name == "squidxplorer-0.1.0-py3-none-any.whl"
-
-
 def test_the_default_env_lives_under_the_users_app_data():
     env = bootstrap.default_env()
     assert "squidxplorer" in str(env).lower()
@@ -208,20 +200,14 @@ def test_a_rerun_reuses_the_existing_env(tmp_path):
     assert [c[1] for c in cmds] == ["pip"], "an existing env must not be recreated"
 
 
-def test_core_only_installs_the_bare_package(tmp_path):
-    cmds = bootstrap.commands("/opt/uv/uv", ["core"], "x.whl", tmp_path / "env")
-    assert cmds[-1][-1] == "squidxplorer @ x.whl"
-
-
 def test_the_env_is_built_from_a_PINNED_managed_python_never_the_machines(tmp_path):
-    """The first customer install (Katana rig, 2026-08-16) died because `uv venv` built the env
-    from Ubuntu 22.04's system Python 3.10 and the wheel needs >=3.11. The pin makes uv download
-    a managed CPython, so the installer works on a machine with no (or the wrong) Python."""
+    """The first customer install (Katana rig, 2026-08-16) died because `uv venv` built the env from Ubuntu 22.04's system Python 3.10 and the wheel needs >=3.11."""
     cmds = bootstrap.commands("/opt/uv/uv", ["core"], "x.whl", tmp_path / "env")
     venv = cmds[0]
     assert venv[1] == "venv"
     assert venv[2:4] == ["--python", bootstrap.ENV_PYTHON], \
         "the venv step no longer pins its interpreter; the system python decides again"
+    assert cmds[-1][-1] == "squidxplorer @ x.whl", "core only installs the bare package"
 
 
 def _fake_env(tmp_path, version_line: str):
@@ -235,36 +221,17 @@ def _fake_env(tmp_path, version_line: str):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="the shim interpreter is a shell script")
-def test_a_stale_old_python_env_is_named_not_reused(tmp_path):
-    """The venv step is skipped whenever the env exists, so an env built wrong once would fail
-    every future install identically — the guard names it so _run can recreate it."""
-    reason = bootstrap.stale_env(_fake_env(tmp_path, "3.10"))
-    assert reason is not None and "3.10" in reason and bootstrap.ENV_PYTHON in reason
-
-
-@pytest.mark.skipif(os.name != "posix", reason="the shim interpreter is a shell script")
-def test_a_matching_env_is_reused(tmp_path):
-    assert bootstrap.stale_env(_fake_env(tmp_path, bootstrap.ENV_PYTHON)) is None
-
-
-@pytest.mark.skipif(os.name != "posix", reason="the shim interpreter is a shell script")
-def test_a_NEWER_python_env_is_also_recreated(tmp_path):
-    """Exact-minor match, not a floor: a 3.12 env satisfies requires-python, but psfmodels has
-    no cp312 wheel, so adding the decon pack to it later would source-build on a machine with no
-    compiler — the interpreter decides which wheels exist, so one installer means one
-    interpreter."""
-    reason = bootstrap.stale_env(_fake_env(tmp_path, "3.12"))
-    assert reason is not None and "3.12" in reason and bootstrap.ENV_PYTHON in reason
-
-
-def test_an_absent_env_is_not_stale(tmp_path):
+@pytest.mark.parametrize("version", ["3.10", "3.12"])
+def test_an_env_on_any_other_python_minor_is_named_stale_a_matching_or_absent_one_is_not(tmp_path, version):
+    """Exact-minor match, not a floor: psfmodels has no cp312 wheel, so a 3.12 env cannot take the decon pack later."""
+    reason = bootstrap.stale_env(_fake_env(tmp_path, version))
+    assert reason is not None and version in reason and bootstrap.ENV_PYTHON in reason
+    assert bootstrap.stale_env(_fake_env(tmp_path / "match", bootstrap.ENV_PYTHON)) is None
     assert bootstrap.stale_env(tmp_path / "no-such-env") is None
 
 
 def test_no_dependency_needs_a_git_binary_on_the_customer_machine():
-    """`git+https` references make uv shell out to a `git` binary — present on every CI runner,
-    absent on a bare lab machine. The SHA pins live in archive-tarball URLs instead, which
-    GitHub serves over plain HTTPS."""
+    """`git+https` references make uv shell out to a `git` binary — present on every CI runner, absent on a bare lab machine."""
     import pathlib
 
     pyproject = (pathlib.Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
@@ -305,8 +272,9 @@ def test_the_bundled_payload_wheel_beats_the_one_beside_the_program(tmp_path, mo
 
 
 def test_without_a_payload_the_wheel_beside_the_program_still_serves(tmp_path, monkeypatch):
-    (tmp_path / "squidxplorer-0.1.0-py3-none-any.whl").touch()
     monkeypatch.setattr(bootstrap, "program_dir", lambda: tmp_path)
+    assert bootstrap.default_source() is None
+    (tmp_path / "squidxplorer-0.1.0-py3-none-any.whl").touch()
     assert bootstrap.default_source().name == "squidxplorer-0.1.0-py3-none-any.whl"
 
 
@@ -360,11 +328,6 @@ def test_the_macos_app_wraps_the_envs_viewer(tmp_path):
         assert runner.stat().st_mode & 0o111, "the bundle's executable must be executable"
     plist = (app / "Contents" / "Info.plist").read_text()
     assert "SquidXplorer" in plist and "com.cephla.squidxplorer" in plist
-
-
-def test_a_macos_app_rerun_repoints_at_the_env(tmp_path):
-    env = tmp_path / "env"
-    assert bootstrap._macos_app(env, apps_dir=tmp_path / "Applications")
     assert bootstrap._macos_app(env, apps_dir=tmp_path / "Applications"), \
         "a rerun over the existing bundle must not fail"
 
@@ -384,8 +347,7 @@ def test_the_linux_menu_entry_points_at_the_envs_viewer(tmp_path):
 
 
 def test_the_linux_menu_entry_carries_the_installed_icon(tmp_path, monkeypatch):
-    """The icon is COPIED beside the env: a one-file build's payload dir vanishes on exit, so an
-    Icon= pointing there would lose its art on the next login."""
+    """The icon is COPIED beside the env: a one-file build's payload dir vanishes on exit, so an Icon= pointing there would lose its art on the next login."""
     env = tmp_path / "env"
     payload = tmp_path / "payload"
     payload.mkdir()

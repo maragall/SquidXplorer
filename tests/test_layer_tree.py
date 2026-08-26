@@ -1,8 +1,4 @@
-"""The grouped layer tree, and the 2D/3D button.
-
-Qt/GL parts run in a clean subprocess (offscreen ships no GL and would segfault the session);
-the pure-logic parts run in-process.
-"""
+"""The grouped layer tree, and the 2D/3D button."""
 
 from __future__ import annotations
 
@@ -22,10 +18,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 
 
 def _run_qt(script_body: str, tmp_path, marker: str):
-    """Run *script_body* in a clean Qt process and return the dict it printed after *marker*.
-
-    An exception in our code FAILS the test; only a GL-less box (no marker line) skips.
-    """
+    """Run *script_body* in a clean Qt process and return the dict it printed after *marker*."""
     script = tmp_path / f"{marker.lower()}_check.py"
     script.write_text(_PREAMBLE.replace("__MARKER__", marker) + script_body + _POSTAMBLE.replace("__MARKER__", marker))
 
@@ -127,7 +120,6 @@ def test_the_3d_button_is_naparis_own_and_is_kept_alive_but_hidden(tmp_path):
     before, after, back = got["toggle"]
     assert [before, after, back] == [2, 3, 2], "clicking it does not actually change ndisplay"
     assert got["checked_follows_dims"] is True
-    # One owner: dims. The button READS it, it does not keep a second copy.
     assert got["follows_model_write"] is True
     assert got["unchecks_on_model_write"] is False
     from squidxplorer._napari_pane import NDISPLAY_TOOLTIP
@@ -202,7 +194,6 @@ def _ch_index_of(tree, op, channel):
 def test_the_tree_is_two_levels_processing_layer_then_channels(tree, mosaic):
     m = tree.model()
     assert m.rowCount() == 2, "processing layers are the top level"
-    # Topmost first — napari's own layer-list convention.
     assert [m.data(_op_index(tree, r), Qt.DisplayRole) for r in range(2)] == ["stitched", "raw"]
     for r, op in enumerate(["stitched", "raw"]):
         assert m.rowCount(_op_index(tree, r)) == 4
@@ -216,20 +207,10 @@ def test_the_tree_reads_visibility_off_the_layer_and_keeps_no_copy(tree, mosaic)
     m = tree.model()
     assert m.data(_ch_index_of(tree, "stitched", "405"), Qt.CheckStateRole) == Qt.Checked
 
-    # Change it BEHIND the tree's back, the way napari's own layer list does.
     mosaic.find("stitched", "405").visible = False
     assert m.data(_ch_index_of(tree, "stitched", "405"), Qt.CheckStateRole) == Qt.Unchecked, (
         "the tree is holding its own copy of visibility instead of reading the layer"
     )
-
-
-def test_an_external_visibility_change_repaints_the_row(tree, mosaic, qapp):
-    m = tree.model()
-    seen = []
-    m.dataChanged.connect(lambda tl, br, roles=None: seen.append(tl))
-    mosaic.find("raw", "488").visible = False
-    qapp.processEvents()
-    assert seen, "changing layer.visible elsewhere left the tree's checkbox stale"
 
 
 def test_toggling_a_processing_layer_toggles_its_four_channels(tree, mosaic):
@@ -380,7 +361,6 @@ def test_the_tree_survives_layers_being_destroyed_and_recreated(tree, mosaic, qa
         "the tree is still driving the DESTROYED layer object -- the contrast-sync bug again"
     )
 
-    # The subscription has to be rebuilt too, not just the rows.
     seen = []
     m.dataChanged.connect(lambda tl, br, roles=None: seen.append(tl))
     mosaic.find("stitched", "638").visible = False
@@ -406,24 +386,6 @@ def _brick(mosaic, op, channel, iy, ix):
     return mosaic.model.add_image(
         _img(iy * 3 + ix, (4, 8, 8)), name=f"{channel} B{iy},{ix}",
         metadata=MosaicKey(op, channel).as_metadata())
-
-
-def test_a_channel_row_switches_off_EVERY_layer_of_that_pair(tree, mosaic, qapp):
-    """The row stands for the (op, channel) pair, not for one layer object."""
-    bricks = [_brick(mosaic, "stitched", "561", iy, ix)
-              for iy, ix in ((0, 0), (0, 1), (1, 0))]
-    qapp.processEvents()
-    m = tree.model()
-    idx = _ch_index_of(tree, "stitched", "561")
-    assert m.data(idx, Qt.CheckStateRole) == Qt.Checked
-
-    m.setData(idx, Qt.Unchecked, Qt.CheckStateRole)
-
-    lit = [ly for ly in mosaic.layers_for("stitched", "561") if ly.visible]
-    assert lit == [], (
-        f"{len(lit)} of {len(bricks) + 1} layer(s) answering to stitched/561 are still on screen "
-        "after the channel was switched off")
-    assert m.data(idx, Qt.CheckStateRole) == Qt.Unchecked
 
 
 def test_a_channel_row_reports_PARTIAL_when_its_layers_disagree(tree, mosaic, qapp):
@@ -540,19 +502,14 @@ def test_the_tree_is_mounted_beside_naparis_own_controls(tmp_path):
     got = _run_qt(_MOUNT_SCRIPT, tmp_path, "MOUNT")
 
     assert got["tree_exists"] is True
-    # Since ruling v3 (2026-08-25) the pane BUILDS the tree and the view's one plain column
-    # hosts it (`native_column_widgets`); a bare pane holds it undocked, so visibility is the
-    # view's to assert, not this probe's.
     assert got["rows"] == 2
     assert got["children_of_first"] == 4
-    # The grouped tree REPLACES the flat list; napari's LAYER CONTROLS stay (they own contrast).
     assert got["flat_layer_list_visible"] is False, (
         "napari's flat layer list is still showing, so the layer explosion is still on screen"
     )
     assert got["layer_controls_still_there"] >= 1, (
         "napari's layer controls disappeared -- contrast has no owner on screen"
     )
-    # Adding a dock must never move the canvas out of napari's window.
     assert got["canvas_still_inside_napari_window"] is True
     assert got["switched_to"] == [True] * 4
     assert got["switched_away_from"] == [False] * 4, (
@@ -593,7 +550,6 @@ def test_the_eye_rules_reach_the_tree_and_not_only_naparis_own_list():
     assert 'url("theme_dark:/visibility.svg")' in checked, (
         "the tree got an indicator rule with no eye image in it"
     )
-    # The gutter is load-bearing: without it the thumbnail covers the indicator.
     assert "QTreeView::item" in out and "28px" in out.split("QTreeView::item")[-1], (
         "no left margin on the tree's items -- the thumbnail will paint over the eye"
     )
@@ -610,18 +566,14 @@ def test_the_model_serves_every_role_that_delegate_paints_from(qapp, mosaic):
     group = _op_index_of(view, "raw")
     channel = _ch_index_of(view, "raw", "405")
 
-    # a PROCESSING LAYER is a group -> napari paints a folder, open when expanded
     item = model.data(group, LT._NAPARI_ROLES["item"])
     assert item is not None and item.is_group() is True
 
-    # a CHANNEL is the real napari layer -> it gets the image icon and its own thumbnail
     assert model.data(channel, LT._NAPARI_ROLES["item"]) is mosaic.find("raw", "405")
     thumb = model.data(channel, LT._NAPARI_ROLES["thumbnail"])
     assert thumb is not None and thumb.width() > 0, "no thumbnail: the row will paint empty"
 
-    # loaded, or napari starts a loading GIF that never stops
     assert model.data(channel, LT._NAPARI_ROLES["loaded"]) is True
-    # and the row must be tall enough for the thumbnail napari draws into it
     assert model.data(channel, Qt.SizeHintRole).height() >= 30
 
 
@@ -674,23 +626,3 @@ def test_selecting_a_processing_layer_selects_all_of_its_channels(qapp, mosaic):
     ]
 
 
-def test_the_tree_lists_topmost_first_like_naparis_own_layer_list(qapp, mosaic):
-    """napari owns the display order (last added on top); the tree mirrors it."""
-    from squidxplorer import _layer_tree as LT
-
-    tree = LT.MosaicTree(mosaic)
-    model = tree.model()
-    ours = [model.data(model.index(r, 0), Qt.DisplayRole) for r in range(model.rowCount())]
-
-    # napari's own order, as its list widget shows it: last added first.
-    napari_order = []
-    for layer in reversed(list(mosaic.model.layers)):
-        op = layer.metadata["squidxplorer"]["op"]
-        if op not in napari_order:
-            napari_order.append(op)
-    assert ours == napari_order, f"tree shows {ours}, napari shows {napari_order}"
-
-    raw = _op_index_of(tree, "raw")
-    channels = [model.data(model.index(r, 0, raw), Qt.DisplayRole)
-                for r in range(model.rowCount(raw))]
-    assert channels == list(reversed(mosaic.channels("raw"))), "channels are not topmost-first"

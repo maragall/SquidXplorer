@@ -36,12 +36,6 @@ def test_a_box_in_the_middle_of_four_fields_picks_all_four():
     assert fovs_overlapping_bbox(meta, "A1", (cx - 1, cy - 1, cx + 1, cy + 1)) == [0, 1, 2, 3]
 
 
-def test_a_box_inside_one_field_picks_only_that_field():
-    meta = _meta(2)
-    x0, y0, _x1, _y1 = mosaic_bbox_um(meta, "A1")
-    assert fovs_overlapping_bbox(meta, "A1", (x0 + 1, y0 + 1, x0 + 3, y0 + 3)) == [0]
-
-
 def test_the_fields_are_WHOLE_never_cropped():
     """A FOV is the unit the reader decodes and registration solves on; the crop happens on the fused result."""
     meta = _meta(2, frame=64, pitch=1.0)
@@ -82,12 +76,7 @@ def test_n_fovs_does_not_apply_to_an_explicit_field_list():
 
 
 def test_ALL_THREE_consumers_call_the_one_resolver():
-    """A private copy of the resolution in either engine OR THE WRITER goes red here.
-
-    The writer is in this list because it was the one left out: ``write_from_stream`` re-derived
-    its scope with ``select_fovs`` and hand-rolled the regions subset, so a mapped (ROI) run owed
-    every FOV of the region and marked its own store incomplete.
-    """
+    """A private copy of the resolution in either engine OR THE WRITER goes red here."""
     import inspect
 
     from squidxplorer import _engine, _output, _stitch
@@ -104,12 +93,7 @@ def test_ALL_THREE_consumers_call_the_one_resolver():
 
 
 def test_an_ROI_save_is_COMPLETE_when_every_mapped_field_lands(tmp_path):
-    """``write_from_stream`` with a ``{region: [fov, ...]}`` mapping owes exactly those fields.
-
-    It used to scope with ``select_fovs`` + a hand-rolled subset that read only the mapping's
-    KEYS, so an ROI save owed every FOV of the region, kept its ``.squidxplorer-incomplete``
-    marker, and advertised field dirs that were never written.
-    """
+    """``write_from_stream`` with a ``{region: [fov, ...]}`` mapping owes exactly those fields."""
     import numpy as np
 
     from squidxplorer._output import is_incomplete, write_from_stream

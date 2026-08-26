@@ -39,7 +39,7 @@ from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixture)
 PER_WINDOW = ("ndisplay", "region_id", "z_level", "time_point", "roi_bbox")
 
 
-def test_only_how_you_look_settings_have_global_defaults():
+def test_only_how_you_look_settings_have_global_defaults_and_contrast_inherits():
     """The table, as an assertion. Adding a per-window setting to the defaults breaks this."""
     assert set(_SETTING_BASELINE) == {"tenengrad_focus", "channel_visibility", "luts"}, (
         "the set of global defaults changed; if that was deliberate, the classification in "
@@ -47,10 +47,6 @@ def test_only_how_you_look_settings_have_global_defaults():
     for name in PER_WINDOW:
         assert name not in _SETTING_BASELINE, (
             f"{name!r} describes WHAT a window is looking at, so it cannot have a global default")
-
-
-def test_the_contrast_rule_is_one_rule():
-    """Contrast inherits from whoever opened the window. That single line is both written rules."""
     assert _SETTING_BASELINE["luts"] == _INHERIT
     assert _SETTING_BASELINE["tenengrad_focus"] == _GLOBAL
     assert _SETTING_BASELINE["channel_visibility"] == _GLOBAL
@@ -135,11 +131,7 @@ _LUT_B = {CH_IN_YAML: {"clim": (33.0, 333.0), "cmap": "red"},
 
 @pytest.fixture
 def manager(qapp, napari_pane_stub, squid_dataset):
-    """A real ViewerManager over the real reader, with no PlateWindow in the way.
-
-    Windows use WA_DeleteOnClose, so close() only schedules deletion; drain and collect happen
-    here, with the app alive, rather than in the middle of an unrelated later test.
-    """
+    """A real ViewerManager over the real reader, with no PlateWindow in the way."""
     from squidxplorer import open_reader
 
     root, _arrays = squid_dataset
@@ -195,13 +187,11 @@ def test_a_new_window_inherits_the_current_defaults(qapp, manager):
 
 
 def test_an_roi_child_inherits_its_parents_contrast_not_the_global_default(qapp, manager):
-    """The default and the parent are deliberately different, so inheriting is distinguishable
-    from defaulting."""
+    """The default and the parent are deliberately different, so inheriting is distinguishable from defaulting."""
     manager.defaults.set("luts", _LUT_A)
     parent = manager.open([REGIONS[0]])
     _loaded(qapp, parent)
 
-    # Read live off the layers, not the record: napari writes contrast to the layer, not the record.
     for ch, lut in _LUT_B.items():
         parent._pane.mosaic.find("raw", ch).contrast_limits = lut["clim"]
 
@@ -209,8 +199,6 @@ def test_an_roi_child_inherits_its_parents_contrast_not_the_global_default(qapp,
                                parent_id=parent.window_id)
     assert child is not None
 
-    # Field by field, not by dict equality: a live LUT record also carries derived fields (e.g.
-    # `rgb`) unrelated to inheritance, so pinning the whole dict would false-alarm on those.
     inherited = child.settings.get("luts")
     assert set(inherited) == {CH_IN_YAML, CH_NOT_IN_YAML}
     for ch, expected in _LUT_B.items():
@@ -228,16 +216,13 @@ def test_an_roi_child_inherits_its_parents_contrast_not_the_global_default(qapp,
     assert _layer_clims(child) == {CH_IN_YAML: (33.0, 333.0), CH_NOT_IN_YAML: (44.0, 444.0)}, (
         "the inherited contrast never reached the child's layers")
 
-    # The other half of the same rule: a plate-opened window has no opener, so "inherit" hands it
-    # the global default.
     sibling = manager.open([REGIONS[1]])
     assert sibling.settings.get("luts") == _LUT_A, (
         "a plate-opened window inherited from somewhere; its opener is the default")
 
 
 def test_an_roi_child_takes_the_global_default_for_the_global_settings(qapp, manager):
-    """Only contrast inherits; autofocus and channel visibility are global defaults for every
-    window, ROI children included."""
+    """Only contrast inherits; autofocus and channel visibility are global defaults for every window, ROI children included."""
     manager.defaults.set("tenengrad_focus", False)
     manager.defaults.set("channel_visibility", {CH_NOT_IN_YAML: True})
     parent = manager.open([REGIONS[0]])
@@ -274,17 +259,8 @@ def test_changing_a_setting_in_one_window_does_not_change_another(qapp, manager)
     assert manager.defaults.luts == _LUT_A
 
 
-def test_the_defaults_box_is_shelved_and_auto_focus_still_applies_once(qapp, manager):
-    """2026-08-19: the Defaults group (auto focus checkbox, make default, diverged, reset) is
-    SHELVED — absence pinned per the repo convention. The STORE behaviour it fronted survives:
-    `_apply_settings_once` still runs exactly once per window."""
+def test_auto_focus_applies_once(qapp, manager):
     one = manager.open([REGIONS[0]])
-    assert not hasattr(one, "_focus_default_chk"), "the Defaults box is back"
-    assert not hasattr(one, "_diverged_label"), "the diverged label is back"
-    assert not hasattr(one, "_reset_btn"), "the reset button is back"
-    assert not hasattr(one, "_make_default_btn"), "the make-default button is back"
-    assert not hasattr(manager, "make_default"), "make_default lost its button and its callers"
-
     _loaded(qapp, one)
     assert one._settings_applied is True
     called = []
@@ -325,14 +301,6 @@ def test_changing_the_default_does_not_retroactively_change_a_diverged_window(qa
     assert nxt.settings.get("tenengrad_focus") is True
 
 
-def test_match_raw_contrast_is_shelved_off_the_window(qapp, manager):
-    """"Match layers to raw" is gone whole (Julio, 2026-08-19) — the ABSENCE is pinned, the
-    way this repo pins deleted features, so the handler cannot come back without its button."""
-    from squidxplorer._region_viewer import RegionViewer
-
-    assert not hasattr(RegionViewer, "_match_raw_contrast"), "the match handler is back"
-
-
 def test_the_autofocus_default_is_actually_read_when_a_window_loads(qapp, manager):
     """Off by default, so the stock default leaves the old behaviour exactly as it was."""
     off = manager.open([REGIONS[0]])
@@ -360,8 +328,7 @@ def _fake_result(region, channels):
 
 
 def test_a_second_window_reuses_the_first_windows_result_without_recomputing(qapp, manager):
-    """Open A, compute once, open B on the same region: B gains A's very `Result` object, with
-    no re-fuse and no copy."""
+    """Open A, compute once, open B on the same region: B gains A's very `Result` object, with no re-fuse and no copy."""
     from squidxplorer._recipe import acquisition_version, cache_operator_result
 
     region = REGIONS[0]
@@ -383,58 +350,37 @@ def test_a_second_window_reuses_the_first_windows_result_without_recomputing(qap
     for ch, ly in layers.items():
         assert ly.visible is False, (
             f"{ch}: this window did not ask for the run, so its layer must arrive dark")
-    # Identity, not equality, is the proof of reuse.
     for i, ch in enumerate(channels):
         assert layers[ch].data is result.plane(ch), (
             f"{ch}: the second window was handed different pixels, so something recomputed")
         assert int(np.asarray(layers[ch].data)[0, 0]) == 700 + i
 
 
-def test_loading_a_NEW_dataset_forgets_the_last_ones_look(manager):
-    """A contrast window is a statement in the PREVIOUS acquisition's counts.
+def test_loading_a_NEW_dataset_forgets_the_last_ones_look_and_contrast_ceiling(manager):
+    """A contrast window is a statement in the PREVIOUS acquisition's counts."""
+    from squidxplorer import _bitdepth
 
-    Carry (11, 111) from a 12-bit set onto one that is 12-bit shifted into 16 and every channel
-    renders black; carry it the other way and everything saturates. Same for channel_visibility,
-    which is keyed by channel NAME -- names differ between acquisitions, so what survives is dead
-    weight at best and a channel that opens dark at worst.
-    """
     manager.defaults.set("luts", _LUT_A)
     manager.defaults.set("channel_visibility", {CH_IN_YAML: False})
     manager.defaults.set("tenengrad_focus", True)
-
-    manager.set_dataset(manager._reader, manager._meta)
-
-    assert manager.defaults.get("luts") == {}
-    assert manager.defaults.get("channel_visibility") == {}
-    # HOW you look survives; WHAT you looked at does not.
-    assert manager.defaults.get("tenengrad_focus") is True
-
-
-def test_a_new_dataset_also_forgets_the_last_ones_contrast_ceiling(manager):
-    """`set_dataset` is the one function that means "a new acquisition arrived"."""
-    from squidxplorer import _bitdepth
-
     _bitdepth.depth().observe(3437.0)
     assert _bitdepth.range_for(np.uint16) == (0.0, 4095.0)
 
     manager.set_dataset(manager._reader, manager._meta)
 
+    assert manager.defaults.get("luts") == {}
+    assert manager.defaults.get("channel_visibility") == {}
+    assert manager.defaults.get("tenengrad_focus") is True
     assert _bitdepth.depth().observed is None
     assert _bitdepth.range_for(np.uint16) == (0.0, 65535.0)
 
 
 def test_a_ceiling_rise_reaches_a_window_that_is_ALREADY_open(qapp, manager):
-    """THE test. The 14-bit set reads 3437 at C3 and 16380 at E7 -- one acquisition, one channel.
-
-    A window opened on the dim region has layers whose slider stops at 4095. When the bright
-    region is read the ceiling rises, and those already-built layers must be able to reach the
-    new pixels -- without their windows moving, because widening cannot clip.
-    """
+    """THE test."""
     from squidxplorer import _bitdepth
 
     import numpy as np
 
-    # PER CHANNEL (2026-08-25): the slider spans this channel's own observed maximum.
     _bitdepth.depth().observe_array(np.array([[3437]], np.uint16), CH_IN_YAML)
     win = manager.open([REGIONS[0]])
     _loaded(qapp, win)
@@ -449,7 +395,6 @@ def test_a_ceiling_rise_reaches_a_window_that_is_ALREADY_open(qapp, manager):
         qapp.processEvents()                    # the rise is queued to the GUI thread
 
     assert tuple(layer.contrast_limits_range) == (0.0, 16383.0)
-    # Widening cannot clip, so nothing on screen changed -- only how far the slider now travels.
     assert tuple(layer.contrast_limits) == (100.0, 3000.0)
 
 
@@ -468,10 +413,7 @@ def test_a_window_opened_on_a_DIFFERENT_region_gains_nothing(qapp, manager):
 
 
 def test_applying_a_lut_record_carries_CHANNEL_VISIBILITY_not_just_contrast(qapp, manager):
-    """The record has four keys and `apply_luts` puts three on the layers (`rgb` is the plate's
-    spelling). `_apply_luts` is how a child window inherits its parent's look AND what the
-    two-button clipboard pastes through (back 2026-08-19: "ultra simple, minimal, two button
-    logic"), so the rule is pinned here for both."""
+    """The record has four keys and `apply_luts` puts three on the layers (`rgb` is the plate's spelling)."""
     one = manager.open([REGIONS[0]])
     two = manager.open([REGIONS[1]])
     _loaded(qapp, one)

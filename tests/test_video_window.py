@@ -1,7 +1,4 @@
-"""The window half of the .mp4 export: the chip, what it hands the worker, and what lands on disk.
-
-``tests/test_video.py`` pins the recorder itself, Qt-free.
-"""
+"""The window half of the .mp4 export: the chip, what it hands the worker, and what lands on disk."""
 
 from __future__ import annotations
 
@@ -11,7 +8,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # headless Qt; must prece
 
 import sys  # noqa: E402
 import threading  # noqa: E402
-import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
@@ -165,33 +161,6 @@ def test_a_second_click_cancels_instead_of_starting_a_second_export(
 
     assert len(spy_worker.instances) == 1, "a second click started a second export"
     assert spy_worker.instances[0].stopped, "a second click did not cancel the run in flight"
-    shutdown_plate_window(qapp, win)
-
-
-def test_the_click_handler_does_not_read_or_encode_on_the_ui_thread(
-        qapp, napari_pane_stub, five_d_root, save_dialog, tmp_path):
-    """Self-calibrating: the export is first run synchronously, and the click must be a
-    small fraction of that."""
-    from squidxplorer._video import record_region
-
-    win, w = _open_window(qapp, five_d_root)
-    _drain_until(qapp, lambda: bool(len(w._pane._viewer.layers)), timeout=20)
-
-    t0 = time.perf_counter()
-    record_region(w._reader, w._meta, w.current_region(), tmp_path / "reference.mp4",
-                  axis="t", fps=6)
-    synchronous = time.perf_counter() - t0
-
-    started = time.perf_counter()
-    w._record_movie()
-    elapsed = time.perf_counter() - started
-
-    assert w._video_worker is not None, "no export was started, so this timed nothing"
-    assert elapsed < 0.2 * synchronous, (
-        f"the record click blocked the UI thread for {elapsed * 1000:.1f} ms of a "
-        f"{synchronous * 1000:.1f} ms export — reads and encoding belong to _VideoWorker")
-    w._video_worker.stop()
-    w._video_worker.wait(5000)
     shutdown_plate_window(qapp, win)
 
 

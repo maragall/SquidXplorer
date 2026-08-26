@@ -23,52 +23,22 @@ from squidxplorer._progress import (
 _META = {"regions": ["B2", "B3"], "fovs_per_region": {"B2": [0, 1, 2], "B3": [0, 1]}}
 
 
-def test_a_per_fov_operator_counts_fovs_not_wells():
-    """A decon over one region is 3 units of work, not 1, not a well count."""
+def test_unit_plan_counts_the_engines_own_units():
+    """FOVs for a per-FOV operator, regions for a region operator, clamped to what will run."""
     assert unit_plan(_META, ["B2"], region_op=False, n_fovs=None) == (3, FOV_UNIT)
     assert unit_plan(_META, None, region_op=False, n_fovs=None) == (5, FOV_UNIT)
-
-
-def test_a_region_operator_counts_regions_because_that_is_its_unit():
-    """the region loop yields ONE fused mosaic per region, so a region is the honest unit there."""
     assert unit_plan(_META, ["B2", "B3"], region_op=True, n_fovs=None) == (2, REGION_UNIT)
-
-
-def test_an_explicit_fov_count_is_clamped_to_what_each_region_has():
-    """A denominator larger than the work that will run would leave the bar short forever."""
     assert unit_plan(_META, None, region_op=False, n_fovs=2) == (4, FOV_UNIT)
-
-
-def test_a_region_the_engine_would_drop_is_not_counted():
-    """The engine drops unknown region names; a denominator that counts them never completes."""
     assert unit_plan(_META, ["B2", "NOPE"], region_op=False, n_fovs=None) == (3, FOV_UNIT)
-
-
-def test_no_fov_table_means_no_total_rather_than_a_guess():
-    """The one honest 'unknown'. The window draws an indeterminate bar off this None."""
     total, unit = unit_plan({"regions": ["B2"]}, None, region_op=False, n_fovs=None)
     assert total is None and unit == FOV_UNIT
-
-
-def test_an_unknown_total_never_produces_a_percentage():
-    """A progress bar that invents a denominator is a lie that gets believed."""
-    r = ProgressReport("decon", done=7, total=None, unit=FOV_UNIT)
-    assert r.percent is None and r.determinate is False
-    assert "7 FOVs so far" in r.sentence()
-    assert "of" not in r.sentence().split("·")[-1]
-
-
-def test_the_first_unit_is_never_extrapolated():
-    """The first arrival pays warm-up cost; an ETA from it would announce a number it can't meet."""
-    p = RunProgress("decon", total=10)
-    p.tick(100.0)
-    assert p.eta() is None, "one completion is not a rate"
 
 
 def test_time_remaining_is_a_rate_over_completions_after_the_first():
     """Two units 2 s apart, 8 left -> 16 s. The 100 s the FIRST unit took does not appear."""
     p = RunProgress("decon", total=10)
     p.tick(100.0)                     # warm-up, deliberately not measured
+    assert p.eta() is None, "one completion is not a rate"
     p.tick(102.0)
     assert p.eta() == pytest.approx(16.0)
     p.tick(104.0)
@@ -88,6 +58,9 @@ def test_an_unknown_total_offers_no_time_remaining():
     p.tick(1.0)
     p.tick(2.0)
     assert p.eta() is None and p.report().sentence().endswith("2 FOVs so far")
+    r = ProgressReport("decon", done=7, total=None, unit=FOV_UNIT)
+    assert r.percent is None and r.determinate is False
+    assert "of" not in r.sentence().split("·")[-1]
 
 
 def test_the_estimate_is_stated_coarsely_because_the_sample_is_small():
@@ -159,17 +132,12 @@ def _run_to_completion(qapp, win, requester, **kw):
         "the run never closed its pair on the window that asked for it")
 
 
-def test_the_window_that_asked_is_told_the_run_started(qapp, plate):
-    r = _Requester()
-    _run_to_completion(qapp, plate, r)
-    assert r.started, "the requester was never told the run began"
-
-
 def test_progress_climbs_monotonically_to_every_unit_of_the_run(qapp, plate):
     """N units in, N of N out, never a step backwards; the fixture's region holds 2 FOVs."""
     r = _Requester()
     _run_to_completion(qapp, plate, r)
 
+    assert r.started, "the requester was never told the run began"
     assert r.reports, "a run reported no progress at all"
     totals = {rep.total for rep in r.reports}
     assert totals == {len(FOVS)}, f"the denominator moved during the run: {totals}"
@@ -187,7 +155,6 @@ def test_a_failed_run_closes_the_pair_so_the_bar_cannot_be_left_running(qapp, pl
     def _boom(*_a, **_kw):
         raise RuntimeError("no such plane")
 
-    # the engine raising is the real shape of a failed run (`_run_body` catches it and emits `failed`)
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(squidxplorer, "run_plate", _boom)
         r = _Requester()
@@ -198,8 +165,7 @@ def test_a_failed_run_closes_the_pair_so_the_bar_cannot_be_left_running(qapp, pl
 
 
 def test_the_asking_window_is_left_knowing_the_run_reached_its_total(qapp, plate):
-    """The last report and ``QThread.finished`` race; the drain reads the worker's own tally
-    instead of the signal, pinned here with the signal path removed."""
+    """The last report and ``QThread.finished`` race; the drain reads the worker's own tally instead of the signal, pinned here with the signal path removed."""
     r = _Requester()
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(V.PlateWindow, "_on_unit_progress", lambda self, report: None)
@@ -224,9 +190,7 @@ def test_the_plate_stops_talking_to_a_requester_once_its_run_has_drained(qapp, p
 
 
 def test_only_the_window_that_ASKED_gets_the_result_visible(qapp, plate):
-    """Ruling r (Julio, 2026-08-25, "decon layer is != raw view"): a preview's result lands
-    ONLY in the view that asked, visible; a view that did not ask receives nothing (the dark
-    fan-out survives only for a run no view asked for)."""
+    """Ruling r (Julio, 2026-08-25, "decon layer is != raw view"): a preview's result lands ONLY in the view that asked, visible; a view that did not ask"""
     seen = {}
 
     class _Win:
@@ -275,21 +239,12 @@ def region_window(qapp, napari_pane_stub, squid_dataset):
             qapp.processEvents()
 
 
-def test_the_bar_is_absent_until_a_run_starts(region_window):
-    """A bar at 0% over an idle window is indistinguishable from a wedged run."""
-    assert region_window._op_progress is not None, "the window has no progress bar at all"
-    assert region_window._op_progress.isHidden()
-
-
-def test_the_bar_comes_up_indeterminate_before_the_first_report(region_window):
-    region_window.operator_started("decon")
+def test_the_bar_is_absent_then_indeterminate_then_says_the_count_and_the_wait(region_window):
     bar = region_window._op_progress
+    assert bar is not None and bar.isHidden(), "a bar at 0% over an idle window reads as a wedged run"
+    region_window.operator_started("decon")
     assert not bar.isHidden()
     assert (bar.minimum(), bar.maximum()) == (0, 0), "an unknown total must not draw a percentage"
-
-
-def test_the_bar_goes_determinate_and_says_the_count_and_the_wait(region_window):
-    region_window.operator_started("decon")
     region_window.operator_progress(
         ProgressReport("decon", done=12, total=27, unit=FOV_UNIT, eta_seconds=200))
     bar = region_window._op_progress
@@ -323,9 +278,7 @@ def test_every_outcome_takes_the_bar_down(region_window, close):
 
 @pytest.fixture
 def navigator(qapp):
-    """Deliberately dataset-free: the bar is a pure function of the report it is handed.
-    `StatusRow` is what survived the Window navigator's deletion (2026-08-19) — the same bars,
-    the same manager wiring, adopted by the log panel."""
+    """Deliberately dataset-free: the bar is a pure function of the report it is handed."""
     from squidxplorer._region_viewer import StatusRow, ViewerManager
 
     mgr = ViewerManager()
@@ -339,21 +292,17 @@ def navigator(qapp):
         qapp.processEvents()
 
 
-def test_the_work_bar_is_ABSENT_while_nothing_is_running(navigator):
-    """Absent, not parked at 0%, which would look like a run that started and produced nothing."""
-    _mgr, panel = navigator
-    assert panel._work_bar.isHidden()
-    assert panel._work_label.isHidden()
-
-
-def test_a_report_from_ANY_producer_raises_the_bar_beside_the_memory_bar(navigator):
+def test_a_report_from_ANY_producer_raises_the_bar_and_clearing_takes_it_down(navigator):
     mgr, panel = navigator
+    assert panel._work_bar.isHidden() and panel._work_label.isHidden(), "absent, not parked at 0%"
     mgr.set_run_progress(
         ProgressReport("decon", done=12, total=27, unit=FOV_UNIT, eta_seconds=200))
     assert not panel._work_bar.isHidden()
     assert (panel._work_bar.minimum(), panel._work_bar.maximum()) == (0, 100)
     assert panel._work_bar.value() == 44
     assert panel._work_label.text() == "decon · 12 of 27 FOVs · ~4 min left"
+    mgr.set_run_progress(None)
+    assert panel._work_bar.isHidden() and panel._work_label.isHidden()
 
 
 def test_the_work_bar_stays_INDETERMINATE_when_the_total_is_not_known(navigator):
@@ -362,14 +311,6 @@ def test_the_work_bar_stays_INDETERMINATE_when_the_total_is_not_known(navigator)
     mgr.set_run_progress(ProgressReport("preview", done=3, total=None, unit=FOV_UNIT))
     assert (panel._work_bar.minimum(), panel._work_bar.maximum()) == (0, 0)
     assert "3 FOVs so far" in panel._work_label.text()
-
-
-def test_clearing_the_channel_takes_the_work_bar_down(navigator):
-    mgr, panel = navigator
-    mgr.set_run_progress(ProgressReport("decon", 1, 27, FOV_UNIT))
-    mgr.set_run_progress(None)
-    assert panel._work_bar.isHidden()
-    assert panel._work_label.isHidden()
 
 
 def test_a_status_row_built_MID_RUN_shows_the_bar_without_waiting_for_the_next_unit(qapp):
@@ -436,36 +377,17 @@ def test_the_PREVIEW_reports_on_the_same_channel_an_operator_run_does(qapp, tmp_
     worker.runProgress.connect(got.append)
     worker.run()                                 # in-thread: signal delivery is synchronous here
 
+    from squidxplorer._progress import PREVIEW_LABEL
+
     assert got, "the raw preview reported no progress at all"
     assert all(isinstance(r, ProgressReport) for r in got), \
         "the preview invented a second progress type instead of sharing the channel"
-
-
-def test_the_previews_bar_is_DETERMINATE_from_its_first_frame(qapp, tmp_path):
-    """The total is known before the first read (``len(plan)``), so it never grows mid-pass."""
-    worker = _preview_worker(tmp_path)
-    got = []
-    worker.runProgress.connect(got.append)
-    worker.run()
-
     assert got[0].done == 0, "the preview's first report was not 0 of N"
     assert {r.total for r in got} == {2}, "the preview's denominator moved mid-pass"
     dones = [r.done for r in got]
     assert dones == sorted(dones), f"preview progress went backwards: {dones}"
-    assert got[-1].done == got[-1].total, "the preview never reached its own total"
-    assert got[-1].percent == 100
-
-
-def test_the_preview_names_itself_so_the_one_bar_says_WHICH_work_is_running(qapp, tmp_path):
-    """The label is the only field distinguishing a preview from an operator run on the wire."""
-    from squidxplorer._progress import PREVIEW_LABEL
-
-    worker = _preview_worker(tmp_path)
-    got = []
-    worker.runProgress.connect(got.append)
-    worker.run()
-    assert got[-1].label == PREVIEW_LABEL
-    assert got[-1].sentence().startswith("preview · ")
+    assert got[-1].done == got[-1].total and got[-1].percent == 100
+    assert got[-1].label == PREVIEW_LABEL and got[-1].sentence().startswith("preview · ")
 
 
 def test_a_CACHED_well_is_not_counted_as_work_the_preview_still_has_to_do(qapp, tmp_path):
@@ -497,9 +419,7 @@ def test_a_CACHED_well_is_not_counted_as_work_the_preview_still_has_to_do(qapp, 
 # --- a copy-saving operator's preview run says how to get the artifact (2026-08-19) ---------------
 
 def test_a_copy_saving_preview_run_names_the_artifact_it_did_not_write(region_window):
-    """Julio: "Registering the wells doesn't do anything" — a register preview succeeded, wrote
-    nothing, and nothing said how to get the stitched_ copy. The hint goes to the LOG now
-    (the banner strip is retired, 2026-08-25); the done line's twin is log.done."""
+    """Julio: "Registering the wells doesn't do anything" — a register preview succeeded, wrote nothing, and nothing said how to get the stitched_ copy."""
     region_window._op_run_wrote = False
     said = []
     region_window._say = said.append
@@ -510,20 +430,12 @@ def test_a_copy_saving_preview_run_names_the_artifact_it_did_not_write(region_wi
     assert "preview only" in line and "stitched_" in line and "save" in line, line
 
 
-def test_a_run_that_wrote_its_copy_gets_no_preview_hint(region_window):
-    region_window._op_run_wrote = True
+@pytest.mark.parametrize("op, wrote", [("register", True), ("mip", False)])
+def test_a_written_copy_or_an_ordinary_operator_gets_no_preview_hint(region_window, op, wrote):
+    """Declaration-driven (operator_saves_copy), never name-matched."""
+    region_window._op_run_wrote = wrote
     said = []
     region_window._say = said.append
-    region_window.operator_started("register")
-    region_window.operator_done("register", 2.0)
-    assert not any("preview only" in s for s in said), said
-
-
-def test_an_ordinary_operator_preview_gets_no_copy_hint(region_window):
-    """The hint is declaration-driven (operator_saves_copy), never name-matched."""
-    region_window._op_run_wrote = False
-    said = []
-    region_window._say = said.append
-    region_window.operator_started("mip")
-    region_window.operator_done("mip", 1.0)
+    region_window.operator_started(op)
+    region_window.operator_done(op, 2.0)
     assert not any("preview only" in s for s in said), said

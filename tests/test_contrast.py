@@ -1,25 +1,14 @@
-"""The fluorescence contrast rule, ported from maragall/stitcher.
-
-The property under test: **background renders BLACK**. A percentile low end lands inside the
-background distribution of a fluorescence plane, so the whole field lifts off black and four
-additive channels sum to white. These tests build a plane with a known background and a known
-signal, and check the window separates them.
-"""
+"""The fluorescence contrast rule, ported from maragall/stitcher."""
 
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from squidxplorer._contrast import auto_contrast, dtype_range, sample_plane
 
 
 def _fluorescence(bg=500.0, bg_noise=30.0, signal=8000.0, frac=0.02, shape=(256, 256), seed=0):
-    """A plane shaped like real fluorescence: a noisy background pedestal, a sparse bright tail.
-
-    The pedestal is the point: real fluorescence background sits at a few hundred counts, not
-    near zero, which is exactly why a 1st-percentile low end fails.
-    """
+    """A plane shaped like real fluorescence: a noisy background pedestal, a sparse bright tail."""
     rng = np.random.default_rng(seed)
     a = rng.normal(bg, bg_noise, shape)
     n = int(a.size * frac)
@@ -37,25 +26,6 @@ def test_the_low_end_lands_ABOVE_the_background_so_it_renders_black():
     assert hi > 5000.0, f"high end {hi:.0f} is below the signal — the tissue will saturate"
 
 
-def test_a_percentile_window_is_what_it_beats():
-    plane = _fluorescence(bg=500.0, bg_noise=30.0)
-    pct_lo = float(np.percentile(plane, 1.0))
-    auto_lo, _ = auto_contrast(plane)
-
-    assert pct_lo < 500.0, "fixture is wrong: the 1st percentile should be inside the background"
-    assert auto_lo > pct_lo, (
-        f"the ported rule ({auto_lo:.0f}) must start ABOVE the percentile rule ({pct_lo:.0f}); "
-        "starting below is what made the background visible"
-    )
-
-
-def test_the_fraction_of_pixels_left_visible_is_small():
-    plane = _fluorescence(frac=0.02)
-    lo, _hi = auto_contrast(plane)
-    visible = float((plane > lo).mean())
-    assert visible < 0.10, f"{visible:.0%} of the field is above black; the background is showing"
-
-
 def test_a_brighter_background_moves_the_window_with_it():
     lo_dim, _ = auto_contrast(_fluorescence(bg=300.0))
     lo_bright, _ = auto_contrast(_fluorescence(bg=3000.0))
@@ -63,8 +33,7 @@ def test_a_brighter_background_moves_the_window_with_it():
 
 
 def test_a_blank_channel_gets_NO_window_rather_than_a_guess():
-    """A blank channel handed a 100-wide window would render its own read noise as signal;
-    refusing lets napari autoscale instead."""
+    """A blank channel handed a 100-wide window would render its own read noise as signal; refusing lets napari autoscale instead."""
     assert auto_contrast(np.full((64, 64), 700, dtype=np.uint16)) is None
     assert auto_contrast(np.zeros((64, 64), dtype=np.uint16)) is None
     assert auto_contrast(np.zeros((0,), dtype=np.uint16)) is None

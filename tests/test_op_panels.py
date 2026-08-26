@@ -1,11 +1,4 @@
-"""The ONE parameter surface: panels generated from the declaration, inline.
-
-The bespoke operator PAGES and the decon QC sweep are shelved whole (Julio, 2026-08-25:
-"You should shelf those operator pages"; "The sweep code should be shelved. I can just run
-on an ROI iteration by iteration."). Absences are pinned here; the surviving surface is
-GenericOperatorPanel (headline + the "advanced parameters" disclosure), the z-handling
-combo's keep-every-plane vocabulary, RegisterPanel's copy switch and DeconPanel's NI row.
-"""
+"""The ONE parameter surface: panels generated from the declaration, inline."""
 
 from __future__ import annotations
 
