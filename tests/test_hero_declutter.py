@@ -1005,6 +1005,8 @@ def test_every_chip_and_the_operator_row_are_visible_at_rest(qapp, napari_pane_s
                                                             squid_dataset):
     from qtpy.QtWidgets import QAbstractButton, QLabel
 
+    import squidxplorer._region_viewer as RV
+
     root, _ = squid_dataset
     win, (v,) = _open_view(qapp, root)
     try:
@@ -1016,6 +1018,15 @@ def test_every_chip_and_the_operator_row_are_visible_at_rest(qapp, napari_pane_s
         for name in ("_btn_controls", "_btn_copy_luts", "_btn_paste_luts", "_btn_auto",
                      "_iter_spin", "_controls_note"):
             assert not hasattr(v, name), f"{name} is back"
+        # Julio, live on 862 px (2026-08-25): "The SquidXplorer buttons at the top of the left
+        # dock should be smaller as well". Measured headless before: 26 px chips at a 15 px
+        # QFont (the 11 px lived only in the stylesheet), grid 105 px; after: 22 px chips at
+        # an 11 px QFont, grid 92 px, still three per row.
+        for name in ("_btn_3d", "_btn_roi", "_btn_fovs", "_btn_focus", "_btn_record", "_btn_png"):
+            chip = getattr(v, name)
+            assert chip.height() == RV.CHIP_PX == 22, (name, chip.height())
+            assert chip.font().pixelSize() == RV.CHIP_FONT_PX == 11, (name, chip.font().pixelSize())
+        assert v._view_controls.sizeHint().height() <= 92, v._view_controls.sizeHint().height()
         combo = v._op_combo
 
         def pick(key):
@@ -1085,15 +1096,17 @@ def test_the_log_is_a_fixed_slot_with_no_bar_at_rest_and_one_bar_during_a_run(
         shutdown_plate_window(qapp, win)
 
 
-def test_the_log_is_three_lines_and_the_layer_list_shows_every_channel_of_raw(
+def test_the_log_is_five_lines_and_the_layer_list_shows_every_channel_of_raw(
         qapp, napari_pane_stub, squid_dataset):
     """Measured on Julio's 862 px screen (2026-08-25): the layer list, the stretch consumer,
     ended with ~80 px and ONE of three raw channels behind a scrollbar while the log slot held
-    135 px of a three-line message. The log slot is the header plus THREE lines of its own
-    font; the list's minimum is a group header plus the largest group's channel rows; and a
-    screen too short for both shrinks the PLATE slot (a navigator; the list is a control),
-    never below its floor."""
-    from squidxplorer._logpanel import LogPanel
+    135 px of a three-line message. The log slot is the header plus LINES lines of its own
+    font (three at first; FIVE once the header dropped to a 10 px font and the chip grid
+    shrank: "My log Height is a bit too small", measured 66 -> 89 px with the body 39 -> 65);
+    the list's minimum is a group header plus the largest group's channel rows; and a screen
+    too short for both shrinks the PLATE slot (a navigator; the list is a control), never
+    below its floor."""
+    from squidxplorer._logpanel import _FONT_PX, _HEADER_FONT_PX, LogPanel
     from tests.test_view_deck import _tabbed_plate
 
     root, _ = squid_dataset
@@ -1105,8 +1118,15 @@ def test_the_log_is_three_lines_and_the_layer_list_shows_every_channel_of_raw(
         fm = view.fontMetrics()
         want = (log._header.sizeHint().height() + LogPanel.LINES * fm.lineSpacing()
                 + 2 * int(view.document().documentMargin()) + 2 * view.frameWidth())
-        assert LogPanel.LINES == 3
+        assert LogPanel.LINES == 5
         assert log.height() == log.slot_px() == want, (log.height(), log.slot_px(), want)
+        # The header is one step below the body, as explicit QFonts (a stylesheet font
+        # resolves at polish, after the slot height was fixed from the wrong metrics).
+        assert _HEADER_FONT_PX < _FONT_PX
+        for lbl in (log._title, log._activity_lbl):
+            assert lbl.font().pixelSize() == _HEADER_FONT_PX, lbl.font().pixelSize()
+        assert view.font().pixelSize() == _FONT_PX
+        assert log._header.sizeHint().height() <= 16, log._header.sizeHint().height()
 
         tree = v._pane.layer_tree
         assert tree is not None and v._left_col.isAncestorOf(tree), "no layer list in the column"
