@@ -1,9 +1,4 @@
-"""The named conventions: two FOV-box frames and two pitches, refused by type when mixed.
-
-The 195.9 um half-frame gap between the box conventions and the fuse-decimation gap between the
-pitches each rendered as a plausible image when crossed silently; these tests pin that crossing
-either seam is a NAMED act or a TypeError with a sentence.
-"""
+"""The named conventions: two FOV-box frames and two pitches, refused by type when mixed."""
 
 from __future__ import annotations
 
@@ -31,10 +26,7 @@ class TestBoxConventionsCrossByNameOnly:
         c = CenterBoxUm(cx=1000.0, cy=2000.0, w=777.1, h=777.1)
         rt = c.to_top_left().to_center()
         assert (rt.cx, rt.cy, rt.w, rt.h) == pytest.approx((c.cx, c.cy, c.w, c.h), abs=1e-9)
-
-    def test_both_encodings_answer_the_same_bbox_for_one_physical_box(self):
-        tl = TopLeftBoxUm(10.0, 20.0, 110.0, 70.0)
-        assert tl.to_center().bbox() == pytest.approx(tl.bbox(), abs=1e-12)
+        assert tl.to_center().bbox() == pytest.approx(tl.bbox(), abs=1e-9)
 
     def test_a_top_left_box_unpacks_as_its_own_bbox(self):
         """Iteration/indexing of a corner box IS its convention, so no crossing can happen."""
@@ -80,22 +72,20 @@ class TestPitchesAreNotBareNumbers:
 
 
 class TestMixingPitchesFailsByName:
-    def test_a_display_pitch_where_the_acquisition_pitch_is_required(self):
+    def test_each_door_takes_its_own_pitch_or_a_legacy_bare_float(self):
         assert acq_um(AcqPitchUm(0.752)) == 0.752
         assert acq_um(0.752) == 0.752              # legacy bare-float callers keep working
         with pytest.raises(TypeError, match="ACQUISITION pitch is required"):
             acq_um(DisplayPitchUm(1.504))
-
-    def test_an_acq_pitch_where_the_displayed_pitch_is_required(self):
         assert display_um(DisplayPitchUm(1.504)) == 1.504
         assert display_um(1.504) == 1.504
         with pytest.raises(TypeError, match="DISPLAYED pitch is required"):
             display_um(AcqPitchUm(0.752))
 
-    def test_the_roi_clamp_counts_acquisition_pixels_by_type(self):
-        """`clamp_bbox_um`'s contract is acquisition pixels; the wrong pitch now raises instead
-        of passing a 2x box under a one-texture promise."""
+    def test_the_roi_clamp_and_fov_placement_count_acquisition_pixels_by_type(self):
+        """`clamp_bbox_um`'s contract is acquisition pixels; the wrong pitch now raises instead of passing a 2x box under a one-texture promise."""
         from squidxplorer import _bricks
+        from squidxplorer._placement import fov_offsets_px
 
         box = (0.0, 0.0, 1e6, 1e6)
         assert _bricks.clamp_bbox_um(box, AcqPitchUm(0.752), 2048) == \
@@ -104,10 +94,6 @@ class TestMixingPitchesFailsByName:
             _bricks.clamp_bbox_um(box, DisplayPitchUm(1.504), 2048)
         with pytest.raises(TypeError, match="ACQUISITION pitch is required"):
             _bricks.ceiling_line(2048, DisplayPitchUm(1.504), measured=True)
-
-    def test_fov_placement_counts_acquisition_pixels_by_type(self):
-        from squidxplorer._placement import fov_offsets_px
-
         positions = {("A1", 0): (0.0, 0.0), ("A1", 1): (500.0, 0.0)}
         typed = fov_offsets_px(positions, "A1", [0, 1], AcqPitchUm(1.0))
         assert typed == fov_offsets_px(positions, "A1", [0, 1], 1.0)
@@ -140,8 +126,7 @@ class TestTheProducersReturnTheirOwnConvention:
         assert boxes[0].bbox() == pytest.approx((0.0, 0.0, 100.0, 100.0))
 
     def test_the_half_frame_gap_is_visible_through_the_named_conversion(self):
-        """The anchor FOV's two boxes sit exactly half a frame apart; crossing to compare them
-        is spelled `.to_top_left()`, never an unpack."""
+        """The anchor FOV's two boxes sit exactly half a frame apart; crossing to compare them is spelled `.to_top_left()`, never an unpack."""
         from squidxplorer._mosaic_source import mosaic_fov_bboxes_um
         from squidxplorer._tilesource import fov_bboxes_um
 

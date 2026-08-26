@@ -118,7 +118,8 @@ class DatasetDepth:
         self._observed: Optional[float] = None
         self._ceiling = self._pinned if self._pinned is not None else self._base_ceiling()
         self._lock = threading.Lock()
-        self._callbacks: list[Callable[[float, float], None]] = []
+        self._callbacks: list[Callable[[str, float, float], None]] = []
+        self._per_channel: dict[str, float] = {}
         if self._pinned is not None:
             _log.info("%s pins the contrast slider to (0, %.0f); the data will not widen it.",
                       ENV_BIT_DEPTH, self._pinned)
@@ -196,33 +197,57 @@ class DatasetDepth:
             if new == self._ceiling:
                 return False
             old, self._ceiling = self._ceiling, new
-            callbacks = list(self._callbacks)
-        _log.info("contrast slider now (0, %.0f): this dataset reaches %.0f.", new, v)
-        for cb in callbacks:
-            try:
-                cb(0.0, new)
-            except Exception:                    # noqa: BLE001 - a bad subscriber must not
-                _log.exception("a depth subscriber raised; the ceiling stands at %.0f.", new)
+        # An automatic adjustment the sliders already show; it can fire several times as
+        # frames decode (log diet, 2026-08-25).
+        _log.debug("contrast slider now (0, %.0f): this dataset reaches %.0f.", new, v)
         return old != new
 
-    def observe_array(self, data: Any) -> bool:
+    def observe_array(self, data: Any, channel: Optional[str] = None) -> bool:
         """`observe` the maximum of an array. Cheap: ~0.06 ms on a 2048x2048 uint16 frame.
 
         NaN-safe and empty-safe, because a bad FOV must not be able to move the ceiling.
+        With *channel*, the maximum is also booked PER CHANNEL (Julio, 2026-08-25: "look how
+        close to each other are the contrast limits" - a dim channel's slider spanned the
+        saturated channel's 16 bits), and a rise of that channel's own ceiling is published
+        as ``callback(channel, lo, hi)``.
         """
-        if self.settled or data is None:
+        if data is None:
             return False
         try:
             arr = np.asanyarray(data)
             if arr.size == 0:
                 return False
-            peak = np.nanmax(arr)
+            peak = float(np.nanmax(arr))
         except (TypeError, ValueError):
             return False
-        return self.observe(peak)
+        moved = self.observe(peak) if not self.settled else False
+        if channel is not None:
+            with self._lock:
+                old = self._per_channel.get(str(channel))
+                rose = old is None or peak > old
+                if rose:
+                    self._per_channel[str(channel)] = peak
+                    hi = channel_ceiling(peak)
+                    callbacks = list(self._callbacks)
+            if rose:
+                for cb in callbacks:
+                    try:
+                        cb(str(channel), 0.0, hi)
+                    except Exception:            # noqa: BLE001 - a bad subscriber must not
+                        _log.exception("a depth subscriber raised; %s's ceiling stands at %.0f.",
+                                       channel, hi)
+        return moved
 
-    def on_change(self, callback: Callable[[float, float], None]) -> None:
-        """Subscribe to ceiling rises. Fired as ``callback(lo, hi)`` ON THE OBSERVING THREAD.
+    def channel_range(self, channel: Optional[str]) -> Optional[tuple[float, float]]:
+        """``(0, ceiling)`` for one channel from ITS OWN observed maximum, or None before
+        that channel was seen (the dataset ceiling is the caller's fallback)."""
+        with self._lock:
+            peak = self._per_channel.get(str(channel)) if channel is not None else None
+        return None if peak is None else (0.0, channel_ceiling(peak))
+
+    def on_change(self, callback: Callable[[str, float, float], None]) -> None:
+        """Subscribe to a CHANNEL's ceiling rises. Fired as ``callback(channel, lo, hi)`` ON
+        THE OBSERVING THREAD.
 
         That thread is a worker, so a Qt subscriber must do nothing here but emit a signal --
         the queued connection is what marshals it to the GUI thread.
@@ -247,7 +272,23 @@ def new_dataset(dtype: Any = None) -> DatasetDepth:
     return _current
 
 
-def range_for(dtype: Any) -> tuple[float, float]:
+#: A channel whose maximum reaches this fraction of a full-scale ceiling gets that ceiling.
+_REACHES = 0.95
+#: Headroom above a channel's observed maximum otherwise.
+_HEADROOM = 1.05
+
+
+def channel_ceiling(observed_max: float) -> float:
+    """A channel's own slider top: the full-scale ceiling it actually reaches, else its
+    observed maximum with 5% headroom."""
+    peak = float(observed_max)
+    for fs in _FULL_SCALE:
+        if peak >= _REACHES * fs and peak <= fs:
+            return float(fs)
+    return max(1.0, peak * _HEADROOM)
+
+
+def range_for(dtype: Any, channel: Optional[str] = None) -> tuple[float, float]:
     """``(lo, hi)`` for ``contrast_limits_range`` on a layer holding ``dtype``. THE call-site API.
 
     The gate is the LAYER's own dtype, not the dataset's: an operator that returns float32
@@ -263,4 +304,5 @@ def range_for(dtype: Any) -> tuple[float, float]:
     # else entirely and its ceiling says nothing about this layer.
     if not _current.tracks_uint16:
         return dtype_range(dt)
-    return _current.range
+    own = _current.channel_range(channel)          # this channel's own ceiling, when observed
+    return own if own is not None else _current.range

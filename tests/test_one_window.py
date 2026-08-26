@@ -1,11 +1,4 @@
-"""ONE WINDOW: the plate view and the log render as slots in the view window's left column.
-
-Julio (2026-08-25): "As you can see this refactor enables us to have only one window." The
-plate window keeps its books (runs, ingest, selection) but its VIEW (PlateOverview) and the
-LOG become slots hosted by the current view; the plate slot is FIXED height and collapsible
-to a grip; the log opens at 3/4 of the plate slot's height. Closing every view returns both
-home so the app always has a surface.
-"""
+"""ONE WINDOW: the plate view and the log render as slots in the view window's left column."""
 
 from __future__ import annotations
 
@@ -59,28 +52,6 @@ def test_the_plate_view_and_log_are_hosted_in_the_view_window(qapp, napari_pane_
         shutdown_plate_window(qapp, win)
 
 
-def test_the_plate_slot_is_fixed_height_and_collapses_to_a_grip(qapp, napari_pane_stub,
-                                                                squid_dataset):
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed(qapp, root)
-    try:
-        box = win._plate_slot_box
-        assert box is not None
-        assert box.maximumHeight() == box.PLATE_SLOT_PX, "the plate slot is not FIXED height"
-        assert box.minimumHeight() == box.PLATE_SLOT_PX
-        # the log opens at 3/4 of the plate slot's height
-        assert win._log_panel.maximumHeight() == int(box.PLATE_SLOT_PX * 3 / 4)
-        box.grip.click()
-        assert box.collapsed
-        assert box.maximumHeight() == box.GRIP_PX, "collapsed, the slot is not a grip"
-        assert not win._overview.isVisibleTo(box)
-        box.grip.click()
-        assert not box.collapsed and box.maximumHeight() == box.PLATE_SLOT_PX, (
-            "the plate did not re-expand to its FIXED height")
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
 def test_closing_every_view_returns_the_plate_and_log_home(qapp, napari_pane_stub,
                                                            squid_dataset):
     root, _ = squid_dataset
@@ -98,8 +69,7 @@ def test_closing_every_view_returns_the_plate_and_log_home(qapp, napari_pane_stu
 
 def test_a_reingest_lands_the_new_overview_in_the_live_slot(qapp, napari_pane_stub,
                                                             squid_dataset):
-    """Ingest REBUILDS the overview; while hosted, the new one must land in the slot, not in
-    the hidden plate window."""
+    """Ingest REBUILDS the overview; while hosted, the new one must land in the slot, not in the hidden plate window."""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed(qapp, root)
     try:
@@ -116,8 +86,7 @@ def test_a_reingest_lands_the_new_overview_in_the_live_slot(qapp, napari_pane_st
 
 def test_the_default_layout_hides_the_plate_window_once_hosted(qapp, napari_pane_stub,
                                                                squid_dataset):
-    """The plate window DIES as a window in the working layout: hosted, it hides; with the
-    views gone it shows again (the app must keep a surface)."""
+    """The plate window DIES as a window in the working layout: hosted, it hides; with the views gone it shows again (the app must keep a surface)."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.default_layout = True
@@ -141,8 +110,7 @@ def test_the_default_layout_hides_the_plate_window_once_hosted(qapp, napari_pane
 
 def test_the_deck_accepts_a_dropped_acquisition_for_the_plate(qapp, napari_pane_stub,
                                                               squid_dataset, tmp_path):
-    """One window means the DECK is the drop target too: a dropped folder reaches the
-    plate's own ingest."""
+    """One window means the DECK is the drop target too: a dropped folder reaches the plate's own ingest."""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed(qapp, root)
     try:

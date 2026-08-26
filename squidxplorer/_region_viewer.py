@@ -265,6 +265,10 @@ _RAW_OP = "raw"
 # (`_volume_view`) and the ROI cluster (`_roi_tools`) import them at their own use sites.
 
 
+#: THE one spacing of the left column: margins, gaps between chips, gaps between slots.
+COLUMN_PX = 6
+
+
 class RegionViewer(QMainWindow):
     """ONE independent napari window over a subset of regions."""
 
@@ -272,7 +276,6 @@ class RegionViewer(QMainWindow):
     #: A LUT paste landed on this window's layers. The plate connects (windowOpened →
     #: `_bind_window_contrast`) and follows the pasted windows — the ONE event that moves the
     #: plate's contrast (Julio: "the plate image shouldn't change unless we paste a LUT").
-    lutsPasted = Signal(object)
     regionsChanged = Signal(object)   # emits self: this window ADOPTED a region it was not opened
     #                                   over, so anything that published its region set — the
     #                                   navigator row, the plate's per-view wash — is now stale.
@@ -488,19 +491,34 @@ class RegionViewer(QMainWindow):
         # keeps ONLY the bulk-processing cards. A pane that cannot dock (headless ModelPane, a
         # napari without dock areas) keeps the column in the window body so every control stays
         # actuatable.
+        # ONE plain column, everything visible (Julio, 2026-08-25: "the plate shouldn't be
+        # collapsible, the dock shouldn't be collapsible... the operators shouldn't
+        # collapse... it should display its buttons in a way that it's pleasing, appropriately
+        # sized"): chips, the operators row with its controls under it, napari's layer
+        # controls, the layer list (THE stretch), the plate slot and the log slot, one spacing.
         left_col = QWidget()
+        self._left_col = left_col
         lv = QVBoxLayout(left_col)
-        lv.setContentsMargins(0, 0, 0, 0)
-        lv.setSpacing(4)
+        lv.setContentsMargins(COLUMN_PX, COLUMN_PX, COLUMN_PX, COLUMN_PX)
+        lv.setSpacing(COLUMN_PX)
         lv.addWidget(self._build_view_controls(), 0)
         lv.addWidget(self.operator_panel(), 0)
-        # ONE WINDOW (Julio, 2026-08-25): the plate view and the log are SLOTS this column can
-        # host; `adopt_plate_slots` fills this layout when the manager elects this view.
-        self._plate_log_slot = QVBoxLayout()
+        take = getattr(pane, "native_column_widgets", None)
+        controls, tree = take() if callable(take) else (None, None)
+        if controls is not None:
+            lv.addWidget(controls, 0)
+        if tree is not None:
+            tree.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+            lv.addWidget(tree, 1)
+        else:
+            lv.addStretch(1)
+        self._plate_log_host = QWidget()
+        self._plate_log_slot = QVBoxLayout(self._plate_log_host)
         self._plate_log_slot.setContentsMargins(0, 0, 0, 0)
-        lv.addLayout(self._plate_log_slot)
-        dock_controls = getattr(pane, "dock_view_controls", None)
-        if not (callable(dock_controls) and dock_controls(left_col)):
+        self._plate_log_slot.setSpacing(COLUMN_PX)
+        lv.addWidget(self._plate_log_host, 0)
+        dock = getattr(pane, "dock_left_column", None)
+        if not (callable(dock) and dock(left_col)):
             lay.addWidget(left_col, 0)
         # The RUN/MOVIE PROGRESS BAR stays in the window body: a run's progress must be visible
         # while the operator dock is collapsed to its grip. Hidden, it costs zero height.
@@ -558,7 +576,6 @@ class RegionViewer(QMainWindow):
             self._cursor.set_index(0)
 
     _BOX_QSS = "QFrame{background:#0d1117;border:1px solid #232b3a;border-radius:5px;}"
-    _TITLE_QSS = "color:#8b949e;font-size:10px;font-weight:700;border:none;"
     _CHIP_QSS = (
         "QPushButton{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
         "border-radius:4px;padding:3px 9px;font-size:11px;}"
@@ -575,17 +592,6 @@ class RegionViewer(QMainWindow):
         "selection-background-color:#1f6feb;selection-color:#ffffff;outline:none;}"
     )
 
-    def _titled_box(self, title: str) -> "tuple[QFrame, QVBoxLayout]":
-        box = QFrame(self)
-        box.setStyleSheet(self._BOX_QSS)
-        v = QVBoxLayout(box)
-        v.setContentsMargins(8, 5, 8, 6)
-        v.setSpacing(4)
-        lab = QLabel(title)
-        lab.setStyleSheet(self._TITLE_QSS)
-        v.addWidget(lab)
-        return box, v
-
     def _chip(self, text: str, tip: str, slot, *, checkable: bool = False) -> QPushButton:
         b = QPushButton(text)
         b.setToolTip(tip)
@@ -596,76 +602,64 @@ class RegionViewer(QMainWindow):
         return b
 
     def _build_view_controls(self) -> QWidget:
-        """The "2D / 3D · ROI" chip block: a compact wrapped column, NOT a full-width toolbar.
+        """The view chip block: the 2D/3D essentials plus a summon grip, everything else folded.
 
         `_build` docks it at the TOP of napari's left column, above the layer controls
         (`MosaicPane.dock_view_controls`), so the canvas gains the height the old horizontal
         top dock spent (UI feedback 2026-08-19: "Should be on the left column, where the
-        controls are"). Chip attributes (`_btn_2d`, `_btn_3d`, `_btn_focus`, `_btn_record`,
+        controls are"). Chip attributes (`_btn_3d`, `_btn_roi`, `_btn_focus`, `_btn_record`,
         `_btn_fovs`) are pinned by tests and GATE 3; only the parenting and row wrapping moved.
+
+        HERO DECLUTTER (team feedback 2026-08-25: "minimize most of the... tools. They just
+        take up too much room"): only the 2D/3D essentials stay visible; the rest of the
+        chips fold behind the "controls" summon grip, collapsed by default, per view.
         """
-        view_box, vv = self._titled_box("2D / 3D · ROI")
-        self._btn_2d = self._chip("2D", "View the SELECTED ROI in 2D (opens it as a child window); "
-                                  "with no ROI picked, just shows the mosaic in 2D.", self._view_roi_2d)
-        self._btn_3d = self._chip("3D", "Open this view in 3D at NATIVE resolution (the region if it "
-                                  "fits the GPU texture, else draw an ROI to pick the spot). "
-                                  "Replaces this window's previous 3D view rather than adding "
-                                  "another window.",
-                                  self._open_3d)
-        self._btn_focus = self._chip("⌖ focus", "Jump the z-slider to the sharpest plane "
-                                     "(Tenengrad autofocus) of this region's centre FOV.",
+        view_box = QFrame(self)
+        view_box.setStyleSheet(self._BOX_QSS)
+        vv = QVBoxLayout(view_box)
+        vv.setContentsMargins(8, 5, 8, 6)
+        vv.setSpacing(4)
+        # NO 2D button (Julio, 2026-08-25: "There should not be 2D button since we make
+        # separate tabs for the 3d view."): a 2D tab IS 2D and a 3D tab IS 3D; nothing
+        # switches modes in place. The chip and `_view_roi_2d` are deleted whole.
+        self._btn_3d = self._chip("3D", "Open this view in 3D as a new tab.", self._open_3d)
+        self._btn_focus = self._chip("⌖ focus", "Jump the z-slider to the sharpest plane.",
                                      self._focus_reference_plane)
         # The "▣ plate" chip is GONE (UI feedback 2026-08-17): the working layout keeps the plate
         # BESIDE the views, so "bring the plate forward" stopped being a job. The ⚙ controls chip
         # is built in `operator_panel()` now — the whole per-window operator surface lives in the
         # views window's collapsible dock (2026-08-19).
         self._btn_record = self._chip(
-            "⏺ movie", "Export what this window is showing as an .mp4, sweeping the acquisition's "
-            "time axis (or its z axis when there is no time series). Runs off the UI thread; "
-            "click again to cancel.", self._record_movie)
+            "⏺ movie", "Export this view as an .mp4 over its time or z axis.",
+            self._record_movie)
         # The PNG export renders the DATA, never the canvas: a screenshot is screen resolution,
         # this is the visible layer's own pixels at native pitch (Julio: "a high-resolution
         # (i.e., zoom-able, high DPI) PNG for powerpoints").
         self._btn_png = self._chip(
-            "⎙ png", "Save what this window is showing as a high-resolution PNG: the visible "
-            "layer's own full-resolution pixels (long side capped at 8192 px), with the channels "
-            "that are visible and the contrast that is set - not a screenshot of the canvas. "
-            "Runs off the UI thread.", self._save_png)
+            "⎙ png", "Save this view as a full-resolution PNG.", self._save_png)
         # FOVs. The ROI chips beside it are for a box the user draws; this is for the boxes the
         # ACQUISITION already drew. On a sparse run — the AF sweep sets are 16 fields at 7x the
         # field pitch, so 3% of the mosaic is data — checking focus means visiting each field, and
         # doing that by wheel-zoom is the complaint this answers.
         self._btn_fovs = self._chip("⊞ FOVs", self._FOVS_TIP, self._open_fovs)
-        # THE LUT CLIPBOARD, back as exactly two buttons (Julio, 2026-08-19: "I do want the copy
-        # paste LUT. But ultra simple, minimal, two button logic."). No pickers, no menus; the
-        # paste reaches the PLATE through the automatic window → plate contrast tap, so the two
-        # never disagree — see `_lut_clipboard.paste_luts`.
-        self._btn_copy_luts = self._chip(
-            "⧉ copy LUTs", "Copy this window's per-channel look (contrast, colormap, which "
-            "channels are on) to the one LUT clipboard.", self._copy_luts)
-        self._btn_paste_luts = self._chip(
-            "⇩ paste LUTs", "Paste the LUT clipboard onto this window's channels. The plate "
-            "follows the same write, so plate and window contrast stay equal.", self._paste_luts)
-        # One 3-column grid of equal-width chips: the ragged per-row HBoxes read as "poor
-        # distribution of buttons" (Julio, live GUI 2026-08-19).
+        # ONE grid of every chip, all visible, nothing folded (Julio, 2026-08-25: "the GUI
+        # buttons such as 'FOVs' shouldn't collapse"). The ROI chip is two-state (draw / go).
         from qtpy.QtWidgets import QGridLayout
 
-        grid = QGridLayout(); grid.setSpacing(4)
+        self._btn_roi = self._chip(self._ROI_DRAW[0], self._ROI_DRAW[1], self._roi_chip_clicked)
+        grid = QGridLayout()
+        grid.setSpacing(COLUMN_PX)
         chips = [
-            self._btn_2d, self._btn_3d, self._btn_focus,
-            self._btn_record, self._btn_png,
-            self._chip("▭ new", "Draw an ROI rectangle inside the mosaic.", self._new_roi),
-            self._chip("⊙ select", "Select ROIs: click one, then press Delete to remove it.",
+            self._btn_3d, self._btn_roi, self._btn_fovs,
+            self._chip("⊙ select", "Click an ROI to select it; Delete removes it.",
                        self._select_rois),
             self._chip("✕ clear", "Remove all ROIs in this window.", self._clear_rois),
-            self._chip("→ window", "Open the drawn ROI(s) as child window(s) - the next "
-                       "level of the view tree.", self._open_roi_children),
-            self._btn_fovs,
-            self._btn_copy_luts, self._btn_paste_luts,
+            self._chip("→ window", "Open the drawn ROIs as child views.", self._open_roi_children),
+            self._btn_focus, self._btn_record, self._btn_png,
         ]
-        for i, chip in enumerate(chips):
+        for k, chip in enumerate(chips):
             chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            grid.addWidget(chip, i // 3, i % 3)
+            grid.addWidget(chip, k // 3, k % 3)
         for col in range(3):
             grid.setColumnStretch(col, 1)
         vv.addLayout(grid)
@@ -677,9 +671,21 @@ class RegionViewer(QMainWindow):
         # focus / make default / diverged / reset) is SHELVED outright — the settings STORE stays
         # (`ViewSettings` / `ViewDefaults` still drive autofocus-on-open and child-window LUT
         # inheritance), only its control surface is gone.
-        view_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self._view_controls = view_box
         return view_box
+
+    #: Whether this view IS a 3D tab (spawned by another view's 3D chip).
+    _is_volume_tab = False
+
+    def note_volume_tab(self) -> None:
+        """This view IS the 3D tab: there is no 2D/3D mode switch (a 2D tab is 2D, a 3D
+        tab is 3D - Julio, 2026-08-25), so its own 3D chip is disabled with the way back
+        stated: closing the tab."""
+        self._is_volume_tab = True
+        btn = getattr(self, "_btn_3d", None)
+        if btn is not None and _alive(btn):
+            btn.setEnabled(False)
+            btn.setToolTip("This tab is the 3D view; close it to go back to 2D.")
 
     _AT_DEFAULTS_QSS = "color:#8b949e;font-size:10px;border:none;"
     _PROGRESS_QSS = (
@@ -710,7 +716,13 @@ class RegionViewer(QMainWindow):
         pv.setContentsMargins(0, 0, 0, 0)
         pv.setSpacing(4)
 
-        op_box, ov = self._titled_box("Operators for this window")
+        # A plain box: the fold's own "operators" summon bar is the title (quiet by
+        # default, fewer words), so a second heading here would just repeat it.
+        op_box = QFrame(self)
+        op_box.setStyleSheet(self._BOX_QSS)
+        ov = QVBoxLayout(op_box)
+        ov.setContentsMargins(8, 5, 8, 6)
+        ov.setSpacing(4)
         opr = QHBoxLayout(); opr.setSpacing(4)
         self._op_combo = QComboBox()
         self._op_combo.setStyleSheet(self._COMBO_CHIP_QSS)
@@ -720,47 +732,21 @@ class RegionViewer(QMainWindow):
             self._op_combo.addItem("no operators", None)
             self._op_combo.setEnabled(False)
         opr.addWidget(self._op_combo, 1)
-        # The one-click parameter beside the dropdown (Julio, 2026-08-24: "the operators for
-        # this window in deconvolution should have like a decorator that lets the user
-        # configure iterations by clicking"). Shown for any operator DECLARING an integer
-        # `iterations` Param; writes through the plate panel, the run's single source of
-        # truth, so this, ⚙ controls and the QC's 'use k' button edit one number.
-        self._iter_spin = QSpinBox()
-        self._iter_spin.setPrefix("iterations: ")
-        self._iter_spin.setRange(1, 100)
-        self._iter_spin.setStyleSheet(
-            "QSpinBox{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
-            "border-radius:4px;font-size:11px;padding:1px 2px;}")
-        self._iter_spin.setToolTip(
-            "The iteration count the Run button uses: the same number the plate's decon "
-            "controls and the QC sweep's 'use k iterations' button set.")
-        self._iter_spin.setVisible(False)
-        self._iter_spin.valueChanged.connect(self._on_quick_iterations)
-        opr.addWidget(self._iter_spin)
-        self._btn_controls = self._chip(
-            "⚙ controls", "Bring the plate window forward AND open the controls for the operator "
-            "this window is showing, so its parameters (iterations, thresholds) are one click "
-            "away. Says so when the window is showing raw pixels, which have none.",
-            self._show_operator_controls)
-        opr.addWidget(self._btn_controls)
         # ONE FLOW, fewer buttons (Julio, 2026-08-25): "They can preview on the window...
         # After they preview, they can say run on plate, and then it will save to disk.
         # No body runs on whole plate to preview." Preview is window-scoped and writes
         # nothing; Run on plate is THE save path (and the bulk path - the cards died with
         # the right-edge dock). The save checkbox is gone.
         self._btn_preview = self._chip(
-            "Preview", "Preview the selected operator on THIS view's regions; nothing is "
-            "written to disk.", self._preview_view_operator)
+            "Preview", "Previews this view, writing nothing; in a 2D tab a depth keeping "
+            "operator solves just the z in view, while Run on plate processes the full "
+            "stack.", self._preview_view_operator)
         opr.addWidget(self._btn_preview)
         self._btn_run_plate = self._chip(
             "Run on plate", self._RUN_PLATE_TIP, self._run_plate_operator)
         opr.addWidget(self._btn_run_plate)
         ov.addLayout(opr)
-        self._controls_note = QLabel("")
-        self._controls_note.setStyleSheet("color:#8b949e;font-size:11px;border:none;")
-        self._controls_note.setWordWrap(True)
-        ov.addWidget(self._controls_note)
-        self._op_combo.currentIndexChanged.connect(lambda _i: self._refresh_controls_note())
+        self._op_combo.currentIndexChanged.connect(lambda _i: self._on_operator_changed())
         # NO "Match layers to raw" and no LUT chrome here: match-to-raw is shelved whole
         # (Julio, 2026-08-19) and the two-button LUT clipboard lives in the 2D/3D·ROI block.
         pv.addWidget(op_box)
@@ -772,8 +758,28 @@ class RegionViewer(QMainWindow):
         pv.addLayout(self._param_slot)
 
         self._op_panel = panel
-        self._refresh_controls_note()
+        self._on_operator_changed()
         return panel
+
+    def _on_operator_changed(self) -> None:
+        """ONE parameter surface (Julio, 2026-08-25, ruling w): the selected operator's panel
+        is always under the row; no params, nothing there. `operator_kwargs_for` reads it."""
+        combo = getattr(self, "_op_combo", None)
+        key = combo.currentData() if combo is not None else None
+        self._refresh_save_tooltip(key)
+        self._remove_param_slot()
+        if not key or not self._declared_params(str(key)):
+            return
+        release = getattr(self._plate(), "release_operator_panel", None)
+        if not callable(release):
+            return
+        try:
+            panel = release(str(key))
+        except Exception as exc:                         # noqa: BLE001 - named, never silent
+            self._say(f"controls: could not open {key}: {exc}")
+            return
+        if panel is not None:
+            self._insert_param_slot(str(key), panel)
 
     #: The operator panel currently inserted in this view's param slot, and its key.
     _inserted_panel = None
@@ -849,24 +855,32 @@ class RegionViewer(QMainWindow):
                             self.window_id, type(exc).__name__, exc)
 
     def _run_scope(self):
-        """WHERE a run from this window goes: its regions, narrowed to the ROI's own FOVs."""
+        """WHERE a run from this window goes: ``(regions, windows)``: its regions narrowed to
+        the ROI's own FOVs, and (ruling z) the ROI as a window in each of those frames, so
+        the engine reads and solves the box plus a halo rather than whole fields."""
         regions = list(self._regions)
         if self._roi_bbox is None or not regions:
-            return regions
-        from squidxplorer._mosaic_source import fovs_overlapping_bbox
+            return regions, None
+        from squidxplorer._mosaic_source import fov_windows_px, fovs_overlapping_bbox
 
         scoped: "dict[str, list[int]]" = {}
+        windows: dict = {}
         for region in regions:
             fovs = fovs_overlapping_bbox(self._meta or {}, region, self._roi_bbox)
             if not fovs:
-                return regions
+                return regions, None
             scoped[region] = fovs
+            for fov, window in fov_windows_px(self._meta or {}, region, self._roi_bbox).items():
+                if fov in fovs:
+                    windows[(region, fov)] = window
         total = sum(len((self._meta or {}).get("fovs_per_region", {}).get(r) or []) for r in regions)
         picked = sum(len(v) for v in scoped.values())
-        if picked >= total:
-            return regions
+        if any((r, f) not in windows for r, fs in scoped.items() for f in fs):
+            windows = {}                          # a field the box touches but cannot window: whole
+        if picked >= total and not windows:
+            return regions, None
         self._say(f"ROI: running on {picked} of {total} field(s) - the ones your box touches.")
-        return scoped
+        return scoped, (windows or None)
 
     def _plate_operator_kwargs(self, key: str) -> dict:
         """What *key*'s panel on the plate is currently set to. ``{}`` = its declared defaults."""
@@ -883,16 +897,16 @@ class RegionViewer(QMainWindow):
                         self.window_id, key, type(exc).__name__, exc)
             return {}
 
-    def _params_summary(self, key: str) -> str:
-        """One line of what *key* is set to, for the chip's side text and the run echo."""
-        plate = self._plate()
-        reader = getattr(plate, "operator_params_text", None)
-        if not callable(reader):
-            return "defaults"
+    @staticmethod
+    def _declared_params(key: str) -> tuple:
+        """The Params *key* declares (headline + advanced), or () when it declares none."""
+        from squidxplorer import operator_params
+        from squidxplorer._operations import operator_name
+
         try:
-            return str(reader(str(key)))
-        except Exception:                        # noqa: BLE001 - a label must never raise
-            return "defaults"
+            return tuple(operator_params(operator_name(str(key))))
+        except Exception:                        # noqa: BLE001 - an unknown key has none
+            return ()
 
     def _z_kwargs_for_mode(self, key: str, current: dict) -> dict:
         """What THIS WINDOW'S 2D/3D choice means for the operator's z handling."""
@@ -928,79 +942,8 @@ class RegionViewer(QMainWindow):
         if mode == getattr(self, "_render_mode", "2d"):
             return
         self._render_mode = mode
-        self._refresh_controls_note()
 
-    def _refresh_controls_note(self) -> None:
-        """Print what the chip would run with, beside the chip. Derived on every call."""
-        note = getattr(self, "_controls_note", None)
-        if note is None:
-            return
-        combo = getattr(self, "_op_combo", None)
-        key = combo.currentData() if combo is not None else None
-        self._refresh_save_tooltip(key)
-        self._refresh_quick_iterations(key)
-        if not key:
-            note.setText("")
-            return
-        note.setText(f"{self._render_mode.upper()} · {self._params_summary(str(key))}")
-
-    def _iterations_param(self, key):
-        """The integer ``iterations`` :class:`Param` the selected operator DECLARES, or None.
-
-        Declaration-driven, never an operator-name match: any operator (a plugin's included)
-        declaring an int ``iterations`` gets the row's inline control for free."""
-        if not key:
-            return None
-        try:
-            from squidxplorer._engine import operator_params
-            from squidxplorer._operations import operator_name
-
-            return next((p for p in operator_params(operator_name(str(key)))
-                         if p.name == "iterations" and isinstance(p.default, int)
-                         and not isinstance(p.default, bool)), None)
-        except Exception:                        # noqa: BLE001 - an unknown key has no params
-            return None
-
-    def _refresh_quick_iterations(self, key) -> None:
-        """Show the inline iterations spin for a declaring operator, at the run's LIVE value."""
-        spin = getattr(self, "_iter_spin", None)
-        if spin is None:
-            return
-        param = self._iterations_param(key)
-        if param is None:
-            spin.setVisible(False)
-            return
-        value = self._plate_operator_kwargs(str(key)).get("iterations", param.default)
-        spin.blockSignals(True)                  # a sync is not the user's gesture
-        try:
-            spin.setValue(int(value))
-        except (TypeError, ValueError):
-            spin.setValue(int(param.default))
-        finally:
-            spin.blockSignals(False)
-        spin.setVisible(True)
-
-    def _on_quick_iterations(self, value: int) -> None:
-        """The inline spin edits the plate panel's own widget: ONE source of truth."""
-        combo = getattr(self, "_op_combo", None)
-        key = combo.currentData() if combo is not None else None
-        if not key:
-            return
-        from squidxplorer._operations import operator_name
-
-        plate = self._plate()
-        writer = getattr(plate, "set_operator_param", None)
-        if not callable(writer):
-            self._say("iterations: there is no plate window holding the operator controls.")
-            return
-        why = writer(operator_name(str(key)), "iterations", int(value))
-        if why:
-            self._say(f"iterations: {why}")
-            return
-        self._refresh_controls_note()            # the note repeats what the run now gets
-
-    _RUN_PLATE_TIP = ("Run the selected operator over the plate selection (or the whole "
-                      "plate) and save the result to disk - the one save path.")
+    _RUN_PLATE_TIP = "Run on the plate selection and save to disk."
 
     def _refresh_save_tooltip(self, key) -> None:
         """The Run-on-plate chip says WHAT a save writes: a copy-saving operator's artifact
@@ -1035,44 +978,17 @@ class RegionViewer(QMainWindow):
                         self.window_id, type(exc).__name__, exc)
             return []
 
-    def _show_operator_controls(self) -> None:
-        """INSERT the selected operator's parameter panel into THIS view's param slot.
-
-        Julio (2026-08-25): "see this as an insertion to a list" - the slot lands directly
-        under the operators row; a second click on the same operator removes it. The panel
-        is the plate's live widget (`_op_tabs`, the run's single source of truth), released
-        from wherever it was hosted and re-hosted here.
-        """
+    def show_operator_controls_for(self, key: str) -> None:
+        """Select *key* in this view's dropdown; its controls follow (one surface)."""
         combo = getattr(self, "_op_combo", None)
-        key = combo.currentData() if combo is not None else None
-        if not key:
-            self._say("controls: no operator is selected in this window's dropdown, so there is "
-                      "nothing to tune.")
+        if combo is None:
+            self._say(f"this view has no operator row to host {key!r}.")
             return
-        from squidxplorer._operations import operator_name
-
-        op_key = operator_name(str(key))
-        if self._inserted_key == op_key and self._inserted_panel is not None:
-            self._remove_param_slot()                    # a toggle: the second click removes
+        i = next((k for k in range(combo.count()) if combo.itemData(k) == str(key)), None)
+        if i is None:
+            self._say(f"{key!r} is not in this view's operator dropdown.")
             return
-        plate = self._plate()
-        release = getattr(plate, "release_operator_panel", None)
-        if not callable(release):
-            self._say("controls: no plate is holding the operator panels.")
-            return
-        try:
-            panel = release(op_key)
-        except Exception as exc:                         # noqa: BLE001 - named, never a dead click
-            self._say(f"controls: could not open {key}: {exc}")
-            return
-        if panel is None:
-            self._say(f"controls: no controls exist for {key} (open an acquisition first, or "
-                      "the operator declares nothing tunable).")
-            return
-        self._insert_param_slot(op_key, panel)
-        self._refresh_controls_note()
-        self._say(f"controls: {combo.currentText()} - inserted below. This window will run it "
-                  f"{self._render_mode.upper()} with {self._params_summary(str(key))}.")
+        combo.setCurrentIndex(i)                 # the panel follows the selection
 
     def _refresh_record_chip(self) -> None:
         """Enable the record chip only when there is a movie to make, and SAY WHY when there is not."""
@@ -1319,7 +1235,8 @@ class RegionViewer(QMainWindow):
 
     def _preview_view_operator(self) -> None:
         """PREVIEW: the selected operator on THIS view's regions; nothing is written."""
-        self._launch_operator(save=False, regions=self._run_scope())
+        regions, windows = self._run_scope()
+        self._launch_operator(save=False, regions=regions, windows=windows)
 
     def _run_plate_operator(self) -> None:
         """RUN ON PLATE: the one SAVE path - the plate selection (or the whole plate), to disk.
@@ -1333,7 +1250,48 @@ class RegionViewer(QMainWindow):
             getattr(getattr(plate, "_bulk_all_box", None), "isChecked", lambda: False)())
         self._launch_operator(save=True, regions=None, requester=None if bulk else self)
 
-    def _launch_operator(self, *, save: bool, regions, requester="self") -> None:
+    def _volume_preview_refusal(self, key: str, regions, windows) -> Optional[str]:
+        """Ruling aa: the sentence refusing a 3D tab's preview whose FULL-DEPTH result would
+        not fit this machine's display budget, decided from the geometry alone BEFORE a
+        plane is read; None when it fits, reduces z, or is a region operator's own fusion."""
+        from squidxplorer import is_region_operator
+        from squidxplorer._engine import operator_reduces_depth
+        from squidxplorer._operations import operator_name
+
+        name = operator_name(str(key))
+        try:
+            if is_region_operator(name) or operator_reduces_depth(name):
+                return None
+        except Exception:                        # noqa: BLE001 - an unknown key: the run says it
+            return None
+        meta = self._meta or {}
+        nz = int(meta.get("n_z") or 1)
+        if nz <= 1:
+            return None
+        fh, fw = (int(v) for v in meta.get("frame_shape") or (0, 0))
+        n_ch = len(meta.get("channels") or [])
+        itemsize = int(np.dtype(meta.get("dtype") or "uint16").itemsize)
+        per_region = meta.get("fovs_per_region") or {}
+        if isinstance(regions, dict):
+            scope = {str(r): list(f) for r, f in regions.items()}
+        else:
+            here = self.current_region()
+            scope = {str(here): list(per_region.get(here) or [])} if here else {}
+        n_fovs, px_total = 0, 0
+        for r, fovs in scope.items():
+            for f in fovs:
+                n_fovs += 1
+                w = (windows or {}).get((r, f))
+                px_total += (w[1] - w[0]) * (w[3] - w[2]) if w else fh * fw
+        need = px_total * nz * n_ch * itemsize
+        budget = _volume_view._brick_budget_bytes()
+        if need <= budget:
+            return None
+        return (f"3D preview over {n_fovs} FOV(s) x {nz} planes x {n_ch} channel(s) needs "
+                f"~{need / 1e9:.1f} GB, over this machine's {budget / 1e9:.1f} GB display "
+                "budget; draw an ROI (the box plus a halo is what gets solved).")
+
+    def _launch_operator(self, *, save: bool, regions, requester="self", windows=None) -> None:
         """The one launch: Preview and Run on plate differ only in scope and `save`."""
         if self._run_operator is None:
             self._say("the operator engine isn't connected to this window.")
@@ -1342,6 +1300,14 @@ class RegionViewer(QMainWindow):
         if not key:
             self._say("no operator selected.")
             return
+        # A VOLUME view's preview delivers the whole depth (ruling aa), refused by name when
+        # the result would not fit the display budget, BEFORE a plane is read.
+        deliver_depth = bool(not save and self._render_mode == "3d")
+        if deliver_depth:
+            refusal = self._volume_preview_refusal(key, regions, windows)
+            if refusal:
+                self._say(refusal)
+                return
         try:
             kwargs = dict(self._plate_operator_kwargs(key))
         except ValueError as exc:                # a refused panel setting: SAY it, run nothing
@@ -1359,15 +1325,21 @@ class RegionViewer(QMainWindow):
             log.info("view %s running %s on %s with %s", self.window_id, key,
                      ("the plate scope" if regions is None else
                       (regions if isinstance(regions, dict) else list(regions))), kwargs)
+            # A 2D tab's preview COMPUTES only the plane in view; a 3D tab's preview keeps
+            # the whole stack (Julio, 2026-08-25: "if it's on 3D mode it runs it on all
+            # panes, if it's on 2d mode it runs it only on that one"). A save always runs
+            # full depth; the dispatch applies the restriction by declaration only.
+            preview_z = (self._z_slider_index()
+                         if not save and self._render_mode != "3d" else None)
             self._run_operator(key, regions=regions, save=save, requester=requester,
                                operator_kwargs=kwargs,
                                # A depth-keeping preview must show THE PLANE THIS VIEW IS ON
                                # (Julio, 2026-08-25), so the run carries the view's own z.
-                               z_level=self._z_slider_index())
-            mode = "saving" if save else "previewing"
-            where = ("the plate scope" if regions is None else self._view_label(list(regions)))
-            self._echo(f"{mode} {self._op_combo.currentText()} on {where} "
-                       f"[{self._render_mode.upper()}] · {self._params_summary(key)}.")
+                               z_level=self._z_slider_index(),
+                               preview_z_level=preview_z,
+                               windows=windows, deliver_depth=deliver_depth)
+            # No echo: the log.info line above is the structured twin, and the banner
+            # strip that showed the echo is retired (2026-08-25).
         except Exception as exc:                          # noqa: BLE001 - named to the window
             self._say(f"could not start {self._op_combo.currentText()}: {exc}")
 
@@ -1381,8 +1353,8 @@ class RegionViewer(QMainWindow):
     def operator_progress(self, report) -> None:
         """The run advanced. ``report`` is a :class:`~squidxplorer._progress.ProgressReport`."""
         bar = getattr(self, "_op_progress", None)
-        if bar is None:
-            return
+        if bar is None or self._op_action is None:
+            return                               # no run open: a late report shows no bar
         percent = report.percent
         if percent is None:
             self._show_progress(None, report.sentence())
@@ -1398,9 +1370,11 @@ class RegionViewer(QMainWindow):
     def operator_done(self, action: str, seconds: float) -> None:
         """Emit the console's ``done`` line, closing the started/done pair."""
         self.log.done(str(action), float(seconds), address=self._closing_address())
-        line = f"{action} finished in {float(seconds):.1f} s."
+        # The done line's console twin is log.done above; the artifact hint had ONLY the
+        # retired banner, so it goes to the log itself (nothing said may be lost).
         hint = self._preview_artifact_hint(str(action))
-        self._echo(f"{line} {hint}" if hint else line)
+        if hint:
+            self._say(hint)
         self._op_action = self._op_address = None
         self._hide_progress()
 
@@ -1428,7 +1402,6 @@ class RegionViewer(QMainWindow):
     def operator_failed(self, action: str, reason: str) -> None:
         """The failure outcome: an action that starts and then says nothing looks like one still running."""
         self.log.failed(str(action), str(reason), address=self._closing_address())
-        self._echo(f"{action} failed: {reason}")
         self._op_action = self._op_address = None
         self._hide_progress()
 
@@ -1481,7 +1454,14 @@ class RegionViewer(QMainWindow):
             if int(result.z_depth) <= 1 and getattr(plane, "ndim", 0) == 3 and plane.shape[0] == 1:
                 plane = plane[0]
             placement = getattr(plane, "placement", None)
-            bbox = region_bbox = (placement.bbox_um if placement is not None else preview_bbox)
+            # THE RESULT'S OWN FOOTPRINT, never the whole region's: a scoped run's pixels
+            # cover only its FOVs (2026-08-25), so cropping them against the region's mosaic
+            # bbox took the wrong window and the ROI child gained a full-field layer (Julio:
+            # "decon layer is != raw view"). The whole-region bbox is the fallback only for
+            # a result that declares none.
+            result_bbox = getattr(getattr(result, "extent", None), "bbox_um", None)
+            bbox = region_bbox = (placement.bbox_um if placement is not None
+                                  else (result_bbox or preview_bbox))
             # A copy-saving operator's look is a PASTE at solved positions, so it can be served
             # like raw: the on-demand pyramid with the registered positions substituted — full
             # native resolution under zoom. A FUSED result (stitch) is never substituted: its
@@ -1521,7 +1501,24 @@ class RegionViewer(QMainWindow):
                 fit = getattr(mosaic, "reset_view", None)
                 if callable(fit):
                     fit()
+            if bool(visible) and int(result.z_depth) > 1 and self._render_mode == "3d":
+                self._show_result_volume(str(op))
         return added
+
+    def _show_result_volume(self, op: str) -> None:
+        """Ruling aa: a full-depth result that landed in a VOLUME view is rendered as this
+        view's bricked volume, in place of whatever volume was up, under the result layers'
+        own LUTs (`_volume_view.volume_source` reads the bricks off the *op* layers)."""
+        mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
+        if mosaic is None:
+            return
+        try:
+            _volume_view.close_native3d(self)        # give the layers their identities back
+            mosaic.show_op(op)                       # so the volume source is THIS result
+            _volume_view.open_3d(self)
+        except Exception as exc:                     # noqa: BLE001 - named, never a flat layer
+            self._say(f"{op}: the result landed as layers but could not be rendered as a "
+                      f"volume: {exc}")
 
     def _registered_pyramid(self, op: str, placement, region, channel):
         """Fine-to-native pyramid at *placement*'s solved positions, or None to keep the paste.
@@ -1589,16 +1586,6 @@ class RegionViewer(QMainWindow):
             return None
         return getattr(pane, "_viewer", None)
 
-    def _set_ndisplay(self, n: int) -> None:
-        v = self._napari_viewer()
-        if v is None:
-            self._say(f"cannot switch to {n}D - the napari viewer isn't available here.")
-            return
-        try:
-            v.dims.ndisplay = int(n)
-        except Exception as exc:                         # noqa: BLE001 - named, never silent
-            self._say(f"could not switch to {n}D: {exc}")
-
     def _focus_reference_plane(self) -> None:
         """Jump the z-slider to the sharpest plane (Tenengrad) of the current region's centre FOV."""
         v = self._napari_viewer()
@@ -1652,9 +1639,6 @@ class RegionViewer(QMainWindow):
     # -- the ROI cluster lives in `_roi_tools` (clamp-at-draw, acquisition-pixel costing and the
     # -- child windows move intact); thin delegates because tests and the ROI chips actuate these
     # -- by name on the window. -------------------------------------------------------------------
-    def _view_roi_2d(self) -> None:
-        _roi_tools.view_roi_2d(self)
-
     @staticmethod
     def _sync_roi_width(viewer, layer, screen_px: float = 3.0) -> None:
         _roi_tools.sync_roi_width(viewer, layer, screen_px)
@@ -1665,10 +1649,7 @@ class RegionViewer(QMainWindow):
     #: The FOVs chip's own description, held apart from the per-region count appended to it. The
     #: count changes whenever the plate navigates this window somewhere else, so the two are
     #: joined at refresh time rather than the chip's tooltip being re-derived from its own text.
-    _FOVS_TIP = ("Open a child view that steps the camera through this region's FOVs one at a "
-                 "time, framed to fill the canvas - for checking focus field by field without "
-                 "zooming in and out. Press play on its FOV slider to walk them; the mosaic is "
-                 "loaded once, so stepping is instant.")
+    _FOVS_TIP = "Step through this region's FOVs one at a time."
 
     def _refresh_fovs_chip(self) -> None:
         """Enable the FOVs chip only when there are fields to walk, and SAY WHY when there are not.
@@ -1905,8 +1886,65 @@ class RegionViewer(QMainWindow):
         if slider is not None:
             slider.frame_done()
 
+    _auto_worker = None
+
+    def _reset_contrast_off_thread(self, channel: str, sample) -> None:
+        """napari's once button for one channel: the window rule over the displayed slice,
+        computed on a worker (9.3 ms measured on a 2050^2 frame: not free on the Qt thread),
+        landed through set_contrast so every surface of the identity agrees."""
+        from squidxplorer._qthread_life import detach
+        from squidxplorer._workers import _AutoContrastWorker
+
+        old = self._auto_worker
+        if old is not None and old.isRunning():
+            detach(old)
+        worker = _AutoContrastWorker({str(channel): sample}, parent=self)
+        worker.done.connect(self._apply_auto_contrast)
+        worker.problem.connect(lambda why: self._say(f"auto-contrast: {why}"))
+        self._auto_worker = worker
+        worker.start()
+
+    def _apply_auto_contrast(self, windows) -> None:
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
+        if mosaic is None or not windows:
+            return
+        with mosaic.programmatic():
+            for channel, (lo, hi) in dict(windows).items():
+                try:
+                    mosaic.set_contrast(channel, lo, hi)
+                except KeyError:
+                    continue
+        log.debug("view %s auto-contrast landed for %s", self.window_id, sorted(windows))
+
+    #: The ROI chip's two faces: draw a box, or go to the box just drawn.
+    _ROI_DRAW = ("▭ ROI", "Draw an ROI rectangle inside the mosaic.")
+    _ROI_GO = ("→ ROI", "Open the drawn ROI as a child view.")
+    _roi_count = 0
+    _roi_used = False
+
     def _on_roi_data(self, layer) -> None:
         _roi_tools.on_roi_data(self, layer)
+        n = len(list(getattr(layer, "data", []) or []))
+        if n > self._roi_count:
+            self._roi_used = False               # a NEW box: the arrow is offered again
+        self._roi_count = n
+        self._refresh_roi_chip()
+
+    def _refresh_roi_chip(self) -> None:
+        """The ROI chip reads as the go-to arrow while an unused box exists, else as draw."""
+        btn = getattr(self, "_btn_roi", None)
+        if btn is None or not _alive(btn):
+            return
+        text, tip = self._ROI_GO if (self._roi_count and not self._roi_used) else self._ROI_DRAW
+        btn.setText(text)
+        btn.setToolTip(tip)
+
+    def _roi_chip_clicked(self) -> None:
+        if self._roi_count and not self._roi_used:
+            self._open_roi_children()
+            return
+        self._new_roi()
 
     def _live_texture_limit(self) -> int:
         return _roi_tools.live_texture_limit(self)
@@ -1932,6 +1970,8 @@ class RegionViewer(QMainWindow):
 
     def _open_roi_children(self) -> None:
         _roi_tools.open_roi_children(self)
+        self._roi_used = True                    # used: the chip hands back to drawing
+        self._refresh_roi_chip()
 
     def _install_canvas_loupe(self, pane) -> None:
         """Give this window's canvas a shift-left-click magnifier.
@@ -2026,6 +2066,9 @@ class RegionViewer(QMainWindow):
         self._apply_luts(self.settings.get("luts"))
         self._apply_channel_visibility(self.settings.get("channel_visibility"))
         self._watch_user_visibility(mosaic)
+        hook = getattr(mosaic, "on_reset_contrast", None)
+        if callable(hook):
+            hook(self._reset_contrast_off_thread)
         if self.settings.get("tenengrad_focus"):
             try:
                 self._focus_reference_plane()
@@ -2047,7 +2090,7 @@ class RegionViewer(QMainWindow):
         vis[str(channel)] = bool(visible)
         self.settings.set("channel_visibility", vis)
 
-    def _on_depth_changed(self, lo: float, hi: float) -> None:
+    def _on_depth_changed(self, channel: str, lo: float, hi: float) -> None:
         """The dataset proved it holds bigger numbers: open every slider here to reach them.
 
         Arrives on the GUI thread (``ViewerManager.depthChanged`` is emitted from the fuse worker
@@ -2061,7 +2104,7 @@ class RegionViewer(QMainWindow):
         mosaic = getattr(pane, "mosaic", None) if pane is not None else None
         if mosaic is not None:
             try:
-                mosaic.widen_contrast_range(float(lo), float(hi))
+                mosaic.widen_contrast_range(str(channel), float(lo), float(hi))
             except Exception:                    # noqa: BLE001 - a slider bound is never fatal
                 log.exception("could not widen this window's contrast range to (%s, %s).", lo, hi)
         # `open_native_3d*` build their layers in a napari.Viewer of their OWN, outside
@@ -2078,25 +2121,6 @@ class RegionViewer(QMainWindow):
 
     # "Match layers to raw" is SHELVED WHOLE (Julio, 2026-08-19): the button, this window's
     # handler, `_lut_clipboard.match_raw_contrast` and `MosaicLayers.match_contrast_to` are gone.
-
-    def _copy_luts(self) -> None:
-        """This window's per-channel look into THE clipboard. One button, no options."""
-        n = _lut_clipboard.copy_luts(self)
-        self._say(f"copied {n} channel LUT(s)." if n
-                  else "nothing to copy - this window has no channel layers yet.")
-
-    def _paste_luts(self) -> None:
-        """THE clipboard onto this window's channels. The plate follows the same write."""
-        if not _lut_clipboard.CLIPBOARD:
-            self._say("the LUT clipboard is empty - copy LUTs from a window first.")
-            return
-        applied = _lut_clipboard.paste_luts(self)
-        if applied is None:
-            self._say("no mosaic here to paste onto.")
-            return
-        self._say(f"pasted LUTs onto {applied} channel(s).")
-        if applied:
-            self.lutsPasted.emit(self)   # the plate follows the pasted windows; see the signal
 
     @property
     def time_point(self) -> int:
@@ -2223,6 +2247,7 @@ class RegionViewer(QMainWindow):
             _volume_view.open_3d(self)
             return
         child.set_display_name(f"3D · {region}")
+        child.note_volume_tab()
         _volume_view.open_3d(child, scene_from=self)
 
     def _on_screen_luts(self, op: str) -> "tuple[dict, dict]":
@@ -2323,14 +2348,19 @@ class RegionViewer(QMainWindow):
         return self.log.at(self.address())
 
     def _say(self, text: str) -> None:
-        if text:
-            self.view_log().info("%s", text)
-        self._echo(text)
+        """Tell the user via the LOGGER, refusal-shaped text at WARNING (the in-window
+        banner strip is retired - Julio, 2026-08-25: "That should appear in the logger");
+        the collapsed log band shows the latest line. The pane's ``said`` list stays fed:
+        it is the recording seam tests and gates assert on, never a pixel."""
+        if not text:
+            return
+        from squidxplorer._logpane import status_level
 
-    def _echo(self, text: str) -> None:
-        """The in-window status line only, for events the console already carries a structured line for."""
-        if self._pane is not None and getattr(self._pane, "ok", False):
-            self._pane.say(text)
+        self.view_log().log(status_level(text), "%s", text)
+        said = getattr(self._pane, "said", None)
+        if said is not None:
+            said.append(str(text))
+            del said[:-500]
 
     def set_active(self, active: bool) -> None:
         """Halt draw/refresh on windows the user is not touching."""
@@ -2562,7 +2592,6 @@ class ViewerManager(QObject):
     """Registry of open :class:`RegionViewer` windows, keyed by a monotonic ID."""
 
     windowsChanged = Signal()
-    memoryChanged = Signal(float)
     runProgressChanged = Signal(object)
     viewFocused = Signal(object)
     windowOpened = Signal(object)
@@ -2570,7 +2599,7 @@ class ViewerManager(QObject):
     # A SIGNAL and not a direct call because `_bitdepth` observes on the fuse WORKER thread, and a
     # queued signal to this GUI-thread object is what marshals it. The subscriber on the depth
     # object must therefore do nothing but emit this -- see `_on_depth_rose`.
-    depthChanged = Signal(float, float)
+    depthChanged = Signal(str, float, float)
 
     def __init__(self, reader: Any = None, meta: Optional[dict] = None,
                  parent: Optional[QObject] = None) -> None:
@@ -2616,10 +2645,6 @@ class ViewerManager(QObject):
 
         self._run_progress = None
 
-        self._mem_timer = QTimer(self)
-        self._mem_timer.setInterval(2000)
-        self._mem_timer.timeout.connect(self._poll_memory)
-        self._mem_timer.start()
 
         # A manager can be handed a reader at construction and never see `set_dataset` (the view
         # settings suite builds one exactly that way), so the depth has to be armed from BOTH or
@@ -2631,13 +2656,13 @@ class ViewerManager(QObject):
         depth = _bitdepth.new_dataset((meta or {}).get("dtype"))
         depth.on_change(self._on_depth_rose)
 
-    def _on_depth_rose(self, lo: float, hi: float) -> None:
+    def _on_depth_rose(self, channel: str, lo: float, hi: float) -> None:
         """Called ON THE FUSE WORKER THREAD. Emit and return -- do nothing else here.
 
         The emit is what hops to the GUI thread (Qt queues a signal across threads); touching a
         napari layer from here would be a cross-thread write into the render path.
         """
-        self.depthChanged.emit(float(lo), float(hi))
+        self.depthChanged.emit(str(channel), float(lo), float(hi))
 
     def set_dataset(self, reader: Any, meta: dict) -> None:
         """Point every FUTURE window at a new acquisition, and forget the last one's look.
@@ -3030,32 +3055,15 @@ class ViewerManager(QObject):
         except Exception as exc:                 # noqa: BLE001 - a re-home must not block a close
             log.warning("could not re-home the plate slots: %s: %s", type(exc).__name__, exc)
 
-    def _poll_memory(self) -> None:
-        frac = _process_memory_fraction()
-        if frac is not None:
-            self.memoryChanged.emit(frac)
-
 
 class StatusRow(QObject):
-    """The memory bar and the run-progress bar, wired to the manager — and nothing else.
-
-    What survived the Window navigator's deletion (2026-08-19): `OpenViewList` carried the tree
-    of open views (superseded by the ViewDeck's tabs), the Close/Collapse buttons (View > Close
-    All Views, and the tabs' own close buttons) — and these two bars, which still have a job.
-    They are built here, wired to `ViewerManager.memoryChanged` / `runProgressChanged`, and
-    ADOPTED by the log panel (`LogPanel.adopt_status_row`) exactly as before; this QObject only
-    keeps the slots alive for the life of its parent (the plate window).
-    """
+    """THE ONE bar in the app: the run-progress bar, shown only while a run is live, labelled
+    with the run's own words (Julio, 2026-08-25: "The memory usage bar is confusing, it looks
+    as if it was the deconvolution progressing"; the memory bar is deleted, memory stays a
+    DEBUG footprint line). Built here, adopted by the log slot."""
 
     def __init__(self, manager: ViewerManager, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
-        self._mem_label = QLabel("Memory")
-        self._mem_label.setStyleSheet("color:#8b949e;font-size:11px;border:none;")
-        self._mem_bar = QProgressBar()
-        self._mem_bar.setRange(0, 100)
-        self._mem_bar.setTextVisible(True)
-        self._mem_bar.setFixedHeight(14)
-
         self._work_label = QLabel("")
         self._work_label.setStyleSheet("color:#8b949e;font-size:11px;border:none;")
         self._work_label.setWordWrap(True)
@@ -3068,14 +3076,12 @@ class StatusRow(QObject):
             "QProgressBar::chunk{background:#1f6feb;border-radius:3px;}"
         )
         self._work_bar.hide()
-
-        manager.memoryChanged.connect(self._on_memory)
         manager.runProgressChanged.connect(self._on_run_progress)
         self._on_run_progress(manager.run_progress)
 
     def widgets(self) -> tuple:
-        """The four widgets, in `LogPanel.adopt_status_row`'s order."""
-        return (self._mem_label, self._mem_bar, self._work_label, self._work_bar)
+        """The two widgets, in `LogPanel.adopt_status_row`'s order."""
+        return (self._work_label, self._work_bar)
 
     def _on_run_progress(self, report) -> None:
         """Draw (or take down) the work bar. ``report`` is a ``ProgressReport``, or None for idle."""
@@ -3099,7 +3105,7 @@ class StatusRow(QObject):
             self._work_label.show()
             self._work_bar.show()
         except RuntimeError:
-            # Adopted by the log panel, which can die inside a hosting view (one window,
+            # Adopted by the log slot, which can die inside a hosting view (one window,
             # 2026-08-25): a dead bar unhooks this slot for good.
             sender = self.sender()
             try:
@@ -3107,48 +3113,3 @@ class StatusRow(QObject):
                     sender.runProgressChanged.disconnect(self._on_run_progress)
             except (AttributeError, TypeError, RuntimeError):
                 pass
-
-    def _on_memory(self, frac: float) -> None:
-        pct = max(0, min(100, int(round(frac * 100))))
-        try:
-            self._mem_bar.setValue(pct)
-            warn = pct >= 85
-            self._mem_label.setText("Memory - HIGH, close a view" if warn else "Memory")
-            color = "#f85149" if warn else "#3fb950"
-            self._mem_bar.setStyleSheet(
-                "QProgressBar{background:#161b22;border:1px solid #30363d;border-radius:3px;}"
-                f"QProgressBar::chunk{{background:{color};border-radius:3px;}}"
-            )
-        except RuntimeError:
-            # The bars are ADOPTED by the log panel, which can now live (and die) inside a
-            # hosting view (one window, 2026-08-25): a dead bar unhooks this slot for good.
-            sender = self.sender()
-            try:
-                if sender is not None:
-                    sender.memoryChanged.disconnect(self._on_memory)
-            except (AttributeError, TypeError, RuntimeError):
-                pass
-
-
-def _process_memory_fraction() -> Optional[float]:
-    """This process's RSS as a fraction of total system RAM, or None if it can't be measured."""
-    try:
-        import psutil  # type: ignore
-
-        proc = psutil.Process()
-        return float(proc.memory_info().rss) / float(psutil.virtual_memory().total)
-    except Exception:                                # noqa: BLE001 - psutil optional
-        pass
-    try:
-        import resource
-
-        rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        import sys
-
-        rss = float(rss_kb) if sys.platform == "darwin" else float(rss_kb) * 1024.0
-        import os
-
-        total = float(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
-        return rss / total if total > 0 else None
-    except Exception:                                # noqa: BLE001
-        return None

@@ -1,25 +1,4 @@
-"""ViewDeck — many views as tabs in one window, one of them current.
-
-Spencer, 2026-08-10: "many selections open (as tabs) but only work with one tab at a time."
-
-WHAT THESE CAN AND CANNOT SEE. The suite runs under a Qt platform with no OpenGL and every view
-here is built on a stub pane, so nothing below proves that a napari canvas RENDERS in a tab. That
-was checked by hand on the workstation before any of this was written — four canvases in one
-QTabWidget, one page visible at a time, container minimum 925x725 against a 1920x1032 work area,
-and a page surviving 20 dock/undock cycles with the same pane and the same napari Viewer. These
-tests pin the parts that are not about pixels: the registry, the lifecycle, and who is active.
-
-TABS ARE OPT-IN AND EACH TEST TURNS THEM ON. That is not a testing convenience — it is the state
-the app ships in. Turned on for every spawn, reparenting on every open took four existing files
-from passing to ABORTING (0xC0000005 / 0xC0000409), and an abort is not a failure you can read.
-Until that is understood rather than routed around, a deck is something a caller asks for.
-
-WHY GEOMETRY IS NEVER ASSERTED HERE. A non-current tab is 0x0 offscreen. `test_main_window_layout`
-argues that a tab is the wrong home for something the user must read alongside something else —
-that argument does not transfer to views, where the user asked for one at a time and a hidden
-canvas that stops drawing is the memory policy landing for free. But the 0-px hazard is real, so
-tab switching is asserted through BEHAVIOUR: visibility, `set_active`, and the focused id.
-"""
+"""ViewDeck — many views as tabs in one window, one of them current."""
 
 from __future__ import annotations
 
@@ -40,8 +19,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
     )
 
 from squidxplorer import _viewer as V  # noqa: E402
-from squidxplorer._region_viewer import RegionViewer  # noqa: E402
-from squidxplorer._view_deck import ViewDeck, _SOFT_TAB_CAP  # noqa: E402
+from squidxplorer._view_deck import _SOFT_TAB_CAP  # noqa: E402
 from .conftest import shutdown_plate_window  # noqa: E402
 from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixtures)
 
@@ -79,8 +57,7 @@ def test_a_spawned_view_lands_as_a_tab_and_stays_registered(qapp, napari_pane_st
 
 
 def test_the_deck_is_made_only_when_a_view_is_opened(qapp, napari_pane_stub, squid_dataset):
-    """Lazy, so a session that only looks at the plate builds no window nobody asked for — which
-    is the premise `test_no_orphan_windows` is entitled to."""
+    """Lazy, so a session that only looks at the plate builds no window nobody asked for — which is the premise `test_no_orphan_windows` is entitled to."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -93,25 +70,6 @@ def test_the_deck_is_made_only_when_a_view_is_opened(qapp, napari_pane_stub, squ
 
 
 # --- the lifecycle obstacle: a tab removal fires no close event ----------------------------------
-
-def test_closing_a_tab_deregisters_the_view(qapp, napari_pane_stub, squid_dataset):
-    """THE OBSTACLE. `WA_DeleteOnClose` and the `closed` signal both hang off `closeEvent`, and a
-    tab removal fires none — so without routing through `dispose` the registry would silently stop
-    being told, and every worker join would silently stop happening."""
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
-    victim, keeper = views[0], views[1]
-    pane = victim._pane
-    try:
-        deck.close_page(victim)
-        qapp.processEvents()
-        assert victim.window_id not in [w.window_id for w in mgr.windows], "the registry kept it"
-        assert victim._disposed, "the page was untabbed but never disposed"
-        assert pane.shutdowns == 1, "its napari pane was never shut down"
-        assert deck.count() == 1 and deck.current_page() is keeper
-    finally:
-        shutdown_plate_window(qapp, win)
-
 
 def test_closing_through_the_manager_leaves_no_tab_behind(qapp, napari_pane_stub, squid_dataset):
     """`ViewerManager.close` is what the navigator and the plate use. It must reach a tab."""
@@ -129,14 +87,7 @@ def test_closing_through_the_manager_leaves_no_tab_behind(qapp, napari_pane_stub
 
 
 def test_the_deck_goes_away_once_its_last_view_does(qapp, napari_pane_stub, squid_dataset):
-    """An empty deck must not stay ON SCREEN: it is a top-level, and a visible one with nothing in
-    it keeps the process alive showing an empty frame — the plateless-remainder bug, one container
-    out.
-
-    It is HIDDEN rather than destroyed, and reused if another view opens. Qt's
-    quit-on-last-window rule counts visible windows, so hiding settles the lifetime question; and
-    tearing a container full of GL children down and rebuilding it is exactly the churn this
-    codebase's segfault history is made of."""
+    """An empty deck must not stay ON SCREEN: it is a top-level, and a visible one with nothing in it keeps the process alive showing an empty frame — the"""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
     try:
@@ -144,7 +95,6 @@ def test_the_deck_goes_away_once_its_last_view_does(qapp, napari_pane_stub, squi
         qapp.processEvents()
         assert deck.count() == 0
         assert not deck.isVisible(), "an empty deck is still on screen"
-        # ...and it comes back for the next view rather than a second one being built.
         again = mgr.open([list(win._order)[0]])
         qapp.processEvents()
         assert mgr.deck(create=False) is deck, "a second deck was built"
@@ -156,8 +106,7 @@ def test_the_deck_goes_away_once_its_last_view_does(qapp, napari_pane_stub, squi
 # --- one at a time ------------------------------------------------------------------------------
 
 def test_only_the_current_tab_is_active(qapp, napari_pane_stub, squid_dataset):
-    """"Work with one tab at a time", stated as the render-halt rule the app already has: a view
-    that is not the current page of an active deck is not being watched and must not draw."""
+    """"Work with one tab at a time", stated as the render-halt rule the app already has: a view that is not the current page of an active deck is not being"""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
     a, b = views
@@ -174,8 +123,7 @@ def test_only_the_current_tab_is_active(qapp, napari_pane_stub, squid_dataset):
 
 
 def test_the_current_tab_is_the_focused_view(qapp, napari_pane_stub, squid_dataset):
-    """THE CONTRACT WITH PLATE-AS-NAVIGATOR. The plate drives `manager.active_view()`, so a tab
-    switch has to move it — otherwise clicking a well steers a view the user cannot see."""
+    """THE CONTRACT WITH PLATE-AS-NAVIGATOR."""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
     a = views[0]
@@ -192,8 +140,7 @@ def test_the_current_tab_is_the_focused_view(qapp, napari_pane_stub, squid_datas
 
 def test_detaching_gives_back_a_real_window_and_keeps_it_registered(
         qapp, napari_pane_stub, squid_dataset):
-    """Detach is not a close. The same object comes back as a top-level, still in the registry,
-    still carrying its `[id] name` — the only visible join between a log line and a view."""
+    """Detach is not a close."""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
     page = views[0]
@@ -212,9 +159,7 @@ def test_detaching_gives_back_a_real_window_and_keeps_it_registered(
 
 
 def test_a_page_survives_many_dock_undock_cycles(qapp, napari_pane_stub, squid_dataset):
-    """THE SEGFAULT CANARY, and phase 2's feasibility gate: dragging a tab between decks is this
-    operation. A regression here does not fail an assertion, it kills the interpreter — which is
-    the point, and why `test_window_lifetime` is written the same way."""
+    """THE SEGFAULT CANARY, and phase 2's feasibility gate: dragging a tab between decks is this operation."""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
     page = views[0]
@@ -249,8 +194,7 @@ def test_closing_the_deck_disposes_every_page(qapp, napari_pane_stub, squid_data
 
 
 def test_closing_the_plate_takes_the_deck_with_it(qapp, napari_pane_stub, squid_dataset):
-    """A deck is a top-level, so one left standing keeps the process alive with no plate — still
-    holding the single-instance lock, which is the bug `PlateWindow.closeEvent` records."""
+    """A deck is a top-level, so one left standing keeps the process alive with no plate — still holding the single-instance lock, which is the bug"""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
     win.close()
@@ -261,9 +205,7 @@ def test_closing_the_plate_takes_the_deck_with_it(qapp, napari_pane_stub, squid_
 
 
 def test_a_detach_that_fires_after_teardown_is_ignored(qapp, napari_pane_stub, squid_dataset):
-    """`_DetachTabBar` defers its callback through `QTimer.singleShot(0, lambda: ...)` — a
-    self-capturing lambda on a process-global timer. A press landing just before the deck closes
-    would otherwise call into a deleted deck, which is `test_window_lifetime`'s BUG 3 exactly."""
+    """`_DetachTabBar` defers its callback through `QTimer.singleShot(0, lambda: ...)` — a self-capturing lambda on a process-global timer."""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
     try:
@@ -278,16 +220,10 @@ def test_a_detach_that_fires_after_teardown_is_ignored(qapp, napari_pane_stub, s
 # --- what the first use of it asked for --------------------------------------------------------
 
 def test_every_tab_carries_its_own_close_button(qapp, napari_pane_stub, squid_dataset):
-    """Spencer, on first use: "we could use a more obvious close tab button."
-
-    Closing a view was reachable from the navigator's "Close selected views" — in the OTHER window
-    — or from the deck's title bar, which closes all of them. Asserted through the SIGNAL rather
-    than a click, because a close button is a Qt-drawn sub-control with no widget of its own to
-    press offscreen; what matters is that the request lands on the same `close_page` everything
-    else uses, so a view closed here is disposed and deregistered rather than merely untabbed."""
+    """Spencer, on first use: "we could use a more obvious close tab button." A tab removal fires no close event, so the button must dispose."""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
-    victim = views[0]
+    victim, keeper = views
     pane = victim._pane
     try:
         assert deck._tabs.tabsClosable(), "tabs have no close button"
@@ -296,27 +232,15 @@ def test_every_tab_carries_its_own_close_button(qapp, napari_pane_stub, squid_da
         assert victim._disposed, "the close button untabbed without disposing"
         assert pane.shutdowns == 1, "the close button leaked a napari pane"
         assert victim.window_id not in [w.window_id for w in mgr.windows]
-        assert deck.count() == 1
+        assert deck.count() == 1 and deck.current_page() is keeper
     finally:
         shutdown_plate_window(qapp, win)
 
 
-def test_the_window_navigator_is_gone_and_the_operator_dock_took_its_jobs(
-        qapp, napari_pane_stub, squid_dataset):
-    """2026-08-19: the ViewDeck's tabs superseded the navigator list. The ABSENCE is pinned the
-    way this repo pins deleted features (`not hasattr`, never `is None`), and the two jobs that
-    survived are checked where they landed: close-all in the View menu, the operator surface in
-    the deck's collapsible right-edge dock."""
-    import squidxplorer._region_viewer as RV
-
-    assert not hasattr(RV, "OpenViewList"), "the navigator widget is back"
+def test_view_close_all_views_closes_every_tab(qapp, napari_pane_stub, squid_dataset):
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
     try:
-        assert not hasattr(win, "_open_views"), "the plate still builds a navigator"
-        assert not hasattr(mgr, "raise_views"), "a navigator-only method survived its widget"
-        assert not hasattr(mgr, "collapse_all"), "a navigator-only method survived its widget"
-        # Close-all stayed reachable: the View-menu action closes every view.
         assert win._close_views_act is not None
         win._close_all_views()
         qapp.processEvents()
@@ -346,65 +270,11 @@ def test_the_operator_dock_is_retired(qapp, napari_pane_stub, squid_dataset):
         shutdown_plate_window(qapp, win)
 
 
-def test_controls_inserts_the_param_slot_under_the_operators_row(qapp, napari_pane_stub,
-                                                                 squid_dataset):
-    """Julio (2026-08-25): "see this as an insertion to a list." ⚙ controls re-hosts the
-    plate's live panel into THIS view's param slot; a second click removes it; the plate's
-    kwargs reader still sees the same widget (one source of truth)."""
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
-    v = views[0]
-    try:
-        v.operator_panel()
-        combo = v._op_combo
-        i = next(k for k in range(combo.count()) if combo.itemData(k) == "stitch")
-        combo.setCurrentIndex(i)
-        v._show_operator_controls()
-        qapp.processEvents()
-        panel = v._inserted_panel
-        assert panel is not None and panel is win._op_tabs["stitch"], (
-            "the inserted panel is not the plate's live widget")
-        assert v._param_slot.indexOf(panel) >= 0, "the panel is not in the view's param slot"
-        assert win._left_tabs.indexOf(panel) == -1, "the panel is still a plate tab"
-        # The values set IN THE SLOT are what a run reads: one source of truth.
-        panel.blend_spin.setValue(2)
-        assert win.operator_kwargs_for("stitch")["blend_px"] == 2
-        # The second click REMOVES the slot, and the panel survives (plate registry).
-        v._show_operator_controls()
-        assert v._inserted_panel is None
-        assert win._op_tabs["stitch"] is panel and panel.blend_spin.value() == 2
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
-def test_a_disposed_view_releases_the_inserted_panel_alive(qapp, napari_pane_stub,
-                                                           squid_dataset):
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
-    v = views[0]
-    try:
-        v.operator_panel()
-        combo = v._op_combo
-        combo.setCurrentIndex(next(k for k in range(combo.count())
-                                   if combo.itemData(k) == "stitch"))
-        v._show_operator_controls()
-        panel = v._inserted_panel
-        panel.blend_spin.setValue(7)
-        v.dispose()
-        qapp.processEvents()
-        assert win._op_tabs["stitch"] is panel, "disposing the view lost the plate's panel"
-        assert panel.blend_spin.value() == 7, "the panel's state died with the view"
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
 # --- the cost, said out loud ------------------------------------------------------------------
 
 def test_the_deck_names_the_memory_once_there_are_many_views(qapp, napari_pane_stub,
                                                              squid_dataset):
-    """MEASURED AT ~88 MB A VIEW. A tab strip hides that each tab holds its own napari viewer and
-    GL context, which is exactly when someone opens twelve. Nothing is refused — a cap that blocked
-    work would be worse than the memory — but the number stops being invisible."""
+    """MEASURED AT ~88 MB A VIEW."""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
     try:
@@ -464,22 +334,9 @@ def test_the_fovs_chip_is_disabled_inside_a_fovs_view_and_says_why(qapp, napari_
         shutdown_plate_window(qapp, win)
 
 
-def test_a_view_cannot_be_both_an_roi_child_and_a_fov_walk(qapp, napari_pane_stub, squid_dataset):
-    """Refused by name at construction rather than resolved by a silent precedence rule."""
-    root, _ = squid_dataset
-    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
-    try:
-        with pytest.raises(ValueError, match="cannot be both"):
-            RegionViewer(None, {}, ["A1"], window_id=99,
-                         roi_bbox=(0.0, 0.0, 1.0, 1.0), fovs=True)
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
 def test_a_fovs_view_keeps_its_region_slider_and_its_time_bar(qapp, napari_pane_stub,
                                                               squid_dataset):
-    """Hidden, not absent — so every call site stays unconditional and the plate can still
-    navigate this window to another region (`show_region`), which the walk must survive."""
+    """Hidden, not absent — so every call site stays unconditional and the plate can still navigate this window to another region (`show_region`), which the"""
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
     try:

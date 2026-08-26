@@ -50,8 +50,7 @@ def _meta(regions=("A1", "B2"), n_z: int = 1) -> dict:
 
 
 class _SmoothReader:
-    """Planes are a smooth gradient keyed to ABSOLUTE stage position: a misplaced paste shows
-    as a large numeric deviation, while stride-vs-mean sampling stays within a few counts."""
+    """Planes are a smooth gradient keyed to ABSOLUTE stage position: a misplaced paste shows as a large numeric deviation, while stride-vs-mean sampling"""
 
     def __init__(self, path, meta):
         self.source_id = str(path)
@@ -98,7 +97,7 @@ def _write_squid_well(root: Path, meta: dict, region: str, *, factor: int = 2,
 # --- discovery -------------------------------------------------------------------------------
 
 
-def test_discovery_finds_the_file_and_derives_the_factor_from_its_own_size(tmp_path):
+def test_discovery_finds_the_file_and_derives_the_factor_from_its_own_size(tmp_path, monkeypatch):
     root = _acq(tmp_path)
     meta = _meta()
     _write_squid_well(root, meta, "A1", factor=2, value=321)
@@ -111,17 +110,12 @@ def test_discovery_finds_the_file_and_derives_the_factor_from_its_own_size(tmp_p
     assert np.all(plane == 321)
     assert _wellimage.downsampled_well(reader, meta, "B2", CHANNELS[0], 0) is None, \
         "a well with no file reads as absent"
-
-
-def test_channel_names_match_across_squids_spaces_and_our_underscores(tmp_path):
-    root = _acq(tmp_path)
-    meta = _meta()
-    # Squid's widget saves its LAYER names, which use spaces.
-    _write_squid_well(root, meta, "A1", names=["Fluorescence 405 nm Ex",
-                                               "Fluorescence 638 nm Ex"])
-    got = _wellimage.downsampled_well(_SmoothReader(root, meta), meta, "A1",
-                                      "Fluorescence_638_nm_Ex", 0)
-    assert got is not None, "spaces vs underscores must not hide a channel"
+    _write_squid_well(root, meta, "B2", names=["Fluorescence 405 nm Ex", "Fluorescence 638 nm Ex"])
+    _wellimage.clear_cache()
+    assert _wellimage.downsampled_well(reader, meta, "B2", "Fluorescence_638_nm_Ex", 0) is not None, \
+        "Squid's spaces vs our underscores must not hide a channel"
+    monkeypatch.setenv(_wellimage.ENV_ENABLED, "0")
+    assert _wellimage.downsampled_well(reader, meta, "A1", CHANNELS[0], 0) is None, "the env kill switch"
 
 
 def test_a_file_whose_size_fits_no_integer_factor_reads_as_absent(tmp_path, caplog):
@@ -143,20 +137,7 @@ def test_a_multi_z_acquisition_never_serves_a_well_image(tmp_path):
         "the saved image is ONE z; it may not stand in for a stack"
 
 
-def test_the_env_kill_switch_turns_the_feature_off(tmp_path, monkeypatch):
-    root = _acq(tmp_path)
-    meta = _meta()
-    _write_squid_well(root, meta, "A1")
-    monkeypatch.setenv(_wellimage.ENV_ENABLED, "0")
-    assert _wellimage.downsampled_well(_SmoothReader(root, meta), meta, "A1",
-                                       CHANNELS[0], 0) is None
-
-
 # --- the pyramid top -------------------------------------------------------------------------
-
-
-class _CountingReader(_SmoothReader):
-    pass
 
 
 def test_the_coarse_rung_comes_from_the_well_image_and_never_touches_the_fovs(tmp_path):
@@ -196,8 +177,6 @@ def test_the_well_rung_lands_on_the_fused_rungs_geometry(tmp_path):
 
     assert derived.shape == fused.shape
     dev = float(np.max(np.abs(fused.astype(np.float32) - derived.astype(np.float32))))
-    # The gradient is 3-5 counts/px: a one-frame (or half-frame) misplacement would deviate by
-    # hundreds. Area-mean vs stride sampling plus the ±1 px paste rounding stays under this.
     assert dev <= 16.0, f"the well rung is {dev} counts off the fused rung's geometry"
 
 
@@ -307,11 +286,9 @@ def test_a_padded_backfill_is_stamped_and_completion_deletes_the_file(tmp_path, 
         assert "padded_fovs" not in tif.shaped_metadata[0], \
             "a well with all its data gets a clean, Squid-identical file"
 
-    # Still partial: the stamped file is accurate and keeps serving the fast path.
     assert _wellimage.load_well_stack(partial, meta, "A1", 0) is not None
     assert (wells / "A1_2um.tiff").exists()
 
-    # The acquisition completes; a fresh open pads nothing.
     done = _SmoothReader(root, meta)
     with caplog.at_level("INFO"):
         assert _wellimage.load_well_stack(done, meta, "A1", 0) is None, \
@@ -320,7 +297,6 @@ def test_a_padded_backfill_is_stamped_and_completion_deletes_the_file(tmp_path, 
     assert any("deleted" in r.message and "A1_2um.tiff" in r.message
                for r in caplog.records), "the delete must be named in the log"
 
-    # The next backfill rewrites JUST that well, clean, though B2's file still exists.
     assert _wellimage.write_well_images(done, meta, time_point=0) == 1
     with tifffile.TiffFile(wells / "A1_2um.tiff") as tif:
         md = tif.shaped_metadata[0]
@@ -336,7 +312,6 @@ def test_squids_own_well_image_is_never_deleted(tmp_path):
     meta = _meta()
     path = _write_squid_well(root, meta, "A1", value=321)
 
-    # Neither a complete open nor a padded one may touch an unstamped (Squid) file.
     assert _wellimage.load_well_stack(_SmoothReader(root, meta), meta, "A1", 0) is not None
     partial = _PaddedReader(root, meta, {"A1": {0, 1}})
     assert _wellimage.load_well_stack(partial, meta, "A1", 0) is not None
@@ -348,14 +323,12 @@ def test_a_still_missing_stamp_keeps_the_file_and_a_padded_plane_writes_none(tmp
     meta = _meta()
     wells = root / "0" / "mosaic_view" / "wells"
 
-    # Every FOV of A1 padded: no file at all — an all-black mosaic helps nobody.
     all_black = _PaddedReader(root, meta, {"A1": set(range(GRID * GRID))})
     with caplog.at_level("INFO"):
         assert _wellimage.write_well_images(all_black, meta, time_point=0) == 1
     assert not (wells / "A1_2um.tiff").exists()
     assert (wells / "B2_2um.tiff").exists()
 
-    # A padded z plane writes nothing: there is no data at that plane.
     from squidxplorer.reader import PaddedSlots
 
     zonly = _SmoothReader(root, meta)
@@ -363,7 +336,6 @@ def test_a_still_missing_stamp_keeps_the_file_and_a_padded_plane_writes_none(tmp
     (wells / "B2_2um.tiff").unlink()
     assert _wellimage.write_well_images(zonly, meta, time_point=0) == 0
 
-    # A stamped file whose FOVs are STILL missing stays: it is accurate, not stale.
     partial = _PaddedReader(root, meta, {"B2": {3}})
     assert _wellimage.write_well_images(partial, meta, time_point=0) == 2  # A1 clean, B2 stamped
     _wellimage.clear_cache()

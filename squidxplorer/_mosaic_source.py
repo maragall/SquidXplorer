@@ -124,7 +124,7 @@ def fuse_region_mosaic(
         # data. Anything downstream is strided (`sub`, below) or averaged, and a maximum taken
         # from a decimated plane UNDER-states the real one -- which snaps the ceiling too low and
         # clips. ~0.06 ms on a 2048x2048 frame against a 2.6 ms decode.
-        _bitdepth.depth().observe_array(frame)
+        _bitdepth.depth().observe_array(frame, channel)
         sub = frame[::step, ::step]
         r0, c0 = row // step, col // step
         r1, c1 = min(r0 + sub.shape[0], out_h), min(c0 + sub.shape[1], out_w)
@@ -345,7 +345,7 @@ class _WindowedLevel:
                                              self._z, self._t))
         if frame.ndim != 2:
             frame = frame.reshape(frame.shape[-2:])
-        _bitdepth.depth().observe_array(frame)   # same full-resolution observation _fuse_levels makes
+        _bitdepth.depth().observe_array(frame, self._channel)   # full-res, per channel
         if self._region_fits(frame):
             self._cache.put(key, frame)
         return frame
@@ -398,7 +398,7 @@ class _WindowedLevel:
                                                                              copy=False)
         # An area-averaged plane UNDER-states the true ceiling, but the range only ever
         # widens (_bitdepth): this seeds a floor until the first full-resolution decode.
-        _bitdepth.depth().observe_array(arr)
+        _bitdepth.depth().observe_array(arr, self._channel)
         self._cache.put(self._plane_key, arr)
         return arr
 
@@ -481,7 +481,7 @@ def _fuse_levels(reader: Any, meta: dict, region: str, channel: str, z_level: in
         # any `frame[::step, ::step]` below has a chance to hide the brightest pixel. This is the
         # observation that covers every region the app displays, and it lands on the worker
         # thread BEFORE `ready` is emitted -- so a region's layer is built already knowing it.
-        _bitdepth.depth().observe_array(frame)
+        _bitdepth.depth().observe_array(frame, channel)
         row, col = offsets[fov]
         for px, h, w, st, _dt in plans:
             step = int(st)
@@ -740,6 +740,34 @@ def fovs_overlapping_bbox(meta: dict, region: str,
         if fx0 < rx1 and fx1 > rx0 and fy0 < ry1 and fy1 > ry0:
             hit.append(int(fov))
     return hit or None
+
+
+def fov_windows_px(meta: dict, region: str, bbox_um) -> "dict[int, tuple[int, int, int, int]]":
+    """``{fov: (r0, r1, c0, c1)}``: *bbox_um* as a window in EACH touched frame's own pixels
+    (ruling z, sub-FOV decon). The same boxes as :func:`fovs_overlapping_bbox` (top-left
+    convention), floored/ceiled to whole pixels and clamped to the frame; a FOV the box does
+    not touch is absent, and ``{}`` when nothing is touched or the geometry is unknown."""
+    if bbox_um is None:
+        return {}
+    try:
+        boxes = mosaic_fov_bboxes_um(meta, region)
+    except (KeyError, ValueError, TypeError):
+        return {}
+    p = float(meta["pixel_size_um"])
+    fh, fw = (int(v) for v in meta["frame_shape"])
+    rx0, ry0, rx1, ry1 = (float(v) for v in bbox_um)
+    rx0, rx1 = min(rx0, rx1), max(rx0, rx1)
+    ry0, ry1 = min(ry0, ry1), max(ry0, ry1)
+    out: "dict[int, tuple[int, int, int, int]]" = {}
+    eps = 1e-6                                   # a millionth of a pixel is float noise, not a pixel
+    for fov, (fx0, fy0, _fx1, _fy1) in boxes.items():
+        c0 = max(0, int(np.floor((rx0 - fx0) / p + eps)))
+        c1 = min(fw, int(np.ceil((rx1 - fx0) / p - eps)))
+        r0 = max(0, int(np.floor((ry0 - fy0) / p + eps)))
+        r1 = min(fh, int(np.ceil((ry1 - fy0) / p - eps)))
+        if r1 > r0 and c1 > c0:
+            out[int(fov)] = (r0, r1, c0, c1)
+    return out
 
 
 def fov_pixel_at_point(meta: dict, region: str, x_um: float,

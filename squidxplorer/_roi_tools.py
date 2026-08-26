@@ -29,16 +29,6 @@ ROI_COLORS: "tuple[str, ...]" = (
 )
 
 
-def view_roi_2d(win) -> None:
-    """Open the SELECTED ROI as a child 2D window; with no ROI picked, just show the mosaic in 2D."""
-    win.set_render_mode("2d")
-    bbox, _region = selected_roi(win)
-    if bbox is None:
-        win._set_ndisplay(2)
-        return
-    open_roi_children(win)
-
-
 def sync_roi_width(viewer, layer, screen_px: float = 3.0) -> None:
     """Keep the ROI border a ~constant on-screen thickness as the camera zooms."""
     try:
@@ -68,8 +58,11 @@ def roi_shapes_layer(win, create: bool = False):
                 edge_color="name", edge_color_cycle=list(ROI_COLORS),
             )
             layer.current_properties = {"name": np.array(["R1"], dtype=object)}
+            # Through the WINDOW's hook when it has one: the view refreshes its ROI chip
+            # there (draw -> go-to arrow, 2026-08-25); a bare window gets the module's.
             layer.events.data.connect(
-                lambda e=None, ly=layer: on_roi_data(win, ly))
+                lambda e=None, ly=layer: (getattr(win, "_on_roi_data", None)
+                                          or (lambda l: on_roi_data(win, l)))(ly))
         except Exception:                            # noqa: BLE001 - fall back to a plain layer
             layer = v.add_shapes(name="ROIs", edge_color="#58a6ff",
                                  face_color="transparent")

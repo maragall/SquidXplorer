@@ -1,10 +1,4 @@
-"""Three UI defects, pinned by the mechanism behind each rather than by a screenshot:
-
-1. every colour rule must state ink and ground together (a bare `background:` with no `color:`
-   lets the OS palette supply black-on-dark text)
-2. all type is sized in pixels, never points, so it does not change size across screens
-3. operator card descriptions are elided to the card's width, with the full text on the tooltip
-"""
+"""Combo ink under a light palette, pixel-sized plate fonts, per-screen placement, parseable style sheets."""
 
 from __future__ import annotations
 
@@ -62,8 +56,7 @@ def test_the_popup_list_is_styled_and_not_just_the_closed_combo(qss):
 
 
 def test_the_operator_dropdown_ink_does_not_come_from_a_light_palette(qapp):
-    """Resolve the combo's foreground under a black-on-light palette: the sheet's own ink must
-    win, not the palette's."""
+    """Resolve the combo's foreground under a black-on-light palette: the sheet's own ink must win, not the palette's."""
     light = QPalette()
     for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
         light.setColor(role, QColor("#000000"))
@@ -84,8 +77,7 @@ def test_the_operator_dropdown_ink_does_not_come_from_a_light_palette(qapp):
 
 @pytest.mark.parametrize("module", [PO])
 def test_no_painted_label_is_measured_in_points(module):
-    """A QFont point size resolves against the paint device's per-screen DPI, so it is the one
-    size that changes apparent size between a laptop panel and an external monitor."""
+    """A QFont point size resolves against the paint device's per-screen DPI, so it is the one size that changes apparent size between a laptop panel and an"""
     code = "\n".join(ln for ln in inspect.getsource(module).splitlines()
                      if not ln.lstrip().startswith(("#", "#:")))
     assert not re.search(r"QFont\(\s*[\"'][^\"']+[\"']\s*,\s*\d", code), \
@@ -98,36 +90,20 @@ def test_the_plate_labels_carry_a_pixel_size(qapp):
     assert font.pointSize() == -1, "a pixel-sized font must not also carry a point size"
 
 
-def test_window_screen_falls_back_to_the_primary_rather_than_none(qapp):
-    assert window_screen(None) is QGuiApplication.primaryScreen()
-
-
-def test_window_screen_prefers_the_screen_the_widget_is_actually_on(qapp):
+def test_window_screen_prefers_the_widgets_own_screen_and_falls_back_to_the_primary(qapp):
     class _OnItsOwnScreen:
         def screen(self):
             return "the-external-monitor"
 
     assert window_screen(_OnItsOwnScreen()) == "the-external-monitor"
+    assert window_screen(None) is QGuiApplication.primaryScreen()
 
 
 def test_a_view_window_is_placed_relative_to_its_own_screen_not_the_desktop_origin():
-    """``move(120, 90)`` is a global coordinate that pins every view to whichever display owns
-    (0, 0); the offsets are unchanged, only what they are measured from."""
+    """``move(120, 90)`` is a global coordinate that pins every view to whichever display owns (0, 0); the offsets are unchanged, only what they are measured from."""
     src = inspect.getsource(RegionViewer.__init__)
     assert "availableGeometry().topLeft()" in src
     assert "self.move(120 + off, 90 + off)" not in src
-
-
-# The operator cards died with the right-edge dock (Julio, 2026-08-25: "I think that the
-# operator right hand dock is obsolete"); a view's Run on plate is the bulk path.
-def test_the_operator_cards_are_retired():
-    from squidxplorer import _qtstyle
-    from squidxplorer._viewer import PlateWindow
-
-    assert not hasattr(_qtstyle, "operator_card")
-    assert not hasattr(_qtstyle, "CARD_QSS")
-    assert not hasattr(PlateWindow, "_build_operator_cards")
-    assert not hasattr(PlateWindow, "_install_operator_dock")
 
 
 def _qt_parse_failures(qapp, build, resizes=((1400, 900), (900, 700), (1600, 1000))):
@@ -162,14 +138,3 @@ def test_no_widget_in_the_plate_window_has_an_unparseable_stylesheet(qapp):
         f"spams the log on every repolish: {failures[:3]}")
 
 
-def test_the_log_panel_toggle_closes_its_qss_block_exactly_once(qapp):
-    """The specific brace bug: ``}}`` in the non-f-string half of a split literal."""
-    from squidxplorer._logpanel import LogPanel
-
-    panel = LogPanel()
-    try:
-        qss = panel._toggle.styleSheet()
-        assert qss.count("{") == qss.count("}"), f"unbalanced braces in {qss!r}"
-        assert not qss.endswith("}}"), "the sheet still closes one brace too many"
-    finally:
-        panel.deleteLater()

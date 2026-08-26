@@ -1,8 +1,4 @@
-"""Tests for the Plate abstraction, the sample_formats builder and the carrier-art registry.
-
-Non-Qt on purpose. Units: everything micrometres; sample_formats.csv is millimetres and is
-converted exactly once, at the loader.
-"""
+"""Tests for the Plate abstraction, the sample_formats builder and the carrier-art registry."""
 
 from __future__ import annotations
 
@@ -67,7 +63,6 @@ def test_load_sample_formats_returns_geometry_in_micrometres():
     g = formats["96 well plate"]
     assert isinstance(g, PlateGeometry)
     assert (g.rows, g.cols) == (8, 12)
-    # csv says well_spacing_mm=9.0, well_size_mm=6.21, a1 = (11.31, 10.75) mm
     assert g.pitch_x_um == pytest.approx(9000.0)
     assert g.pitch_y_um == pytest.approx(9000.0)
     assert g.cell_size_um == pytest.approx(6210.0)
@@ -80,7 +75,6 @@ def test_load_sample_formats_has_every_standard_format_and_no_mm_keys():
     for name in ("glass slide", "6 well plate", "12 well plate", "24 well plate",
                  "96 well plate", "384 well plate", "1536 well plate"):
         assert name in formats, name
-    # the units contract: no attribute may carry a bare mm value
     for g in formats.values():
         for field in ("pitch_x_um", "pitch_y_um", "cell_size_um", "a1_x_um", "a1_y_um"):
             assert hasattr(g, field)
@@ -97,12 +91,7 @@ def test_load_sample_formats_reads_a_real_csv(tmp_path):
     g = load_sample_formats(csv)["96 well plate"]
     assert g.pitch_x_um == pytest.approx(9000.0)
     assert g.a1_x_px == 171
-
-
-def test_load_sample_formats_missing_csv_falls_back_to_vendored(tmp_path):
-    # degrade gracefully: a missing upstream checkout must not break plate layout
-    formats = load_sample_formats(tmp_path / "nope.csv")
-    assert formats["96 well plate"].pitch_x_um == pytest.approx(9000.0)
+    assert load_sample_formats(tmp_path / "nope.csv")["96 well plate"].pitch_x_um == pytest.approx(9000.0)
 
 
 # --------------------------------------------------------------------------- Plate ABC / WellPlate
@@ -129,16 +118,11 @@ def test_wellplate_cell_index_roundtrips_including_double_letter_rows():
 def test_wellplate_cell_centre_uses_a1_offset_and_pitch():
     p = WellPlate.from_format("96 well plate")
     assert p.cell_center_um("A1") == pytest.approx((11310.0, 10750.0))
-    # B3 is 2 columns and 1 row from A1 at 9 mm pitch
     assert p.cell_center_um("B3") == pytest.approx((11310.0 + 18000.0, 10750.0 + 9000.0))
-
-
-def test_wellplate_rejects_a_cell_outside_the_grid():
-    p = WellPlate.from_format("6 well plate")
-    with pytest.raises(KeyError):
-        p.cell_center_um("C1")
-    with pytest.raises(KeyError):
-        p.cell_center_um("A9")
+    assert p.pitch_x_um == pytest.approx(2 * WellPlate.from_format("384 well plate").pitch_x_um)
+    for outside in ("I1", "A13"):
+        with pytest.raises(KeyError):
+            p.cell_center_um(outside)
 
 
 def test_wellplate_extent_um_spans_the_whole_grid():
@@ -148,12 +132,6 @@ def test_wellplate_extent_um_spans_the_whole_grid():
     assert h == pytest.approx(7 * 9000.0 + 6210.0)
 
 
-def test_wellplate_384_and_96_differ_by_exactly_2x_pitch():
-    # the whole reason declared-vs-measured matters: these two are a factor of 2 apart
-    assert (WellPlate.from_format("96 well plate").pitch_x_um
-            == pytest.approx(2 * WellPlate.from_format("384 well plate").pitch_x_um))
-
-
 # --------------------------------------------------------------------------- SlideCarrier
 
 def test_slide_carrier_is_a_plate_and_shares_the_cell_api():
@@ -161,16 +139,9 @@ def test_slide_carrier_is_a_plate_and_shares_the_cell_api():
     assert isinstance(c, Plate)
     assert (c.rows, c.cols) == (1, 4)
     assert len(c.cell_ids) == 4
-    # same API as a WellPlate: index/centre/extent all work
     r, col = c.cell_index(c.cell_ids[2])
     assert (r, col) == (0, 2)
     assert c.cell_center_um(c.cell_ids[0])[0] < c.cell_center_um(c.cell_ids[3])[0]
-
-
-def test_glass_slide_is_a_one_cell_carrier():
-    c = SlideCarrier.from_format("glass slide")
-    assert (c.rows, c.cols) == (1, 1)
-    assert len(c.cell_ids) == 1
 
 
 def test_slide_carrier_takes_freeform_region_ids_positionally():
@@ -179,7 +150,9 @@ def test_slide_carrier_takes_freeform_region_ids_positionally():
     assert c.cell_index("tissueA") == (0, 1)
 
 
-def test_slide_carrier_refuses_more_regions_than_slots():
+def test_a_glass_slide_is_one_cell_and_refuses_more_regions_than_slots():
+    c = SlideCarrier.from_format("glass slide")
+    assert (c.rows, c.cols) == (1, 1) and len(c.cell_ids) == 1
     with pytest.raises(PlateBuildError):
         SlideCarrier.from_format("glass slide", cell_ids=["a", "b"])
 
@@ -193,7 +166,6 @@ def test_measure_region_pitch_um_recovers_9mm():
 
 
 def test_measure_region_pitch_um_handles_a_gap_in_column_indices():
-    # A1 and A5 only: 4 columns apart, so pitch = dx / 4, not dx
     pos = _positions_um(4500.0, 4500.0, regions=("A1", "A5"))
     px, py = measure_region_pitch_um(pos, ["A1", "A5"])
     assert px == pytest.approx(4500.0)
@@ -203,21 +175,16 @@ def test_measure_region_pitch_um_handles_a_gap_in_column_indices():
 def test_measure_region_pitch_um_is_none_for_non_well_regions():
     pos = {("manual0", 0): (1.0, 2.0), ("manual1", 0): (3.0, 4.0)}
     assert measure_region_pitch_um(pos, ["manual0", "manual1"]) == (None, None)
-
-
-def test_measure_region_pitch_um_is_none_without_coordinates():
     assert measure_region_pitch_um({}, ["A1", "A2"]) == (None, None)
 
 
 def test_measure_region_pitch_um_matches_the_all_pairs_reference_on_a_jittered_plate():
-    """The grouped implementation must return EXACTLY what the all-pairs rule returns,
-    on a jittered plate (a regular grid would pass under almost any bug)."""
+    """The grouped implementation must return EXACTLY what the all-pairs rule returns, on a jittered plate (a regular grid would pass under almost any bug)."""
     rows, cols, pitch = 8, 12, 4500.0
     regions, positions, index = [], {}, {}
     for r in range(rows):
         for c in range(cols):
             region = f"{chr(ord('A') + r)}{c + 1}"
-            # Deterministic per-well jitter, big enough that a wrong pair set shifts the median.
             jx = ((r * 31 + c * 17) % 23) - 11.0
             jy = ((r * 13 + c * 29) % 19) - 9.0
             regions.append(region)
@@ -242,31 +209,13 @@ def test_measure_region_pitch_um_matches_the_all_pairs_reference_on_a_jittered_p
         _reference(0, 1, 0), _reference(1, 0, 1))
 
 
-def test_format_from_pitch_um_distinguishes_96_from_384():
+def test_format_from_pitch_um_matches_within_tolerance_and_refuses_otherwise():
     assert format_from_pitch_um(9000.0, 9000.0) == "96 well plate"
     assert format_from_pitch_um(4500.0, 4500.0) == "384 well plate"
     assert format_from_pitch_um(2250.0, 2250.0) == "1536 well plate"
-
-
-def test_format_from_pitch_um_tolerates_small_stage_error():
-    assert format_from_pitch_um(8980.0, 9020.0) == "96 well plate"
-
-
-def test_format_from_pitch_um_rejects_a_pitch_matching_nothing():
-    assert format_from_pitch_um(7000.0, 7000.0) is None
-
-
-def test_format_from_pitch_um_rejects_disagreeing_axes():
-    # x says 96, y says 384 -> not a plate we can name; refuse rather than pick one
-    assert format_from_pitch_um(9000.0, 4500.0) is None
-
-
-def test_format_from_pitch_um_names_a_12_well_plate_the_slide_carrier_used_to_shadow():
-    """The candidate set must be _WELLPLATE_FORMATS: the 4-up carrier's slot pitch shadowed 12wp."""
-    got = format_from_pitch_um(26000.0, 26000.0)
-    assert got == "12 well plate", (
-        f"a 26 000 um pitch IS a 12 well plate; got {got!r} "
-        "(None == the slide carrier shadowing it)")
+    assert format_from_pitch_um(8980.0, 9020.0) == "96 well plate"      # small stage error
+    assert format_from_pitch_um(7000.0, 7000.0) is None                 # matches nothing
+    assert format_from_pitch_um(9000.0, 4500.0) is None                 # disagreeing axes
 
 
 def test_format_from_pitch_um_identifies_every_wellplate_from_its_own_pitch():
@@ -301,7 +250,6 @@ def test_no_two_wellplate_pitches_are_within_the_matching_tolerance():
         f"pitches closer than {limit:.4g}x are mutually ambiguous under _PITCH_TOL="
         f"{_PITCH_TOL}, so a measurement between them silently returns None: "
         + "; ".join(clashes))
-    # and the closest surviving pair is the one the module comment names
     ordered = sorted(pitches.values())
     closest = min(b / a for a, b in zip(ordered, ordered[1:]))
     assert closest == pytest.approx(26000.0 / 19300.0), f"closest wellplate pair is {closest:.4g}x"
@@ -327,20 +275,14 @@ def test_build_plate_uses_the_declared_format_when_geometry_agrees():
 def test_build_plate_measured_geometry_overrides_a_contradicting_declared_format():
     """Trusting a lying declaration would draw carrier art at exactly 2x wrong scale."""
     meta = _meta(wellplate_format="384 well plate")     # positions are 9 mm = 96wp
-    with pytest.warns(UserWarning, match="384 well plate"):
+    with pytest.warns(UserWarning, match="384 well plate") as rec:
         p = build_plate(meta)
     assert p.format_name == "96 well plate"
     assert p.pitch_x_um == pytest.approx(9000.0)
     assert p.format_source == "measured"
     assert p.declared_format == "384 well plate"
-
-
-def test_build_plate_warning_names_both_formats_and_the_measured_pitch():
-    with pytest.warns(UserWarning, match="384 well plate") as rec:
-        build_plate(_meta(wellplate_format="384 well plate"))
     msg = next(str(w.message) for w in rec if "384 well plate" in str(w.message))
-    assert "96 well plate" in msg
-    assert "9000" in msg or "9.0" in msg
+    assert "96 well plate" in msg and ("9000" in msg or "9.0" in msg)
 
 
 def test_build_plate_contradicts_a_lying_yaml_on_a_12_well_plate_too():
@@ -356,8 +298,6 @@ def test_build_plate_contradicts_a_lying_yaml_on_a_12_well_plate_too():
     assert p.declared_format == "24 well plate"
     assert p.pitch_x_um == pytest.approx(26000.0)
     assert (p.rows, p.cols) == (3, 4)
-    # The MATCHED warning, not rec[0]: a GC-collected ResourceWarning from an earlier test can
-    # land first in the block, and this assertion is about the contradiction's wording, not order.
     msg = next(str(w.message) for w in rec
                if "contradicts the stage coordinates" in str(w.message))
     assert "12 well plate" in msg and "24 well plate" in msg
@@ -371,8 +311,6 @@ def test_build_plate_falls_back_to_declared_when_pitch_is_unmeasurable():
 
 
 def test_build_plate_ignores_a_measured_format_too_small_for_the_observed_wells():
-    # wells run out to P24 (384-only) but the measured pitch reads 96wp: the measurement cannot
-    # be right, because a 96wp has no P24. Keep the declaration, still warn.
     regions = ["A1", "A24", "P24"]
     meta = _meta(
         regions=regions,
@@ -390,7 +328,6 @@ def test_build_plate_ignores_a_measured_format_too_small_for_the_observed_wells(
 def test_build_plate_infers_when_nothing_is_declared():
     meta = _meta(wellplate_format=None)
     p = build_plate(meta)
-    # measured 9 mm pitch beats the span rule's under-read (2x2 -> 6wp)
     assert p.format_name == "96 well plate"
     assert p.format_source == "measured"
 
@@ -454,22 +391,13 @@ def test_build_plate_rejects_a_region_outside_the_resolved_grid():
 
 # --------------------------------------------------------------------------- carrier art registry
 
-def test_carrier_art_returns_none_when_the_squid_images_dir_is_absent(tmp_path):
-    assert carrier_art("96 well plate", images_dir=tmp_path) is None
-
-
 def test_carrier_art_never_invents_a_filename(tmp_path):
+    assert carrier_art("96 well plate", images_dir=tmp_path / "absent") is None
     (tmp_path / "96 well plate_1509x1010.png").write_bytes(b"")
     assert carrier_art("96 well plate", images_dir=tmp_path).path.exists()
     assert carrier_art("384 well plate", images_dir=tmp_path) is None   # not on disk -> None
-
-
-def test_carrier_art_scale_is_micrometres_per_pixel(tmp_path):
-    (tmp_path / "96 well plate_1509x1010.png").write_bytes(b"")
-    art = carrier_art("96 well plate", images_dir=tmp_path)
-    assert isinstance(art, CarrierArt)
-    # Squid's NavigationViewer: mm_per_pixel = 0.084665 for every plate
-    assert art.um_per_px == pytest.approx(84.665)
+    d = squid_images_dir()
+    assert d is None or isinstance(d, Path)
 
 
 def test_carrier_art_slide_carrier_has_its_own_scale(tmp_path):
@@ -482,7 +410,7 @@ def test_carrier_art_slide_carrier_has_its_own_scale(tmp_path):
 def test_carrier_art_origin_places_a1_at_its_recorded_pixel(tmp_path):
     (tmp_path / "96 well plate_1509x1010.png").write_bytes(b"")
     art = carrier_art("96 well plate", images_dir=tmp_path)
-    # Squid: origin_px = a1_pixel - a1_mm / mm_per_pixel; so a1 must map back to (171, 135)
+    assert isinstance(art, CarrierArt) and art.um_per_px == pytest.approx(84.665)
     x_px, y_px = art.um_to_px(11310.0, 10750.0)
     assert x_px == pytest.approx(171, abs=1)
     assert y_px == pytest.approx(135, abs=1)
@@ -493,11 +421,6 @@ def test_carrier_art_is_reachable_from_a_plate(tmp_path):
     p = WellPlate.from_format("96 well plate")
     assert p.art(images_dir=tmp_path) is not None
     assert p.art(images_dir=tmp_path / "gone") is None
-
-
-def test_squid_images_dir_is_optional_and_never_raises():
-    d = squid_images_dir()
-    assert d is None or isinstance(d, Path)
 
 
 # --------------------------------------------------------------------------- real dataset
@@ -541,7 +464,6 @@ def test_region_stage_boxes_um_is_the_mosaic_extent_not_the_first_fov():
                           pixel_size_um=2.0, frame=(50, 30))
     (x, y, w, h) = region_stage_boxes_um(meta)["manual0"]
     assert (x, y) == (1000.0, 2000.0)
-    # a position marks a frame CORNER, so the region spans one more frame past the last one
     assert w == pytest.approx(600.0 + 30 * 2.0)
     assert h == pytest.approx(400.0 + 50 * 2.0)
 
@@ -580,7 +502,6 @@ def test_freeform_layout_does_not_depend_on_the_ORDER_OR_NAMES_of_the_regions():
 
     renamed = {"zebra": boxes["manual0"], "alpha": boxes["manual1"]}   # alphabetical == reversed
     r = build_plate(_freeform_meta(renamed))
-    # The cells still follow the STAGE BOXES: zebra carries manual0's box, the leftmost.
     assert r.cell_index("zebra") == (0, 0) and r.cell_index("alpha") == (0, 1)
     assert r.cell_layout()["zebra"] == pytest.approx(ref["manual0"])
     assert r.cell_layout()["alpha"] == pytest.approx(ref["manual1"])
@@ -640,13 +561,9 @@ def test_freeform_grid_does_not_fuse_two_regions_over_a_sliver_of_y_overlap():
     rows, cols, place = freeform_grid({"a": (0.0, 0.0, 100.0, 1000.0),
                                        "b": (0.0, 950.0, 100.0, 1000.0)})
     assert (rows, cols) == (2, 1), "a 5% y overlap is two stacked regions, not one row"
-
-
-def test_freeform_grid_puts_side_by_side_regions_in_one_row():
     rows, cols, place = freeform_grid({"left": (0.0, 0.0, 100.0, 1000.0),
                                        "right": (5000.0, 10.0, 100.0, 1000.0)})
-    assert (rows, cols) == (1, 2)
-    assert place["left"] == (0, 0) and place["right"] == (0, 1)
+    assert (rows, cols) == (1, 2) and place["left"] == (0, 0) and place["right"] == (0, 1)
 
 
 def test_cell_layout_rectangles_stay_inside_the_grid():

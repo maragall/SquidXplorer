@@ -24,7 +24,10 @@ from squidxplorer import _decon_gpu
 from squidxplorer._acquisition import load_acquisition_metadata, load_objective_na
 from squidxplorer._channels import excitation_nm
 from squidxplorer._engine import Param, add_operator
+from squidxplorer._logpane import get_logger
 from squidxplorer.projection import cast_like
+
+log = get_logger("decon")
 
 # RL is semi-convergent; the working point on this instrument, not a textbook default.
 DEFAULT_ITERATIONS: int = 3
@@ -53,11 +56,19 @@ def _petakit():
     return petakit
 
 
+class NoEmissionLine(ValueError):
+    """A channel that states no excitation wavelength has no emission line to form a PSF
+    at (brightfield, darkfield LEDs). The ONE refusal decon answers PER CHANNEL, by copying
+    that channel through unchanged instead of failing the run (Julio, 2026-08-25); every
+    other optics failure stays the run's refusal."""
+
+
 def emission_um_for(channel) -> float:
-    """The emission wavelength (um) a PSF is formed at, for one channel; raises for broadband channels."""
+    """The emission wavelength (um) a PSF is formed at, for one channel; raises
+    :class:`NoEmissionLine` for broadband channels."""
     excitation = excitation_nm(channel)
     if excitation is None:
-        raise ValueError(
+        raise NoEmissionLine(
             f"channel {str(channel)!r} states no excitation wavelength, so it has no emission "
             "line and no PSF can be derived from it. Broadband channels (brightfield, "
             "darkfield) are the usual case."
@@ -146,50 +157,57 @@ def make_psf(optics: OpticsParams) -> np.ndarray:
     return np.ascontiguousarray(psf, dtype=np.float32)
 
 
-def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool,
-         snapshot_iters=None):
+#: The halo an ROI-scoped solve pads its window with: the PSF's LATERAL SUPPORT, the radius
+#: holding HALO_ENERGY of the z-integrated energy of the same ``make_psf`` the solve uses,
+#: floored at HALO_MIN_PX (ruling z, Julio 2026-08-25, sub-FOV decon). Measured before the
+#: rule was written, on 25 point sources blurred with the real PSF at G7's optics (nz 5 and
+#: 15, CPU and MPS): the 99.9% radius is 9.9 px, halo 0 differs from the whole-field solve by
+#: up to 5 counts, every halo >= 4 px is within 1 count. ``tests/test_sub_fov_decon.py`` pins.
+HALO_ENERGY: float = 0.999
+HALO_MIN_PX: int = 8
+
+
+@lru_cache(maxsize=_PSF_CACHE_SIZE)
+def lateral_halo_px(optics: OpticsParams) -> int:
+    """The lateral radius (px) holding :data:`HALO_ENERGY` of the modelled PSF's energy, at
+    least :data:`HALO_MIN_PX`: what a windowed solve pads with so its interior equals the
+    whole-field solve."""
+    lateral = make_psf(optics).sum(axis=0)
+    cy, cx = np.unravel_index(int(np.argmax(lateral)), lateral.shape)
+    yy, xx = np.indices(lateral.shape)
+    radius = np.hypot(yy - cy, xx - cx).ravel()
+    order = np.argsort(radius)
+    energy = np.cumsum(lateral.ravel()[order])
+    energy /= float(energy[-1]) or 1.0
+    at = radius[order][min(int(np.searchsorted(energy, HALO_ENERGY)), radius.size - 1)]
+    return max(HALO_MIN_PX, int(np.ceil(float(at))))
+
+
+def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool):
     """One call into RL: device selection, optional FFT-length padding, and an all-zero result guard.
 
-    ``snapshot_iters`` (petakit's own contract) asks ONE solve to capture the estimate after
-    each named iteration; the return is then ``{iter: volume}`` instead of one array. The
-    QC sweep steps those captures back and forth for free — never a re-solve per count.
+    The per-iteration ``snapshot_iters`` capture hook is DELETED with the QC sweep (Julio,
+    2026-08-25: "The sweep code should be shelved. I can just run on an ROI iteration by
+    iteration."); reinstating starts from git history.
     """
     volume = np.ascontiguousarray(volume, dtype=np.float32)
-    snaps = sorted({int(i) for i in snapshot_iters}) if snapshot_iters else None
-    if snaps is not None:
-        iterations = max(int(iterations), snaps[-1])
     device = _decon_gpu.select_device(volume.shape, gpu=gpu, psf_shape=psf.shape)
-    _decon_gpu.log_choice(volume.shape, gpu=gpu, psf_shape=psf.shape)
+    _decon_gpu.log_choice(volume.shape, gpu=gpu, psf_shape=psf.shape, psf=psf)
     if device is not None:
-        out = _decon_gpu.rl(volume, psf, iterations, device, snapshot_iters=snaps)
+        out = _decon_gpu.rl(volume, psf, iterations, device)
     else:
         petakit = _petakit()
         widths = (_decon_gpu.pad_plan(volume.shape, psf.shape)
                   if _decon_gpu.cpu_padding_enabled() else (0, 0, 0))
         padded = _decon_gpu._wrap_pad(volume, widths)
-        if snaps is not None:
-            import inspect
-
-            if "snapshot_iters" not in inspect.signature(petakit.engine.rl).parameters:
-                raise RuntimeError(
-                    "this petakit build's engine.rl takes no snapshot_iters, so a "
-                    "per-iteration QC sweep cannot capture inside one solve. Update petakit "
-                    "(the pinned SHA in pyproject carries it); refusing to fall back to one "
-                    "full re-solve per iteration count without saying so.")
-            out = petakit.engine.rl(
-                np.ascontiguousarray(padded), psf,
-                n_iter=iterations, gpu=gpu, snapshot_iters=snaps,
-            )
-        else:
-            out = petakit.deconvolve(
-                np.ascontiguousarray(padded), psf,
-                method=METHOD, iterations=iterations, gpu=gpu,
-            )
+        out = petakit.deconvolve(
+            np.ascontiguousarray(padded), psf,
+            method=METHOD, iterations=iterations, gpu=gpu,
+        )
         if any(widths):
             core = tuple(slice(w, w + n) for w, n in zip(widths, volume.shape))
-            out = ({k: v[core] for k, v in out.items()} if snaps is not None
-                   else out[core])
-    final = out[snaps[-1]] if snaps is not None else out
+            out = out[core]
+    final = out
     if np.any(volume) and not np.any(final):
         raise RuntimeError(
             "petakit returned an all-zero result for a non-empty input. That is the failure "
@@ -357,6 +375,11 @@ def optics_for_channel(path, channel: str) -> OpticsParams:
         )
     try:
         optics = _acquisition_optics(str(path), str(channel))
+    except NoEmissionLine as exc:
+        # Keeps its TYPE through the wrap: decon's per-channel bind absorbs exactly this
+        # one, and nothing else, into a copy-through.
+        raise NoEmissionLine(
+            f"cannot derive the PSF for channel {channel!r} of {path}: {exc}") from exc
     except Exception as exc:
         raise ValueError(
             f"cannot derive the PSF for channel {channel!r} of {path}: "
@@ -431,6 +454,44 @@ def rig_profile_notes(path) -> "list[str]":
     return notes
 
 
+#: (acquisition path, channel) pairs whose copy-through has been said this process:
+#: project_well binds per FOV, and the fact is stated ONCE per acquisition, not per field.
+_COPIED_THROUGH_SAID: "set[tuple[str, str]]" = set()
+
+
+def _copy_through(channel: str, why: str) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
+    """The identity over a z-stack in decon's own shape (z-consuming, depth-keeping), for
+    ONE channel decon cannot model: same planes, same dtype, every plane, so the output
+    stays the size of the input. ``copies_through`` carries the reason, which is what
+    ``project_well`` reads to refuse a run in which EVERY channel would be copied."""
+    def _copy(planes: Iterable[np.ndarray]) -> np.ndarray:
+        return np.stack([np.asarray(p) for p in planes])
+
+    _copy.__name__ = f"decon(copied through: {channel})"
+    _copy.consumes = frozenset({"z"})
+    _copy.keeps_depth = True
+    _copy.copies_through = why
+    return _copy
+
+
+def _decon_for_channel(path, channel: str, iterations: int):
+    """decon's per-channel bind: the volume solve at this channel's own optics, or, for a
+    channel with NO emission line, a copy-through named ONCE in the log (Julio, 2026-08-25:
+    "copy BF through unchanged with a named log line"; measured on G7_2026-08-20, whose
+    BF_LED_matrix_full failed the whole run for its two fluorescence channels). Driven by
+    the channel's declared optics, never its name. Only that refusal is absorbed: unreadable
+    optics, a missing path or an impossible NA stay the run's refusal."""
+    try:
+        optics = optics_for_channel(path, channel)
+    except NoEmissionLine:
+        key = (str(path), str(channel))
+        if key not in _COPIED_THROUGH_SAID:
+            _COPIED_THROUGH_SAID.add(key)
+            log.info("%s: no emission wavelength, copied unchanged, not deconvolved", channel)
+        return _copy_through(str(channel), "no emission wavelength")
+    return decon_op(optics, iterations)
+
+
 def decon_op(
     optics: Optional[OpticsParams] = None,
     iterations: int = DEFAULT_ITERATIONS,
@@ -451,8 +512,16 @@ def decon_op(
     _decon.consumes = frozenset({"z"})
     _decon.keeps_depth = True
     if optics is None:
-        _decon.for_channel = lambda path, channel: decon_op(
-            optics_for_channel(path, channel), iterations)
+        _decon.for_channel = lambda path, channel: _decon_for_channel(path, channel, iterations)
+    else:
+        # The declaration an ROI-scoped run reads (``projection.operator_halo_px``): the PSF's
+        # lateral support AT THE STACK'S DEPTH, since the PSF is bound to it in the solve.
+        def _halo(nz: int) -> int:
+            bound = optics if optics.nz == int(nz) else OpticsParams(
+                optics.na, optics.wavelength_um, optics.dxy_um, optics.dz_um, int(nz), optics.ni)
+            return lateral_halo_px(bound)
+
+        _decon.halo_px = _halo
     return _decon
 
 

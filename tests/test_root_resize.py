@@ -1,13 +1,4 @@
-"""The root window resizes, and the type comes with it.
-
-Two independent causes: `setFixedSize(596, 850)` made the window unresizable, and Qt5 does not
-scale for high DPI unless asked, so a 200%-scaled display drew 596x850 PHYSICAL pixels while
-every other app on screen drew at 2x. Enabling the DPI attributes makes each stylesheet `px` a
-logical pixel, doubling the whole UI without editing the 79 call sites that set a font size inline.
-
-These tests cover what is honest to assert offscreen: the geometry contract and the stylesheet
-arithmetic. Whether it LOOKS right is a screenshot, not a unit test.
-"""
+"""The root window resizes, and the type comes with it."""
 
 from __future__ import annotations
 
@@ -28,11 +19,12 @@ def _font_px(qss: str) -> int:
 
 # --- the stylesheet rewriter ------------------------------------------------------------------
 
-def test_font_size_scales_and_nothing_else_moves():
+def test_font_size_scales_from_the_authored_value_and_nothing_else_moves():
     out = _scale_qss_fonts(QSS, 2.0)
     assert _font_px(out) == 24
     assert "padding:3px 10px" in out, "padding must not scale — see the hairline note"
     assert "background:#161b22" in out
+    assert _font_px(_scale_qss_fonts(QSS, 1.0)) == 12, "x1 must return the authored size"
 
 
 def test_point_sizes_are_left_alone():
@@ -42,13 +34,6 @@ def test_point_sizes_are_left_alone():
 
 def test_type_never_shrinks_below_legibility():
     assert _font_px(_scale_qss_fonts(QSS, 0.1)) == 8
-
-
-def test_scaling_is_computed_from_the_authored_value_not_the_last_one():
-    """The caller caches the original sheet; prove scaling twice is not scaling twice over."""
-    once = _scale_qss_fonts(QSS, 2.0)
-    assert _font_px(_scale_qss_fonts(QSS, 1.0)) == 12, "x1 must return the authored size"
-    assert _font_px(once) == 24
 
 
 def test_a_sheet_with_no_font_size_is_returned_unchanged():
@@ -77,13 +62,10 @@ def qapp_or_skip():
     return app
 
 
-def test_the_root_window_is_resizable(root):
+def test_the_root_window_is_resizable_above_a_floor(root):
     """The regression: setFixedSize pinned max == min, so the frame had no grab handles."""
     assert root.maximumWidth() > root.minimumWidth()
     assert root.maximumHeight() > root.minimumHeight()
-
-
-def test_the_root_keeps_a_floor_so_the_top_strip_cannot_collapse(root):
     assert root.minimumWidth() >= 420
     assert root.minimumHeight() >= 520
 
@@ -98,7 +80,8 @@ def test_the_default_size_never_exceeds_the_screen(root):
     assert h <= max(root.minimumHeight(), avail.height())
 
 
-def test_widening_the_window_enlarges_the_type(root):
+def test_widening_enlarges_the_type_and_returning_to_the_design_width_restores_it(root):
+    """Caching the original sheet is what stops repeated resizes compounding the size."""
     root.resize(root._DESIGN_W, 700)
     root._rescale_fonts()
     small = _font_px(root._open_sel_btn.styleSheet())
@@ -107,11 +90,6 @@ def test_widening_the_window_enlarges_the_type(root):
     root._rescale_fonts()
     assert _font_px(root._open_sel_btn.styleSheet()) > small
 
-
-def test_returning_to_the_design_width_restores_the_authored_type(root):
-    """Caching the original sheet is what stops repeated resizes compounding the size."""
-    root.resize(root._DESIGN_W * 2, 700)
-    root._rescale_fonts()
     root.resize(root._DESIGN_W, 700)
     root._rescale_fonts()
     assert _font_px(root._open_sel_btn.styleSheet()) == 12

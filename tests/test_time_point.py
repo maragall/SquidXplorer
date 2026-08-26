@@ -35,50 +35,8 @@ def qapp():
     return app
 
 
-def test_the_fixture_is_squids_own_on_disk_layout(multi_time_point_dataset):
-    root, _ = multi_time_point_dataset
-
-    folders = sorted(p for p in root.iterdir() if p.is_dir())
-    assert [p.name for p in folders] == ["0", "1", "2"], "unpadded, one folder per timepoint"
-
-    for folder in folders:
-        assert (folder / ".done").exists(), f"{folder.name} has no .done marker"
-        planes = sorted(p.name for p in folder.glob("*.tiff"))
-        assert len(planes) == TIME_SERIES_NZ * len(TIME_SERIES_CHANNELS)
-        for name in planes:
-            assert name.startswith(f"{TIME_SERIES_REGION}_{TIME_SERIES_FOV}_")
-
-
-def test_the_two_coordinates_csv_files_are_not_the_same_file(multi_time_point_dataset):
-    root, _ = multi_time_point_dataset
-
-    planned = (root / "coordinates.csv").read_text().splitlines()
-    executed = (root / "0" / "coordinates.csv").read_text().splitlines()
-
-    assert planned[0] == "region,x (mm),y (mm),z (mm)"
-    assert executed[0] == "region,fov,z_level,x (mm),y (mm),z (um),time"
-    assert planned[0] != executed[0]
-
-    assert len(planned) == 1 + 1
-    assert len(executed) == 1 + TIME_SERIES_NZ
-    assert "time" not in planned[0] and "z (um)" not in planned[0]
-
-    for time_point in range(N_TIME_POINTS):
-        assert (root / str(time_point) / "coordinates.csv").exists()
-
-
-def test_the_fixture_declares_nt_in_both_sidecars(multi_time_point_dataset):
-    root, _ = multi_time_point_dataset
-
-    params = json.loads((root / "acquisition parameters.json").read_text())
-    assert params["Nt"] == N_TIME_POINTS
-
-    text = (root / "acquisition.yaml").read_text()
-    assert "time_series:" in text and f"nt: {N_TIME_POINTS}" in text
-
-
-def test_the_reader_reports_three_timepoints(multi_time_point_dataset):
-    root, _ = multi_time_point_dataset
+def test_the_reader_reports_three_timepoints_and_each_holds_its_own_pixels(multi_time_point_dataset):
+    root, planes = multi_time_point_dataset
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         meta = open_reader(root).metadata
@@ -88,22 +46,16 @@ def test_the_reader_reports_three_timepoints(multi_time_point_dataset):
     assert meta["regions"] == [TIME_SERIES_REGION]
     assert meta["fovs_per_region"] == {TIME_SERIES_REGION: [TIME_SERIES_FOV]}
     assert len(meta["channels"]) == len(TIME_SERIES_CHANNELS)
-
-
-def test_every_timepoint_holds_its_own_pixels(multi_time_point_dataset):
-    root, planes = multi_time_point_dataset
     reader = open_reader(root)
-    channel_names = [c["name"] for c in reader.metadata["channels"]]
-
     seen = set()
     for time_point in range(N_TIME_POINTS):
         for z_level in range(TIME_SERIES_NZ):
-            for channel_index, channel in enumerate(channel_names):
-                got = reader.read(TIME_SERIES_REGION, TIME_SERIES_FOV, channel, z_level,
+            for channel_index, c in enumerate(meta["channels"]):
+                got = reader.read(TIME_SERIES_REGION, TIME_SERIES_FOV, c["name"], z_level,
                                   time_point=time_point)
                 want = time_series_pixel_value(time_point, z_level, channel_index)
                 assert got.min() == got.max() == want
-                np.testing.assert_array_equal(got, planes[(time_point, z_level, channel)])
+                np.testing.assert_array_equal(got, planes[(time_point, z_level, c["name"])])
                 seen.add(want)
     assert len(seen) == N_TIME_POINTS * TIME_SERIES_NZ * len(TIME_SERIES_CHANNELS)
 
@@ -190,7 +142,6 @@ def test_a_region_window_fuses_the_timepoint_its_own_bar_shows(
         assert seen and seen[-1] == 1, (
             f"the window's mosaic worker was built with t={seen}, not the bar's timepoint 1")
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()

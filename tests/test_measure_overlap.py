@@ -16,24 +16,11 @@ _SPEC.loader.exec_module(mo)
 
 
 # _modal_step
-def test_modal_step_finds_the_pitch_of_a_regular_grid():
-    xs = [0.0, 0.7056, 1.4112, 2.1168]
-    assert mo._modal_step(xs) == pytest.approx(0.7056, abs=1e-4)
-
-
-def test_modal_step_survives_a_gap_from_a_partial_scan():
-    xs = [0.0, 0.7056, 1.4112, 2.8224]  # one position skipped -> a 1.4112 delta
-    assert mo._modal_step(xs) == pytest.approx(0.7056, abs=1e-4)
-
-
-def test_modal_step_ignores_duplicate_coordinates():
-    xs = [0.0, 0.0, 0.7056, 0.7056, 1.4112]
-    assert mo._modal_step(xs) == pytest.approx(0.7056, abs=1e-4)
-
-
-def test_modal_step_single_position_is_zero_not_a_crash():
-    assert mo._modal_step([1.23]) == 0.0
-    assert mo._modal_step([]) == 0.0
+def test_modal_step_finds_the_pitch_through_gaps_and_duplicates():
+    assert mo._modal_step([0.0, 0.7056, 1.4112, 2.1168]) == pytest.approx(0.7056, abs=1e-4)
+    assert mo._modal_step([0.0, 0.7056, 1.4112, 2.8224]) == pytest.approx(0.7056, abs=1e-4)
+    assert mo._modal_step([0.0, 0.0, 0.7056, 0.7056, 1.4112]) == pytest.approx(0.7056, abs=1e-4)
+    assert mo._modal_step([1.23]) == 0.0 and mo._modal_step([]) == 0.0
 
 
 # _pixel_size_um
@@ -52,15 +39,9 @@ def test_yaml_pixel_size_is_taken_as_is(tmp_path):
     px, src = mo._pixel_size_um(tmp_path)
     assert px == pytest.approx(0.325)
     assert "object-space" in src
-
-
-def test_yaml_wins_over_legacy_json(tmp_path):
-    (tmp_path / "acquisition.yaml").write_text("objective:\n  pixel_size_um: 0.325\n")
     (tmp_path / "acquisition parameters.json").write_text(
-        json.dumps({"sensor_pixel_size_um": 7.45, "objective": {"magnification": 20.0}})
-    )
-    px, _ = mo._pixel_size_um(tmp_path)
-    assert px == pytest.approx(0.325)
+        json.dumps({"sensor_pixel_size_um": 7.45, "objective": {"magnification": 20.0}}))
+    assert mo._pixel_size_um(tmp_path)[0] == pytest.approx(0.325), "yaml wins over legacy json"
 
 
 def test_sensor_pitch_without_magnification_refuses_to_guess(tmp_path):
@@ -71,11 +52,7 @@ def test_sensor_pitch_without_magnification_refuses_to_guess(tmp_path):
     px, src = mo._pixel_size_um(tmp_path)
     assert px is None
     assert "cannot convert" in src
-
-
-def test_missing_metadata_reports_not_found(tmp_path):
-    px, src = mo._pixel_size_um(tmp_path)
-    assert px is None and src == "not found"
+    assert mo._pixel_size_um(tmp_path / "empty") == (None, "not found")
 
 
 # survey — end to end on a synthetic acquisition
@@ -107,19 +84,8 @@ def test_survey_reports_grid_and_overlap(tmp_path, monkeypatch):
     assert out["has_explicit_fov_column"] is True
     e = out["regions"]["C5"]
     assert e["n_fov"] == 9 and e["grid"] == [3, 3] and e["rectangular"]
-    # 2084 px * 0.3728571 um = 0.777 mm span; step 0.7056 mm -> ~9.2% overlap
     assert e["overlap_frac"][0] == pytest.approx(0.092, abs=0.005)
     assert e["overlap_frac"][1] == pytest.approx(0.092, abs=0.005)
-
-
-def test_survey_flags_missing_original_coordinates(tmp_path, monkeypatch):
-    root = tmp_path / "acq"
-    _write_acq(root, with_original=False)
-    monkeypatch.setattr(mo, "_frame_shape", lambda _r: (2084, 2084))
-
-    out = mo.survey(root)
-    assert out["has_original_coordinates"] is False
-    assert any("NO original_coordinates" in n for n in out["notes"])
 
 
 def test_survey_filters_multi_z_instead_of_miscounting(tmp_path, monkeypatch):
@@ -130,6 +96,11 @@ def test_survey_filters_multi_z_instead_of_miscounting(tmp_path, monkeypatch):
     out = mo.survey(root)
     assert out["regions"]["C5"]["n_fov"] == 9, "must be 9 FOVs, not 90 rows"
     assert any("multi-z" in n for n in out["notes"])
+    bare = tmp_path / "bare"
+    _write_acq(bare, with_original=False)
+    out = mo.survey(bare)
+    assert out["has_original_coordinates"] is False
+    assert any("NO original_coordinates" in n for n in out["notes"])
 
 
 def test_survey_flags_declared_grid_disagreement(tmp_path, monkeypatch):

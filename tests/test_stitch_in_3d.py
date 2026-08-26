@@ -1,6 +1,4 @@
-"""Stitching, then 3D in-window: z-depth delivery, second-open coverage, contrast harvest,
-and the hidden-layer reslice crash. Only the Qt pane and the GL canvas are stood in for.
-"""
+"""Stitching, then 3D in-window: z-depth delivery, second-open coverage, contrast harvest, and the hidden-layer reslice crash."""
 
 from __future__ import annotations
 
@@ -25,7 +23,6 @@ from napari.components import ViewerModel                # noqa: E402
 from qtpy.QtCore import QObject                          # noqa: E402
 
 from squidxplorer import _bricks                             # noqa: E402
-from squidxplorer._napari3d import region_origin_um, roi_window_px   # noqa: E402
 from squidxplorer._napari_view import META_KEY, MosaicKey, MosaicLayers, key_of  # noqa: E402
 from squidxplorer._op_result import RegionResultAccumulator  # noqa: E402
 from squidxplorer._region_viewer import _RAW_OP, RegionViewer  # noqa: E402
@@ -132,7 +129,6 @@ def test_the_layer_z_depth_drives_3D_and_a_brick_comes_back_with_every_plane():
     win = _Window(meta, mos)
     read, source, pitch = RegionViewer._volume_source(win, (0, h, 0, w))
     assert source == "stitch" and read is not None, f"3D refused the stitched layer: {win.said}"
-    # the raw preview in this same scene is at _PREVIEW_STEP * PX_UM, so this also says WHICH layer
     assert pitch is not None and tuple(round(float(v), 6) for v in pitch) == (PX_UM, PX_UM), (
         f"3D reads the stitched layer at {pitch} um/px, not the acquisition's {PX_UM}: a stitched "
         f"mosaic is native, and a volume of it must not be at the preview's "
@@ -214,7 +210,6 @@ class _Window(QObject):
 
     _open_3d = RegionViewer._open_3d
     set_render_mode = RegionViewer.set_render_mode
-    _refresh_controls_note = RegionViewer._refresh_controls_note
     _open_roi_3d = RegionViewer._open_roi_3d
     _volume_source = RegionViewer._volume_source
     _on_screen_luts = RegionViewer._on_screen_luts
@@ -374,17 +369,14 @@ def test_a_contrast_set_IN_3D_survives_the_flip_and_the_next_volume_opens_on_it(
     mos, _model = _pane_with(meta, op="stitch", result=result)
     roi = mosaic_bbox_um(meta, REGION)
     win = _Window(meta, mos)
-    # held by OBJECT: while a volume is up this layer has surrendered its identity to the bricks
     flat = mos.find("stitch", CHANNELS[0])
 
     first = _volume_up(win, roi, stub_bricked, "stitch", drag_to=_DRAGGED_CLIM)
-    # the drag reached the flat mosaic under the volume: ONE value per channel, everywhere
     assert tuple(flat.contrast_limits) == _DRAGGED_CLIM
 
     win._open_3d()
 
     vol = win._native3d
-    # ...and it IS the second view, not the first one's window read back
     assert vol is not None and vol is not first, f"the second 3D view never opened: {win.said}"
     assert tuple(vol._contrast_by[CHANNELS[0]]) == _DRAGGED_CLIM, (
         f"the second 3D view opened at {vol._contrast_by.get(CHANNELS[0])}, not the "
@@ -419,7 +411,6 @@ def test_a_contrast_write_survives_a_2D_3D_flip_that_left_a_layer_HIDDEN():
     _flip_and_write(mos, 2, shown, (33.0, 44.0))
     assert np.ndim(hidden._slice.thumbnail.view) == 2, (
         "the hidden layer kept a 3-D thumbnail under a 2-D slice input")
-    # ...and the value really arrived: contrast is one value per channel
     assert tuple(shown.contrast_limits) == (33.0, 44.0)
 
 

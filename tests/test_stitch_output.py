@@ -1,10 +1,4 @@
-"""The fused save: a region operator's mosaics in the stitcher's own OME-TIFF format.
-
-``write_fused_acquisition`` writes one Squid-style tiled OME-TIFF per region (tilefusion's own
-exporter — maragall/stitcher parity by construction) laid out as an acquisition
-(``ome_tiff/{region}_0.ome.tiff`` + sidecars) so ``open_reader`` re-opens it: a saved stitch
-drops straight back into the GUI. Routing is declaration-driven, never name-driven.
-"""
+"""The fused save: a region operator's mosaics in the stitcher's own OME-TIFF format."""
 
 from __future__ import annotations
 
@@ -55,7 +49,8 @@ def fused_probe():
 
 # ------------------------------------------------------------------ the writer itself
 
-def test_layout_sidecars_and_one_ome_tiff_per_region(squid_dataset, tmp_path, fused_probe):
+def test_the_fused_write_lays_out_reopens_and_round_trips_pixels_and_origins(
+        squid_dataset, tmp_path, fused_probe):
     root, _ = squid_dataset
     dst = tmp_path / "fused_out"
     summary = write_fused_acquisition(open_reader(root), fused_probe, dst)
@@ -66,11 +61,6 @@ def test_layout_sidecars_and_one_ome_tiff_per_region(squid_dataset, tmp_path, fu
     written = sorted(p.name for p in (dst / "ome_tiff").iterdir())
     assert written == sorted(f"{r}_0.ome.tiff" for r in REGIONS)
 
-
-def test_the_output_reopens_and_the_fused_pixels_round_trip(squid_dataset, tmp_path, fused_probe):
-    root, _ = squid_dataset
-    dst = tmp_path / "fused_out"
-    write_fused_acquisition(open_reader(root), fused_probe, dst)
     out = open_reader(dst)                                  # "drop it back in the GUI"
     meta = out.metadata
     assert meta["regions"] == REGIONS
@@ -85,15 +75,8 @@ def test_the_output_reopens_and_the_fused_pixels_round_trip(squid_dataset, tmp_p
                 assert plane.shape == (_H, _W)
                 np.testing.assert_array_equal(
                     plane, np.full((_H, _W), _probe_value(r_i, c_i, z), np.uint16))
-
-
-def test_coordinates_carry_each_mosaic_origin(squid_dataset, tmp_path, fused_probe):
-    root, _ = squid_dataset
-    dst = tmp_path / "fused_out"
-    write_fused_acquisition(open_reader(root), fused_probe, dst)
-    positions = open_reader(dst).metadata["fov_positions_um"]
     for r_i, region in enumerate(REGIONS):
-        x_um, y_um = positions[(region, 0)]
+        x_um, y_um = meta["fov_positions_um"][(region, 0)]
         assert x_um == pytest.approx(1000.0)                # placement.origin_um is (y, x)
         assert y_um == pytest.approx(2000.0 + 10.0 * r_i)
 
@@ -121,7 +104,6 @@ def test_stitch_saves_the_mosaic_of_record_and_reopens(squid_dataset, tmp_path):
     out = open_reader(dst)
     meta = out.metadata
     assert meta["n_z"] == 1                                  # the default z_operator collapses z
-    # ...and the copied yaml SAYS so (the declared z count is rewritten like the mip save's).
     declared = yaml.safe_load((dst / "acquisition.yaml").read_text())
     assert declared["z_stack"]["nz"] == 1
     channels = [c["name"] for c in meta["channels"]]

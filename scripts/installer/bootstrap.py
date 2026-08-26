@@ -7,8 +7,9 @@ binary as its payload (PyInstaller --add-data, surfacing under sys._MEIPASS/payl
 with a wheel beside the program and uv on PATH as the fallbacks.
 
 Double-clicked with no arguments, every flag has a default: the payload wheel, an env
-under the user's local app data, and the default extras with decon gated by the
-CUDA-12 probe. Flags override everything, so the scripted path is unchanged.
+under the user's local app data, and the default extras (gui, stitch, decon everywhere,
+plus decon's CUDA payload when the GPU probe sees a CUDA-12 driver). Flags override
+everything, so the scripted path is unchanged.
 
 A finished install leaves a double-clickable launcher, per platform: a desktop shortcut
 on Windows, a ~/Applications app bundle on macOS, an XDG menu entry on Linux.
@@ -18,40 +19,62 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import re
 import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 UV_HINT = ("uv not found on PATH or beside this program. Install it first "
            "(https://docs.astral.sh/uv/getting-started/installation/): "
            "macOS/Linux `curl -LsSf https://astral.sh/uv/install.sh | sh`, "
            "Windows `winget install astral-sh.uv`.")
 
-# gui is not an operator extra but a desktop install is nothing without it;
-# decon is subject to the CUDA-12 probe.
+# gui is not an operator extra but a desktop install is nothing without it. decon installs
+# on every machine (petakit's CPU path, torch MPS on Apple Silicon by pyproject marker).
 DEFAULT_EXTRAS = ("gui", "stitch", "decon")
+
+# decon's CUDA payload (cupy-cuda12x, petakit's own GPU path), added ONLY when the probe sees
+# an NVIDIA driver speaking CUDA 12: that wheel exists for no other machine.
+CUDA_EXTRA = "decon-cuda"
 
 
 def cuda12_available() -> tuple[bool, str]:
-    """``(ok, reason_if_not)`` — can this machine run a cupy-cuda12x payload right now?"""
+    """``(ok, reason_if_not)``: can this machine run a cupy-cuda12x payload right now?"""
     smi = shutil.which("nvidia-smi")
     if smi is None:
-        return False, "nvidia-smi not on PATH: no NVIDIA driver visible (petakit needs CUDA 12)"
+        return False, "nvidia-smi not on PATH, no NVIDIA driver visible"
     try:
         out = subprocess.run([smi], capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"nvidia-smi failed: {exc}"
     version = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", out)
     if version is None:
-        return False, "nvidia-smi reported no CUDA version: driver too old for CUDA 12"
+        return False, "nvidia-smi reported no CUDA version, driver too old for CUDA 12"
     if int(version.group(1)) < 12:
         return False, (f"driver speaks CUDA {version.group(1)}.{version.group(2)}, "
-                       "petakit needs 12")
+                       "cupy-cuda12x needs 12")
     return True, ""
+
+
+def gpu_backend(system: str = platform.system(), machine: str = platform.machine(),
+                cuda: Callable[[], tuple[bool, str]] = cuda12_available) -> tuple[str, str]:
+    """``(kind, note)``: which decon backend this machine will run, as the menu row's note.
+
+    A three-way FACT, never a shade: ``"cuda"`` (an NVIDIA driver speaking CUDA 12, the
+    cupy payload is added), ``"mps"`` (Apple Silicon, torch's Metal backend rides the decon
+    extra by marker), or ``"cpu"`` (everything else, Intel Macs included, and the note says
+    why CUDA was not seen).
+    """
+    ok, reason = cuda()
+    if ok:
+        return "cuda", "GPU: CUDA (petakit)"
+    if system == "Darwin" and machine == "arm64":
+        return "mps", "GPU: Apple (torch MPS)"
+    return "cpu", f"CPU only: {reason}"
 
 
 def program_dir() -> Path:
@@ -84,11 +107,12 @@ def default_env() -> Path:
     return Path.home() / ".local" / "share" / "squidxplorer" / "env"
 
 
-def default_extras(probe=cuda12_available) -> tuple[list[str], str]:
-    """The default-checked extras, with decon's shading reason when the probe fails."""
-    ok, reason = probe()
-    extras = [e for e in DEFAULT_EXTRAS if e != "decon" or ok]
-    return extras, ("" if ok else f"decon left out — {reason}")
+def default_extras(probe=gpu_backend) -> tuple[list[str], str]:
+    """The default-checked extras plus decon's CUDA payload on a CUDA machine, and the
+    probe's note naming the backend decon will run on."""
+    kind, note = probe()
+    extras = list(DEFAULT_EXTRAS) + ([CUDA_EXTRA] if kind == "cuda" else [])
+    return extras, f"decon: {note}"
 
 
 def env_python(env_dir: Path) -> Path:
@@ -372,7 +396,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--extras", default=None,
                         help="comma-separated extras, e.g. stitch,decon; '' for core only "
-                             "(default: stitch, plus decon when the machine has CUDA 12)")
+                             f"(default: gui,stitch,decon, plus {CUDA_EXTRA} when the "
+                             "machine has a CUDA-12 driver)")
     parser.add_argument("--source", default=None,
                         help="wheel, sdist or project directory to install "
                              "(default: the squidxplorer wheel beside this program)")

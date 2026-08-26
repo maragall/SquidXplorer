@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from qtpy.QtCore import QObject, Qt, QTimer, Signal
+from qtpy.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from qtpy.QtGui import QFont
 from qtpy.QtWidgets import (
     QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
@@ -32,6 +32,17 @@ from squidxplorer._measure import human_bytes
 MEMORY_POLL_MS = 1000
 
 _MONO = "Menlo, Consolas, 'DejaVu Sans Mono', monospace"
+#: The panel's one font, in PIXELS and set as a QFont (never a stylesheet font): a stylesheet
+#: font resolves at polish, after the slot height was fixed from the wrong metrics (measured:
+#: 66 px at construction, 94 px once polished, two lines shown of the three promised).
+_FONT_PX = 11
+
+
+def _mono_font():
+    f = QFont()
+    f.setFamilies([n.strip().strip("'") for n in _MONO.split(",")])
+    f.setPixelSize(_FONT_PX)
+    return f
 _BG = "#0d1117"
 _HEADER_BG = "#161b22"
 _MUTED = "#8b949e"
@@ -62,12 +73,15 @@ class LogPanel(QWidget):
     it a :class:`~squidxplorer._logpane.LogBus` and :class:`~squidxplorer._activity.ActivityLog` and
     it becomes a sink of both, or stays an inert valid widget with neither."""
 
-    #: The panel only notices the "open in new window" gesture; PlateWindow owns the window.
-    float_requested = Signal()
+    #: A FIXED slot: the header plus exactly LINES lines of the log's own font, scrollable;
+    #: never collapsed, never floated (Julio, 2026-08-25: "Re-docking the logger doesn't
+    #: work... the logger fullscreen idea will cause complications downstream"). Three lines,
+    #: measured on an 862 px screen where 132 px of log left the layer list one channel tall.
+    LINES = 3
 
     def __init__(self, bus: Optional[LogBus] = None, activity: Optional[ActivityLog] = None,
                  *, level: int = DEFAULT_LEVEL, max_lines: int = MAX_LINES,
-                 start_collapsed: bool = False, parent=None) -> None:
+                 parent=None) -> None:
         super().__init__(parent)
         self._activity = activity
         self._bridge = _LogBridge()
@@ -84,46 +98,32 @@ class LogPanel(QWidget):
         hl.setContentsMargins(8, 3, 8, 3)
         hl.setSpacing(12)
 
-        self._toggle = QPushButton()
-        self._toggle.setFlat(True)
-        self._toggle.setCursor(Qt.PointingHandCursor)
-        # ONE closing brace: the f-string's `{{` collapses to `{`, but the second line is a plain
-        # literal so its `}}` stays two braces and the sheet ends `font-size:11px;}}` — Qt then
-        # fails to parse the whole sheet and warns "Could not parse stylesheet" on every repolish
-        # (labelled `WARN vispy:` only because vispy installs the process-wide Qt message handler).
-        self._toggle.setStyleSheet(
-            f"QPushButton{{color:#c3ccd9;border:none;background:transparent;font-family:{_MONO};"
-            "font-size:11px;}")
-        self._toggle.clicked.connect(self.toggle)
-        hl.addWidget(self._toggle)
-
+        self._title = QLabel("Log")
+        self._title.setFont(_mono_font())
+        self._title.setStyleSheet(
+            f"color:#c3ccd9;background:transparent;")
+        hl.addWidget(self._title)
         self._activity_lbl = QLabel("idle")
+        self._activity_lbl.setFont(_mono_font())
         self._activity_lbl.setStyleSheet(
-            f"color:#c3ccd9;font-family:{_MONO};font-size:11px;background:transparent;")
+            f"color:#c3ccd9;background:transparent;")
         hl.addWidget(_shrinkable(self._activity_lbl), 1)
 
         self._tally_lbl = QLabel("")
+        self._tally_lbl.setFont(_mono_font())
         self._tally_lbl.setStyleSheet(
-            f"font-family:{_MONO};font-size:11px;background:transparent;")
+            f"background:transparent;")
         hl.addWidget(_shrinkable(self._tally_lbl))
 
         self._mem_lbl = QLabel(memory_line())
+        self._mem_lbl.setFont(_mono_font())
         self._mem_lbl.setStyleSheet(
-            f"color:{_MUTED};font-family:{_MONO};font-size:11px;background:transparent;")
+            f"color:{_MUTED};background:transparent;")
         hl.addWidget(_shrinkable(self._mem_lbl))
-
-        self._float_btn = QPushButton("⧉")
-        self._float_btn.setFlat(True)
-        self._float_btn.setCursor(Qt.PointingHandCursor)
-        self._float_btn.setToolTip("Open the log in a new window")
-        self._float_btn.setStyleSheet(
-            f"QPushButton{{color:#c3ccd9;border:none;background:transparent;"
-            f"font-family:{_MONO};font-size:11px;}}")
-        self._float_btn.clicked.connect(lambda *_: self.float_requested.emit())
-        hl.addWidget(self._float_btn)
 
         self.setMinimumWidth(0)
         header.setMinimumWidth(0)
+        self._header = header
         outer.addWidget(header)
 
         # Memory + run-progress bars adopted from OpenViewList (not rebuilt): they keep their
@@ -140,10 +140,10 @@ class LogPanel(QWidget):
         self._view = QPlainTextEdit()
         self._view.setReadOnly(True)
         self._view.setMaximumBlockCount(int(max_lines))   # Qt drops the oldest block: bounded, free
-        self._view.setFont(QFont("Menlo", 10))
+        self._view.setFont(_mono_font())
         self._view.setStyleSheet(
             f"QPlainTextEdit{{background:{_BG};color:#c3ccd9;border:none;"
-            f"font-family:{_MONO};font-size:11px;}}")
+            "}")
         self._view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._view.setMinimumHeight(0)
         self._view.setMinimumWidth(0)
@@ -155,29 +155,28 @@ class LogPanel(QWidget):
         self._mem_timer.setInterval(MEMORY_POLL_MS)
         self._mem_timer.timeout.connect(self._refresh_memory)
 
-        self._collapsed = False
+        self.setFixedHeight(self.slot_px())
         if bus is not None:
             self.attach_bus(bus, level=level)
         if activity is not None:
             self.attach_activity(activity)
-        if start_collapsed:
-            self.set_collapsed(True)
-        else:
-            self._sync_toggle_text()
 
-    def adopt_status_row(self, memory_caption: QWidget, memory_bar: QWidget,
-                         work_caption: QWidget, work_bar: QWidget) -> None:
-        """Re-home the window's memory/run-progress widgets into this panel. Idempotent: adding a
-        widget to a layout it's already in is a no-op move, not a duplicate."""
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
-        row.addWidget(_shrinkable(memory_caption))
-        row.addWidget(memory_bar, 1)
-        self._status_l.addLayout(row)
+    def adopt_status_row(self, work_caption: QWidget, work_bar: QWidget) -> None:
+        """Re-home the run-progress caption and bar into this slot. Idempotent: adding a widget
+        already in this layout is a no-op for Qt."""
         self._status_l.addWidget(work_caption)
         self._status_l.addWidget(work_bar)
         self._status.setVisible(True)
+        # The panel just grew; a collapsed cap frozen at the pre-adoption size CLIPS the
+        # band (Julio, live 2026-08-25: the "2%" run bar cut mid-label, no reachable
+        # summon toggle). Re-derive the cap from what the band now holds.
+
+    def slot_px(self) -> int:
+        """The slot's height: the header plus LINES lines of the view's polished font."""
+        fm = self._view.fontMetrics()
+        return int(self._header.sizeHint().height() + self.LINES * fm.lineSpacing()
+                   + 2 * int(self._view.document().documentMargin())
+                   + 2 * self._view.frameWidth())
 
     def attach_bus(self, bus: LogBus, *, level: int = DEFAULT_LEVEL) -> None:
         bus.subscribe(self._on_record)      # called on the LOGGING thread — hop via the bridge
@@ -209,6 +208,10 @@ class LogPanel(QWidget):
         colour = color_for(level_name)
         safe = (line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
         self._view.appendHtml(f'<span style="color:{colour};white-space:pre;">{safe}</span>')
+        # The banner strips are retired (2026-08-25): while COLLAPSED, this band's one line
+        # is the latest entry, so a refusal is still noticed without expanding.
+        self._latest_line = str(line)
+        self._refresh_header_line()
         up = str(level_name).upper()
         if up in self._counts:
             self._counts[up] += 1
@@ -229,32 +232,18 @@ class LogPanel(QWidget):
                          f'{"s" if warn != 1 else ""}</span>')
         self._tally_lbl.setText("  ·  ".join(parts))
 
+    #: The last log line shown (console-formatted), for the collapsed band's one line.
+    _latest_line = ""
+
     def _on_activity(self, log: ActivityLog) -> None:
-        sentence = log.sentence()
-        self._activity_lbl.setText(sentence or "idle")
+        self._activity_sentence = log.sentence() or ""
+        self._refresh_header_line()
 
-    @property
-    def collapsed(self) -> bool:
-        return self._collapsed
+    _activity_sentence = ""
 
-    def toggle(self) -> None:
-        self.set_collapsed(not self._collapsed)
-
-    def set_collapsed(self, collapsed: bool) -> None:
-        """Collapsing drops the vertical size hint to the header's height so the splitter hands the
-        space back to the panes, instead of leaving a grey gap."""
-        self._collapsed = bool(collapsed)
-        self._view.setVisible(not self._collapsed)
-        if self._collapsed:
-            self.setMaximumHeight(self.sizeHint().height())
-            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        else:
-            self.setMaximumHeight(16777215)     # Qt's QWIDGETSIZE_MAX — no cap
-            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._sync_toggle_text()
-
-    def _sync_toggle_text(self) -> None:
-        self._toggle.setText("▸ Log" if self._collapsed else "▾ Log")
+    def _refresh_header_line(self) -> None:
+        """The header's middle label: the activity sentence (the body scrolls the lines)."""
+        self._activity_lbl.setText(self._activity_sentence or "idle")
 
     def _refresh_memory(self) -> None:
         self._mem_lbl.setText(memory_line())

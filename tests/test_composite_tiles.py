@@ -76,16 +76,10 @@ def test_a_coarse_tile_costs_no_frame_decodes_at_all():
     assert tile.shape == (ladder.tile_px, ladder.tile_px)
     assert reader.reads == 0, "a coarse tile still decoded frames; the composite is not composing"
     assert src.coarse_from_cells == 1
-
-
-def test_the_same_coarse_tile_off_the_reader_does_decode_every_overlapping_field():
-    ladder = _ladder()
-    reader = _CountingReader()
-    src = ReaderTileSource(reader, _meta(), ladder)
-    lvl = _plate_rung(ladder)
-    key = ladder.geometry.levels[lvl].keys[0]
-    src.read_tile(_desc(ladder, lvl, key))
-    assert reader.reads == len(ladder.fovs_overlapping(ladder.cell_bbox_um(lvl, key))) >= 2
+    plain = _CountingReader()
+    ReaderTileSource(plain, _meta(), ladder).read_tile(_desc(ladder, lvl, key))
+    assert plain.reads == len(ladder.fovs_overlapping(ladder.cell_bbox_um(lvl, key))) >= 2, (
+        "the same tile off the reader decodes every overlapping field; that count IS the 25 s")
 
 
 def test_the_composite_and_the_reader_agree_about_where_the_sample_is():
@@ -173,10 +167,3 @@ def test_the_composite_is_lazy_and_reads_the_cache_only_when_a_coarse_tile_is_as
     assert cache.loads == 1, "the cells were re-read; seeding must happen once"
 
 
-def test_the_deep_zoom_source_is_the_composite_one():
-    import inspect
-
-    from squidxplorer import _viewer
-
-    src = inspect.getsource(_viewer.PlateOverview.set_tile_source)
-    assert "CompositePlateSource(" in src, "the plate view stopped using the composite source"

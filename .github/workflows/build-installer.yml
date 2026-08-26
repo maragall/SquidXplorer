@@ -123,14 +123,13 @@ jobs:
           print('mip wrote a complete plate; stitch wrote', ', '.join(mosaics))
           "
 
-      # The CUDA-rig default is gui,stitch,DECON — a Linux or Windows machine with an NVIDIA GPU
-      # auto-selects decon, so its INSTALL must be proven on those platforms even though no
-      # runner can run it (petakit resolves and builds without a GPU; only execution needs one).
-      # Not on macOS: petakit's cupy-cuda12x dependency has no mac wheel, which is exactly why
-      # the probe excludes decon there. Install-only, on purpose — importing petakit may touch
+      # decon is a default pack on EVERY platform since 2026-08-25 (petakit's cupy is its
+      # optional cuda12 extra now; the installer adds decon-cuda only on a CUDA-12 driver), so
+      # its INSTALL must be proven on all three runners even though none can run a GPU solve
+      # (petakit resolves without one; macOS also pulls the torch MPS wheel by marker).
+      # Install-only, on purpose — importing petakit may touch
       # CUDA, and a red job about a missing driver would be about the runner, not the product.
-      - name: Real install of the decon pack (CUDA-rig default; install-only)
-        if: runner.os != 'macOS'
+      - name: Real install of the decon pack (default on every platform; install-only)
         shell: bash
         run: |
           dist/SquidXplorer-Setup* --env envtest --extras gui,stitch,decon 2>&1 | tee decon.log

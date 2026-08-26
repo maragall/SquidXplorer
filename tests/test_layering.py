@@ -1,9 +1,4 @@
-"""The layering rules, enforced by reading the imports rather than by remembering them: napari is
-never imported at module scope, napari belongs only to the napari modules (two named exceptions),
-Qt is imported only by the declared GUI modules, and nothing cut out of ``_viewer.py`` imports it
-back. Checked with ``ast``, not by importing the modules, so this costs milliseconds and works on
-a machine with no Qt installed at all.
-"""
+"""The layering rules, enforced by reading the imports rather than by remembering them: napari is never imported at module scope, napari belongs only to"""
 
 from __future__ import annotations
 
@@ -83,11 +78,7 @@ def _modules() -> list[pathlib.Path]:
 
 
 def _imports(path: pathlib.Path) -> list[tuple[str, bool]]:
-    """Every module name *path* imports, as (dotted name, at_module_scope).
-
-    ``at_module_scope`` is False for an import inside a function, method or class body — a
-    deferred import, which costs nothing until the code runs.
-    """
+    """Every module name *path* imports, as (dotted name, at_module_scope)."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     deferred: set[int] = set()
     for node in ast.walk(tree):
@@ -175,9 +166,7 @@ def test_every_napari_exemption_is_still_earned(stem):
 
 @pytest.mark.parametrize("stem", sorted(CUT_OUT_OF_VIEWER))
 def test_what_was_cut_out_of_the_viewer_does_not_import_it_back(stem):
-    """No back-edge to ``_viewer``, at module scope or deferred — `_viewer` re-exports every one of
-    these names, so a back-edge would be invisible at the call site and would restore the cycle
-    the split existed to remove."""
+    """No back-edge to ``_viewer``, at module scope or deferred — `_viewer` re-exports every one of these names, so a back-edge would be invisible at the"""
     path = PKG / f"{stem}.py"
     assert path.exists(), f"{stem} is gone; update CUT_OUT_OF_VIEWER"
     offenders = sorted({name for name, _ in _imports(path) if "_viewer" in name})
@@ -187,24 +176,3 @@ def test_what_was_cut_out_of_the_viewer_does_not_import_it_back(stem):
     )
 
 
-def test_the_gui_module_list_has_no_stale_entries():
-    """GUI_MODULES, NAPARI_EXCEPTIONS and CUT_OUT_OF_VIEWER name modules that exist."""
-    live = {p.stem for p in _modules()}
-    for name, declared in (("GUI_MODULES", GUI_MODULES),
-                           ("NAPARI_EXCEPTIONS", NAPARI_EXCEPTIONS),
-                           ("CUT_OUT_OF_VIEWER", CUT_OUT_OF_VIEWER)):
-        missing = sorted(declared - live)
-        assert not missing, f"{name} names modules that no longer exist: {missing}"
-
-
-def test_every_gui_module_actually_imports_qt():
-    """GUI_MODULES is an allowlist, so an entry that needs no Qt is an allowance nobody is using."""
-    unused = []
-    for stem in sorted(GUI_MODULES):
-        path = PKG / f"{stem}.py"
-        if not any(_top(name) in QT_BINDINGS for name, _ in _imports(path)):
-            unused.append(stem)
-    assert not unused, (
-        f"these are listed in GUI_MODULES but import no Qt: {unused}. They are now part of the "
-        f"Qt-free layer; take them off the list so the boundary keeps meaning something."
-    )

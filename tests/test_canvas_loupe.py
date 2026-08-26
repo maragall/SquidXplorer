@@ -1,17 +1,4 @@
-"""The canvas loupe: shift-left-click magnifies, the wheel changes the factor, the camera stays put.
-
-DISPATCH IS NAPARI'S OWN. Every gesture below goes through
-``napari.utils.interactions.mouse_press_callbacks`` / ``mouse_wheel_callbacks`` against a real
-``napari.components.ViewerModel``, which is Qt-free. That is production dispatch with no GL, and it
-exercises the generator protocol a drag callback actually runs under rather than a hand-rolled
-stand-in that would agree with whatever the implementation happens to do.
-
-THE ONE THAT MATTERS MOST is ``test_the_wheel_changes_magnification_and_never_zooms_the_camera``.
-Everything about wheel-to-magnify rests on ``event.handled`` being honoured by napari's vispy
-canvas, which is read off napari's source rather than promised anywhere. If a napari upgrade
-changes it, that test is what says so — otherwise the symptom is a canvas that lurches every time
-the user adjusts the loupe.
-"""
+"""The canvas loupe: shift-left-click magnifies, the wheel changes the factor, the camera stays put."""
 
 from __future__ import annotations
 
@@ -186,19 +173,11 @@ def test_the_wheel_changes_magnification_and_never_zooms_the_camera(qapp):
         mouse_wheel_callbacks(model, down)
         assert loupe._mag_index == start
         assert _MAG_LADDER[loupe._mag_index] > 0
-    finally:
-        loupe.shutdown()
 
-
-def test_the_wheel_reaches_the_camera_again_once_the_loupe_is_down(qapp):
-    """The negative half. A gesture that suppresses zoom permanently is worse than no gesture."""
-    from napari.utils.interactions import mouse_wheel_callbacks
-
-    loupe, model, _host, _src, _said = _loupe(qapp)
-    try:
+        loupe.dismiss()
         ev = _Event(type="mouse_wheel", delta=(0.0, 1.0))
         mouse_wheel_callbacks(model, ev)
-        assert ev.handled is False
+        assert ev.handled is False, "the wheel must reach the camera again once the loupe is down"
     finally:
         loupe.shutdown()
 
@@ -238,21 +217,11 @@ def test_a_plain_click_dismisses_and_is_not_handled(qapp):
         mouse_press_callbacks(model, ev)
         assert loupe._up is False
         assert ev.handled is False, "a plain click must keep doing what it always did"
-    finally:
-        loupe.shutdown()
-
-
-def test_shift_clicking_again_dismisses_it(qapp):
-    from napari.utils.interactions import mouse_press_callbacks
-
-    meta = _meta()
-    loupe, model, _host, _src, _said = _loupe(qapp, meta)
-    try:
         pt = _centre_of(meta, 0)
         mouse_press_callbacks(model, _Event(modifiers=("Shift",), position=pt))
         assert loupe._up
         mouse_press_callbacks(model, _Event(modifiers=("Shift",), position=pt))
-        assert loupe._up is False
+        assert loupe._up is False, "shift-clicking again dismisses it"
     finally:
         loupe.shutdown()
 
@@ -304,7 +273,6 @@ def test_a_point_in_a_gap_between_fields_says_so_rather_than_magnifying_a_neighb
     meta = _meta(n_side=2)
     loupe, model, _host, src, _said = _loupe(qapp, meta)
     try:
-        # The pitch is 7x the field, so the midpoint between two fields is empty stage.
         x_gap = X0 + PITCH / 2
         mouse_press_callbacks(model, _Event(modifiers=("Shift",), position=(Y0, x_gap)))
         qapp.processEvents()
@@ -315,12 +283,7 @@ def test_a_point_in_a_gap_between_fields_says_so_rather_than_magnifying_a_neighb
 
 
 def test_the_loupe_never_reads_a_plane_on_the_qt_thread(qapp):
-    """CLAUDE.md: nothing decodes on the Qt thread. Recorded, not assumed.
-
-    The wait is on WALL CLOCK and not on a fixed number of ``processEvents`` turns: the read
-    happens on the worker's own thread, so how many GUI turns pass before it is scheduled is up to
-    the OS. A spin count makes this test fail on a busy machine and prove nothing on a fast one.
-    """
+    """CLAUDE.md: nothing decodes on the Qt thread."""
     import time
 
     from napari.utils.interactions import mouse_press_callbacks
@@ -349,29 +312,14 @@ def test_the_two_entry_points_are_one_rule():
     for cd in (10.0, 88.0, 240.0, 900.0):
         for well_px in (256, 2084, 4168):
             assert loupe_scale(cd, well_px) == loupe_scale_at(cd / well_px, well_px)
-
-
-def test_the_canvas_and_the_plate_agree_on_one_field():
-    """Two surfaces drawing a field at the SAME scale must magnify it identically.
-
-    This is what makes ``canvas_scale`` a translation rather than a second rule: the plate says
-    "so many screen px per well", the canvas says "so many canvas px per micrometre", and once
-    both are reduced to screen-px-per-image-px there is nothing left to disagree about.
-    """
-    field_px = FRAME
-    zoom = 1.74582                                   # camera px per um, one field in a 720 canvas
-    s_canvas = canvas_scale(zoom, PX_40X)
-    on_screen = s_canvas * field_px                  # what the plate would call `cd`
-    assert loupe_scale_at(s_canvas, field_px) == loupe_scale(on_screen, field_px)
+    s_canvas = canvas_scale(1.74582, PX_40X)         # camera px per um, one field in a 720 canvas
+    on_screen = s_canvas * FRAME                     # what the plate would call `cd`
+    assert loupe_scale_at(s_canvas, FRAME) == loupe_scale(on_screen, FRAME), (
+        "two surfaces drawing a field at the SAME scale must magnify it identically")
 
 
 def test_the_native_cap_is_reported_rather_than_absorbed():
-    """Asking 32x on a surface that can only give 6.1x must SAY 6.1x, and say why.
-
-    Measured on the real 40x sets: a 4168 px frame framed to fill an 860x720 window is a 6.1x
-    downsample, so every rung from 8x up returns the same picture. Silence there is a control that
-    moves and does nothing.
-    """
+    """Asking 32x on a surface that can only give 6.1x must SAY 6.1x, and say why."""
     s_canvas = canvas_scale(1.74582, PX_40X)
     _s, m2 = loupe_scale_at(s_canvas, FRAME, mag=2.0)
     _s, m32 = loupe_scale_at(s_canvas, FRAME, mag=32.0)
@@ -398,21 +346,12 @@ def test_the_inset_stays_whole_inside_its_host():
 # Lifecycle
 # ══════════════════════════════════════════════════════════════════════════════════════════
 
-def test_the_inset_never_steals_a_mouse_event(qapp):
-    """It has no controls, so every event must pass through to the canvas underneath."""
+def test_shutdown_unhooks_from_napari_and_is_idempotent(qapp):
+    """napari's callback lists hold a STRONG reference — a window that stayed registered would keep itself alive and keep handling events against a dead canvas."""
     from qtpy.QtCore import Qt
 
-    loupe, _model, _host, _src, _said = _loupe(qapp)
-    try:
-        assert loupe._inset.testAttribute(Qt.WA_TransparentForMouseEvents)
-    finally:
-        loupe.shutdown()
-
-
-def test_shutdown_unhooks_from_napari_and_is_idempotent(qapp):
-    """napari's callback lists hold a STRONG reference — a window that stayed registered would
-    keep itself alive and keep handling events against a dead canvas."""
     loupe, model, _host, _src, _said = _loupe(qapp)
+    assert loupe._inset.testAttribute(Qt.WA_TransparentForMouseEvents), "the inset must never steal a mouse event"
     n_drag = len(model.mouse_drag_callbacks)
     n_wheel = len(model.mouse_wheel_callbacks)
     loupe.shutdown()
@@ -437,13 +376,7 @@ def test_shutdown_joins_the_worker(qapp):
 
 
 def test_the_chosen_magnification_is_remembered_across_windows(qapp, tmp_path, monkeypatch):
-    """A factor the user picked with the wheel must still be there for the NEXT window.
-
-    Otherwise the wheel has to be re-taught to every window, which is the opposite of a setting.
-    SESSION-scoped, not a prefs file: `_prefs` went with the 2026-08-13 kill list, so the memory
-    is `_napari_loupe._SESSION_MAG` and it resets on the next launch — the same trade the
-    close-all checkbox took.
-    """
+    """A factor the user picked with the wheel must still be there for the NEXT window."""
     from napari.utils.interactions import mouse_press_callbacks, mouse_wheel_callbacks
 
     from squidxplorer import _napari_loupe
@@ -464,15 +397,9 @@ def test_the_chosen_magnification_is_remembered_across_windows(qapp, tmp_path, m
 
     assert _napari_loupe._SESSION_MAG == chosen
     assert _MAG_LADDER[_default_mag_index()] == chosen, "the next window must open where this left"
-
-
-def test_a_nonsense_remembered_factor_snaps_to_the_ladder(qapp, monkeypatch):
-    """A stale session value must not leave the wheel somewhere it cannot reach."""
-    from squidxplorer import _napari_loupe
-    from squidxplorer._napari_loupe import _MAG_LADDER, _default_mag_index
-
     monkeypatch.setattr(_napari_loupe, "_SESSION_MAG", 9.3)
-    assert _MAG_LADDER[_default_mag_index()] == 8.0, "nearest rung, not a value off the ladder"
-
+    assert _MAG_LADDER[_default_mag_index()] == 8.0, "a stale value snaps to the nearest rung"
     monkeypatch.setattr(_napari_loupe, "_SESSION_MAG", "not a number")
     assert _MAG_LADDER[_default_mag_index()] in _MAG_LADDER
+
+

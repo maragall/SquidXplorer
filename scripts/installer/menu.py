@@ -9,32 +9,32 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable
 
-from bootstrap import cuda12_available
+from bootstrap import gpu_backend
 
-Probe = Callable[[], tuple[bool, str]]
+Probe = Callable[[], tuple[str, str]]
 
 # Which rows start ticked lives with the extra, not per operator: core + stitch + decon in.
 DEFAULT_CHECKED = frozenset({"core", "stitch", "decon"})
 
-# petakit is cupy-cuda12x: "has a GPU" is not enough, the driver must speak CUDA 12.
-GPU_GATED = frozenset({"decon"})
+# decon installs everywhere; the GPU probe is the row's NOTE (which backend will run), never
+# a shade. bootstrap.default_extras adds the CUDA payload when the probe says CUDA.
+GPU_NOTED = frozenset({"decon"})
 
 
 @dataclass(frozen=True)
 class ExtraRow:
-    """One checkbox: an extra, the operators it unlocks, and whether it may be chosen."""
+    """One checkbox: an extra, the operators it unlocks, and a note for the row."""
 
     extra: str
     operators: tuple[str, ...]
     requires: tuple[str, ...]
     checked: bool
-    enabled: bool = True
-    reason: str = ""
+    note: str = ""
 
 
-def build_menu(probe: Probe = cuda12_available) -> tuple[ExtraRow, ...]:
+def build_menu(probe: Probe = gpu_backend) -> tuple[ExtraRow, ...]:
     """Group the registry by ``extra=``: core first, then the extras alphabetically."""
     import squidxplorer
 
@@ -42,32 +42,26 @@ def build_menu(probe: Probe = cuda12_available) -> tuple[ExtraRow, ...]:
     for name in squidxplorer.runnable_operators():
         by_extra.setdefault(squidxplorer.operator_extra(name) or "core", []).append(name)
 
-    probed: Optional[tuple[bool, str]] = None
     rows = []
     for extra in ["core"] + sorted(k for k in by_extra if k != "core"):
         operators = tuple(sorted(by_extra[extra]))
         requires = tuple(sorted(
             {m for n in operators for m in squidxplorer.operator_requires(n)}))
-        enabled, reason = True, ""
-        if extra in GPU_GATED:
-            if probed is None:
-                probed = probe()
-            enabled, reason = probed
+        note = probe()[1] if extra in GPU_NOTED else ""
         rows.append(ExtraRow(extra, operators, requires,
-                             checked=enabled and extra in DEFAULT_CHECKED,
-                             enabled=enabled, reason=reason))
+                             checked=extra in DEFAULT_CHECKED, note=note))
     return tuple(rows)
 
 
 def render(rows: tuple[ExtraRow, ...]) -> str:
     lines = []
     for row in rows:
-        box = "[x]" if row.checked else ("[ ]" if row.enabled else "[-]")
+        box = "[x]" if row.checked else "[ ]"
         line = f"{box} {row.extra:<8} {', '.join(row.operators)}"
         if row.requires:
             line += f"  (needs {', '.join(row.requires)})"
-        if not row.enabled:
-            line += f"  — shaded: {row.reason}"
+        if row.note:
+            line += f"  {row.note}"
         lines.append(line)
     return "\n".join(lines)
 

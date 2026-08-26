@@ -1,28 +1,4 @@
-"""The plate as a NAVIGATOR: left-click a well to move the active view onto that region.
-
-THE REQUEST (Spencer, 2026-08-10): "select a number of wells in the plate view, open that selection
-with an 'open view' button click, then use the wellplate view to left-click on wells to change the
-currently displayed region in the parent view."
-
-Two rules make this more than a signal, and both are what these tests are for.
-
-FIRST: A CLICK ON A WELL NAVIGATES AND SELECTS NOTHING. The blue selection is the batch an operator
-runs on. Moving the window you are looking at is not a change to that batch, and collapsing a
-six-click batch down to one well as a side effect of looking somewhere else would be silent and
-expensive. But the plain-click branch this hooks into is also the ONLY click-driven way to drop a
-selection — its own comment says so: "without it a batch selection could never be dropped by
-clicking, so it stayed selected forever". So clicking a well changes meaning; clicking EMPTY SPACE
-still clears, and Escape and Shift/Cmd-click are untouched. The escape hatch survives.
-
-SECOND: A WINDOW ADOPTS A REGION IT WAS NOT OPENED OVER. A navigator you can only steer inside a
-selection you already made is not a navigator. Adoption re-scopes the one cursor, which is why
-`_regions` had to stop being a field first (5d2f2ca) — `views()` and the plate wash read through
-the cursor, so they follow with nothing to refresh.
-
-Everything here drives the real handlers with synthetic Qt events, using the same helpers the
-existing gesture tests use, because the branch under test is chosen by mouse-event state
-(`_press`, `_panning`, `had_loupe`) that a direct call would not reproduce.
-"""
+"""The plate as a NAVIGATOR: left-click a well to move the active view onto that region."""
 
 from __future__ import annotations
 
@@ -54,8 +30,7 @@ CD = 20.0
 
 
 def _freeze(ov, cd=CD):
-    """Deterministic widget pixels — otherwise paintEvent's auto-fit moves the plate under the
-    synthetic coordinates. Same freeze `_sel_overview` applies, on a really-ingested overview."""
+    """Deterministic widget pixels — otherwise paintEvent's auto-fit moves the plate under the synthetic coordinates."""
     ov._user_view = True
     ov._cd, ov._ox, ov._oy = cd, 0.0, 0.0
 
@@ -93,19 +68,6 @@ def _plate_with_view(qapp, root, regions):
 
 # --- the headline -------------------------------------------------------------------------------
 
-def test_a_plain_click_moves_the_active_view(qapp, napari_pane_stub, squid_dataset):
-    """THE REQUEST. A view is open over B2; clicking B3 shows B3 in it."""
-    root, _ = squid_dataset
-    win, view = _plate_with_view(qapp, root, ["B2"])
-    try:
-        _click(win._overview, "B3")
-        _fire_pending_navigation(win._overview)
-        _drain_until(qapp, lambda: view._cursor.region == "B3", timeout=10)
-        assert view._cursor.region == "B3", "the active view did not follow the click"
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
 def test_a_plain_click_leaves_the_operator_selection_alone(qapp, napari_pane_stub, squid_dataset):
     """RULE ONE. The batch the user built must survive navigating away from it."""
     root, _ = squid_dataset
@@ -127,7 +89,7 @@ def test_a_plain_click_leaves_the_operator_selection_alone(qapp, napari_pane_stu
 
 def test_clicking_a_well_the_view_never_held_still_navigates_there(qapp, napari_pane_stub,
                                                                     squid_dataset):
-    """RULE TWO. Adoption — and the payoff of `_regions` reading through the cursor."""
+    """THE REQUEST: a view over B2 follows a click on B3, adopting it through the cursor."""
     root, _ = squid_dataset
     win, view = _plate_with_view(qapp, root, ["B2"])
     mgr = win._viewer_manager
@@ -145,9 +107,7 @@ def test_clicking_a_well_the_view_never_held_still_navigates_there(qapp, napari_
 
 def test_adopting_does_not_reload_the_region_already_on_screen(qapp, napari_pane_stub,
                                                                 squid_dataset):
-    """A re-scope that snapped back to index 0 would reload the mosaic twice and land on the wrong
-    region. `RegionCursor.set_order` is built to keep you where you are; this pins that we rely on
-    it rather than re-implementing it."""
+    """A re-scope that snapped back to index 0 would reload the mosaic twice and land on the wrong region."""
     root, _ = squid_dataset
     win, view = _plate_with_view(qapp, root, ["B2"])
     loads = []
@@ -194,8 +154,7 @@ def test_the_plate_stops_navigating_when_the_last_view_closes(qapp, napari_pane_
 
 
 def test_clicking_empty_space_still_clears_the_selection(qapp, napari_pane_stub, squid_dataset):
-    """THE ESCAPE HATCH. This branch exists because a batch could otherwise never be dropped by
-    clicking; navigation must not take that away."""
+    """THE ESCAPE HATCH."""
     root, _ = squid_dataset
     win = _plate(qapp, root)
     ov = win._overview
@@ -216,9 +175,7 @@ def test_clicking_empty_space_still_clears_the_selection(qapp, napari_pane_stub,
 
 def test_a_double_click_opens_a_window_without_moving_the_first(qapp, napari_pane_stub,
                                                                 squid_dataset):
-    """Qt delivers press/release/dblclick, so the release already started a navigation. Without the
-    cancel a double-click would move the ACTIVE view off its region — dropping its operator layers
-    on the reload — and then open a second window over the same well."""
+    """Qt delivers press/release/dblclick, so the release already started a navigation."""
     root, _ = squid_dataset
     win, view = _plate_with_view(qapp, root, ["B2"])
     ov = win._overview
@@ -253,8 +210,7 @@ def test_a_new_press_supersedes_a_pending_navigation(qapp, napari_pane_stub, squ
 
 
 def test_no_navigation_timer_survives_the_plate_close(qapp, napari_pane_stub, squid_dataset):
-    """A single-shot timer that fires into a widget its owner has dropped is the shape
-    `test_window_lifetime` exists for — and this one reaches OUT of the widget when it lands."""
+    """A single-shot timer that fires into a widget its owner has dropped is the shape `test_window_lifetime` exists for — and this one reaches OUT of the"""
     root, _ = squid_dataset
     win, view = _plate_with_view(qapp, root, ["B2"])
     ov = win._overview
@@ -268,9 +224,7 @@ def test_no_navigation_timer_survives_the_plate_close(qapp, napari_pane_stub, sq
 
 def test_navigating_moves_the_red_frame_without_the_user_opening_a_region(
         qapp, napari_pane_stub, squid_dataset):
-    """The frame follows what the view shows, but `_current_well` must stay None: `activate` means
-    "the user explicitly opened this region" and SCOPES OPERATOR RUNS to it. Navigating is not
-    that, and test_nav_wiring pins the same distinction for merely opening a plate."""
+    """The frame follows what the view shows, but `_current_well` must stay None: `activate` means "the user explicitly opened this region" and SCOPES"""
     root, _ = squid_dataset
     win, view = _plate_with_view(qapp, root, ["B2"])
     try:

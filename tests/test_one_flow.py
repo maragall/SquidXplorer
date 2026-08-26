@@ -1,11 +1,4 @@
-"""Run-vs-save is ONE FLOW (Julio, 2026-08-25): "They can preview on the window... After
-they preview, they can say run on plate, and then it will save to disk. No body runs on
-whole plate to preview."
-
-The operators row carries exactly Preview (window scope, writes nothing) and Run on plate
-(the one save path, which is also the bulk path now that the right-edge dock's cards are
-retired). The save checkbox is gone.
-"""
+"""Run-vs-save is ONE FLOW (Julio, 2026-08-25): "They can preview on the window..."""
 
 from __future__ import annotations
 
@@ -74,7 +67,7 @@ def test_the_save_checkbox_is_gone(view):
 def test_every_operator_row_button_fits_its_text(view):
     """Julio: "Watchout, because some buttons are too small to fit text"."""
     win, _calls = view
-    for btn in (win._btn_preview, win._btn_run_plate, win._btn_controls):
+    for btn in (win._btn_preview, win._btn_run_plate):
         needed = btn.fontMetrics().horizontalAdvance(btn.text())
         assert btn.sizeHint().width() >= needed, (
             f"{btn.text()!r}: sizeHint {btn.sizeHint().width()} px cannot fit its "
@@ -83,12 +76,7 @@ def test_every_operator_row_button_fits_its_text(view):
 
 
 def test_an_roi_preview_runs_only_the_boxes_fovs_all_channels(qapp, napari_pane_stub):
-    """Julio (2026-08-25): "If I run decon on an ROI, it should run faster - this allows us
-    to run the decon on all channels, since we're able to run it on small subsets." The
-    existing ROI machinery IS the mechanism: with a box drawn, Preview scopes the run to the
-    mapping {region: [fov, ...]} of the FOVs the box touches (projection.scope_wells' own
-    spelling), the engine runs every channel of those FOVs, and delivery crops the result to
-    the box at its stage position (deliver_result's _crop_levels_to_bbox)."""
+    """Julio (2026-08-25): "If I run decon on an ROI, it should run faster - this allows us to run the decon on all channels, since we're able to run it on"""
     from squidxplorer._region_viewer import RegionViewer
 
     frame, px = 16, 1.0

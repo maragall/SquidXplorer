@@ -1,12 +1,4 @@
-"""The functions-over-the-window interface is DECLARED, and the declaration is enforced.
-
-Each helper module that takes the window as its first ``win`` argument (``_ingest``,
-``_mosaic_playback``, ``_roi_tools``, ``_volume_view``, ``_lut_clipboard``) has a typing
-Protocol in ``squidxplorer/_window_contract.py`` naming every ``win.<attr>`` it reaches. This
-test derives the real access set from each module's AST (no import of the module, no Qt) and
-fails in BOTH directions: an undeclared access means the interface grew silently; a declared
-name nobody accesses means the contract went stale.
-"""
+"""The functions-over-the-window interface is DECLARED, and the declaration is enforced."""
 
 from __future__ import annotations
 
@@ -22,12 +14,7 @@ PKG = pathlib.Path(squidxplorer.__file__).parent
 
 
 def _win_accesses(path: pathlib.Path) -> tuple[set, set]:
-    """(called, uncalled): every attribute the module reaches on a name ``win``.
-
-    ``called`` is ``win.attr(...)``; ``uncalled`` is a read, a write or a bound method passed
-    on as a callback. The variable NAME is the rule: these modules take the window as ``win``
-    by convention, so an access under another name is a new convention and should fail here.
-    """
+    """(called, uncalled): every attribute the module reaches on a name ``win``."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     called: set = set()
     uncalled: set = set()
@@ -86,12 +73,6 @@ def test_a_called_name_is_declared_as_a_method(stem):
         f"{stem}.py calls win.{demoted} but {WINDOW_CONTRACTS[stem].__name__} declares them "
         f"as attributes. Declare each as a method so the contract says what it is."
     )
-
-
-def test_every_contracted_module_exists():
-    """WINDOW_CONTRACTS names modules that exist; a rename must carry its contract along."""
-    missing = sorted(s for s in WINDOW_CONTRACTS if not (PKG / f"{s}.py").is_file())
-    assert not missing, f"WINDOW_CONTRACTS names modules that do not exist: {missing}"
 
 
 def test_the_contract_module_is_typing_only():

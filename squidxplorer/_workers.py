@@ -50,13 +50,23 @@ class _OperatorWorker(QThread):
 
     def __init__(self, operator: str, reader, meta, fov_index: dict, out_dir: str,
                  regions=None, save: bool = True, n_fovs=1, operator_kwargs=None,
-                 z_level: int = 0):
+                 z_level: int = 0, preview_z_level=None, windows=None,
+                 deliver_depth: bool = False):
         super().__init__()
         self._operator = operator
+        # Ruling aa: a preview asked from a 3D tab gets EVERY plane of a depth-keeping result
+        # (a volume to look at); a 2D tab keeps the plane it is on.
+        self._deliver_depth = bool(deliver_depth)
+        #: ``{(region, fov): (r0, r1, c0, c1)}``, an ROI preview's own windows (ruling z).
+        self._windows = {(str(r), int(f)): tuple(int(v) for v in w)
+                         for (r, f), w in (windows or {}).items()}
         # The z plane the DISPLAY gets from a depth-keeping result: the requesting view's own
         # in-view z (Julio, 2026-08-25: "decon runs on a z-level that's not in view"). Clamped
         # per result in _result_pixels; 0 for a run no view asked for.
         self._z_level = max(0, int(z_level or 0))
+        # A 2D tab's preview COMPUTES only that plane too (None = full depth; dispatch
+        # applies it only to a depth-keeping per-FOV preview, by declaration).
+        self._preview_z = None if preview_z_level is None else int(preview_z_level)
         self._reader, self._meta = reader, meta
         self._fov_index = fov_index
         self._out_dir = out_dir
@@ -137,8 +147,9 @@ class _OperatorWorker(QThread):
         self.resultReady.emit(region, fov, self._result_pixels(image, well))
 
     def _result_pixels(self, image, well):
-        """What goes to the layer: a region operator's ``(C, Nz, Y, X)`` volume, else one plane."""
-        if self._region_op:
+        """What goes to the layer: a region operator's ``(C, Nz, Y, X)`` volume, a volume
+        view's full-depth stack (ruling aa), else one plane."""
+        if self._region_op or self._deliver_depth:
             return image[0]                       # (C, Nz, Y, X)
         self._z_dropped_note(int(image.shape[2]))
         return well                               # (C, Y, X), cut at the in-view z in _on_well
@@ -151,8 +162,8 @@ class _OperatorWorker(QThread):
         z_shown = min(self._z_level, depth - 1)
         log.info("%s: the layer shows z plane %d of %d - the plane the asking view is on. A "
                  "per-FOV operator's mosaic is re-fused for display one plane at a time, and "
-                 "only that plane is kept; the WRITTEN plate carries all %d. Stitch the region "
-                 "to see the whole volume in 3D.",
+                 "only that plane is kept; the WRITTEN plate carries all %d. Preview from a 3D "
+                 "tab to see the whole volume.",
                  self._operator, z_shown, depth, depth)
 
     def _on_error(self, region, fov, exc):
@@ -192,9 +203,31 @@ class _OperatorWorker(QThread):
     def progress_report(self):
         return self._progress.report()
 
+    def _roi_line(self) -> None:
+        """ONE INFO line per windowed run: the window, the halo it is padded with, the planes."""
+        from squidxplorer._engine import operator_reduces_depth, run_halo_px
+
+        nz = len(self._meta.get("z_levels") or [0])
+        reduces = operator_reduces_depth(self._operator)
+        solved_z = 1 if (self._preview_z is not None and not reduces) else nz
+        planes = 1 if reduces else solved_z
+        try:
+            halo = run_halo_px(self._reader, self._operator, self._operator_kwargs, solved_z)
+        except Exception as exc:                  # noqa: BLE001 - the run will name it itself
+            halo = f"? ({type(exc).__name__})"
+        if len(self._windows) == 1:
+            (r0, r1, c0, c1), = self._windows.values()
+            what = f"{c1 - c0}x{r1 - r0} px window"
+        else:
+            total = sum((r1 - r0) * (c1 - c0) for r0, r1, c0, c1 in self._windows.values())
+            what = f"{len(self._windows)} windows, {total} px"
+        log.info("ROI %s: %s + %s px halo, %d plane(s)", self._operator, what, halo, planes)
+
     def _run_body(self, _run_metrics):
         # say 0 of N before any work, so the bar is determinate from its first frame
         self.runProgress.emit(self._progress.report())
+        if self._windows:
+            self._roi_line()
         try:
             # the ONE save-vs-preview dispatch; this worker only adds Qt signals around it
             result = run_operator_once(
@@ -203,7 +236,8 @@ class _OperatorWorker(QThread):
                 # a region operator runs one well at a time: peak memory is workers x one fused mosaic
                 workers=1 if self._region_op else _VIEWER_WORKERS,
                 parameters=self._operator_kwargs, tiff=False,
-                on_well=self._on_well, on_error=self._on_error, stop=self._stop.is_set)
+                on_well=self._on_well, on_error=self._on_error, stop=self._stop.is_set,
+                preview_z_level=self._preview_z, windows=self._windows or None)
             if result.stopped:
                 _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
                 return  # window closing / re-opening; drop out cleanly (no final/written emit)
@@ -351,6 +385,32 @@ class _FocusWorker(QThread):
 
 # (The Detect-nuclei surface — _SpotWorker, nuclei_operator, _spot_stages — was
 # shelved 2026-08-24 with the spot/cellpose operators. Git history reinstates.)
+
+
+class _AutoContrastWorker(QThread):
+    """OUR auto-contrast over the pixels ON SCREEN, off the Qt thread (the worker rule):
+    ``samples`` is ``{channel: lazy_or_array}``; ``done`` carries ``{channel: (lo, hi)}``."""
+
+    done = Signal(object)
+    problem = Signal(str)
+
+    def __init__(self, samples: dict, parent=None) -> None:
+        super().__init__(parent)
+        self._samples = dict(samples)
+
+    def run(self) -> None:                             # pragma: no cover - Qt thread
+        from squidxplorer._contrast import auto_contrast
+
+        out = {}
+        try:
+            for channel, sample in self._samples.items():
+                window = auto_contrast(np.asarray(sample))
+                if window is not None:
+                    out[str(channel)] = window
+        except Exception as exc:                       # noqa: BLE001 - named to the window
+            self.problem.emit(f"{type(exc).__name__}: {exc}")
+            return
+        self.done.emit(out)
 
 
 class _FlatfieldWorker(QThread):
@@ -633,8 +693,8 @@ class _PreviewWorker(QThread):
             self.tileReady.emit(ri, ci, region, np.asarray(hit).astype(self._dtype), hit.box)
             self.cache_hits += 1
         self.cache_reads = len(by_region) - self.cache_hits
-        log.info("plate preview at t=%d: %d of %d wells served from the cell cache (%s)",
-                 self._t, self.cache_hits, len(by_region), self._cache)
+        log.debug("plate preview at t=%d: %d of %d wells served from the cell cache (%s)",
+                  self._t, self.cache_hits, len(by_region), self._cache)
         return remaining
 
     def _seed_from_well_images(self, plan: list) -> list:
@@ -672,8 +732,8 @@ class _PreviewWorker(QThread):
                 self._cache.put(region, tile, box)
             self.well_image_hits += 1
         if self.well_image_hits:
-            log.info("plate preview at t=%d: %d well(s) seeded from mosaic_view/wells, "
-                     "skipping their FOV walk.", self._t, self.well_image_hits)
+            log.debug("plate preview at t=%d: %d well(s) seeded from mosaic_view/wells, "
+                      "skipping their FOV walk.", self._t, self.well_image_hits)
         return remaining
 
     def _backfill_well_images(self) -> None:

@@ -14,6 +14,14 @@ _SAMPLE = 100_000
 
 #: A window narrower than this is treated as degenerate.
 _MIN_SPAN = 10.0
+#: Foreground membership for the ceiling: this many background sigmas above the mode, and
+#: at least this many sampled pixels (a lone hot pixel is not a population).
+_FOREGROUND_SIGMA = 5.0
+#: The background population for the floor: pixels under this many sigmas above the mode,
+#: and the percentile of it the floor sits at (< 1% of background renders above black).
+_BACKGROUND_SIGMA = 6.0
+_BACKGROUND_PCT = 99.5
+_FOREGROUND_MIN_PX = 16
 _FALLBACK_SPAN = 100.0
 
 
@@ -41,7 +49,26 @@ def auto_contrast(data: Any, pmax: float = 99.9,
     bg_std = float(np.std(background)) if background.size else abs(mode_val) * 0.1
 
     lo = mode_val + 2.0 * bg_std
+    # THE FLOOR SITS ABOVE THE BACKGROUND (Julio, 2026-08-25: the 561 background rendered as
+    # yellow speckle). Measured on G7 561 / FOV 1 / z 7 (mode 896, sigma 18.7): mode + 2 sigma
+    # leaves 16.7% of background pixels above black, + 3 sigma 7.7%, + 4 sigma 3.0%; the 99th
+    # percentile of the background population (pixels under mode + 6 sigma) leaves 0.99%.
+    # The below-median sigma is a half-normal under-estimate, so the percentile is the rule.
+    background_population = flat[flat < mode_val + _BACKGROUND_SIGMA * bg_std]
+    if background_population.size:
+        lo = max(lo, float(np.percentile(background_population, _BACKGROUND_PCT)))
     hi = float(np.percentile(flat, pmax))
+    # THE CEILING IS FOREGROUND-AWARE (Julio, 2026-08-25: "the napari autocontrast SUCKS for
+    # the G7 dataset"; a sparse field: bright cells on black). On a plane whose objects are
+    # a fraction of a percent of the pixels, a plain 99.9th percentile sits in the noise and
+    # clips every object; napari's min/max lets one hot pixel set the ceiling and renders the
+    # objects dim. The ceiling is the 99th percentile of the pixels ABOVE the background floor
+    # when that is higher: a lone hot pixel cannot carry it, an object population can.
+    # The population well clear of the background (5 sigma: a 2 sigma cut is mostly the
+    # noise tail on a sparse field), and large enough that a lone hot pixel cannot form it.
+    foreground = flat[flat > mode_val + _FOREGROUND_SIGMA * bg_std]
+    if foreground.size >= _FOREGROUND_MIN_PX:
+        hi = max(hi, float(np.percentile(foreground, 99.5)))
 
     if not np.isfinite(lo) or not np.isfinite(hi):
         return None
@@ -69,8 +96,16 @@ def opening_z(n_planes: int) -> int:
     return max(0, (int(n_planes) - 1) // 2)
 
 
-def sample_plane(levels: Any) -> Optional[np.ndarray]:
-    """The cheapest representative plane to derive a window from: coarsest level, opening z.
+#: The finest rung a SEED window may be measured on: a ~2k x 2k plane (one full-resolution
+#: field). Julio, 2026-08-25: a sparse field's objects are attenuated up to 1/s^2 on the
+#: coarsest rung, so the first paint of G7 was dim; the seed reads the finest rung this
+#: budget allows, off the Qt thread like every window.
+SEED_MAX_PX = 4_200_000
+
+
+def sample_plane(levels: Any, max_px: Optional[int] = None) -> Optional[np.ndarray]:
+    """The cheapest representative plane to derive a window from: coarsest level, opening z,
+    or, given *max_px*, the FINEST level whose plane fits that many pixels.
 
     RIGHT FOR A WINDOW, WRONG FOR A CEILING. The coarsest level is mean-downsampled, so its
     maximum is an UNDER-estimate of level 0's -- a hot pixel at stride ``s`` is attenuated by up
@@ -82,6 +117,14 @@ def sample_plane(levels: Any) -> Optional[np.ndarray]:
     if levels is None:
         return None
     arr = levels[-1] if isinstance(levels, (list, tuple)) else levels
+    if max_px is not None and isinstance(levels, (list, tuple)):
+        for candidate in levels:                 # finest first
+            shape = getattr(candidate, "shape", None)
+            if shape is None or len(shape) < 2:
+                continue
+            if int(shape[-1]) * int(shape[-2]) <= int(max_px):
+                arr = candidate
+                break
     if arr is None:
         return None
     a = np.asarray(arr[opening_z(arr.shape[0])]) if getattr(arr, "ndim", 0) == 3 \

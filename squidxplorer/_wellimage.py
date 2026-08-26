@@ -375,7 +375,7 @@ def write_well_images(reader: Any, meta: dict, *, time_point: int = 0,
     positions = meta.get("fov_positions_um") or {}
     px = meta.get("pixel_size_um")
     if root is None or not positions or px in (None, 0):
-        _log.info("well-image backfill skipped: no acquisition path or no stage geometry.")
+        _log.debug("well-image backfill skipped: no acquisition path or no stage geometry.")
         return 0
     tdir = _timepoint_dir(root, time_point)
     if tdir is None:
@@ -391,7 +391,7 @@ def write_well_images(reader: Any, meta: dict, *, time_point: int = 0,
 
     slots = getattr(reader, "padded_slots", None)
     if slots and (z in slots.z_levels or int(time_point) in slots.time_points):
-        _log.info("well-image backfill skipped: z=%d at t=%d is itself padded - there is no "
+        _log.debug("well-image backfill skipped: z=%d at t=%d is itself padded - there is no "
                   "data at that plane to write.", z, time_point)
         return 0
     padded_by_region = dict(slots.fovs) if slots else {}
@@ -402,21 +402,21 @@ def write_well_images(reader: Any, meta: dict, *, time_point: int = 0,
     slot_w = max(1, int(round(frame_w / factor)))
     for region in meta.get("regions", []):
         if not _WELL_ID_RE.match(str(region)):
-            _log.info("well-image backfill: region %r is not a well id; skipping it, as Squid "
+            _log.debug("well-image backfill: region %r is not a well id; skipping it, as Squid "
                       "would.", region)
             continue
         fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
         if not fovs:
             continue
         if set(fovs) <= set(padded_by_region.get(str(region), ())):
-            _log.info("well-image backfill: %s has no data at all (every FOV is padded); "
+            _log.debug("well-image backfill: %s has no data at all (every FOV is padded); "
                       "no file.", region)
             continue
         try:
             offsets = fov_offsets_px(positions, region, fovs, px)
             full_h, full_w = mosaic_extent_px(offsets, (frame_h, frame_w))
         except (KeyError, ValueError) as exc:
-            _log.info("well-image backfill: %s has no placeable geometry (%s); skipping it.",
+            _log.debug("well-image backfill: %s has no placeable geometry (%s); skipping it.",
                       region, exc)
             continue
         per_region[str(region)] = (fovs, offsets)

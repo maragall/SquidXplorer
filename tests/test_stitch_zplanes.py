@@ -1,9 +1,4 @@
-"""Per-plane 3-D fusion: every z plane fused, with ONE solved geometry.
-
-The fixture is tests/test_stitch.py's synthetic mosaic with a Z axis bolted on: each z plane is
-the master texture plus a per-plane constant, so a plane is identifiable by its pixel values
-alone and a swapped/duplicated/missing plane is a numeric failure, not a shape one.
-"""
+"""Per-plane 3-D fusion: every z plane fused, with ONE solved geometry."""
 
 from __future__ import annotations
 
@@ -58,17 +53,12 @@ _PASSTHROUGH = "zplanes_passthrough"
 
 @pytest.fixture(autouse=True, scope="module")
 def _register_passthrough():
-    """Registered for this module only: `add_operator` writes to a process-global table that
-    tests/test_operator_integration.py asserts the exact contents of."""
+    """Registered for this module only: `add_operator` writes to a process-global table that tests/test_operator_integration.py asserts the exact contents of."""
     add_operator(_PASSTHROUGH, plane_op(_passthrough))
     try:
         yield
     finally:
         _OPERATORS.pop(_PASSTHROUGH, None)
-
-
-def _identity_profile(shape=(TILE, TILE)) -> FlatfieldProfile:
-    return FlatfieldProfile(np.ones(shape, dtype=np.float32), None)
 
 
 def _vignette_profile(shape=(TILE, TILE)) -> FlatfieldProfile:
@@ -88,10 +78,8 @@ def test_a_plane_op_fuses_every_z_plane(master):
 
     assert out.ndim == 5
     assert out.shape[2] == N_Z, f"expected {N_Z} fused z planes, got {out.shape[2]}"
-    # every plane distinct: rules out "plane 0 written N_Z times"
     signatures = {out[0, 0, z].tobytes() for z in range(N_Z)}
     assert len(signatures) == N_Z, "fused planes are not distinct — z was broadcast, not fused"
-    # and in the right order: a shuffled z axis passes the distinctness check but not this
     means = [float(out[0, 0, z].mean()) for z in range(N_Z)]
     assert means == sorted(means), f"z planes came out in the wrong order: {means}"
 
@@ -105,8 +93,7 @@ def test_a_z_reducer_is_unchanged_and_still_collapses_z(master):
 
 
 def test_the_z_loop_reads_one_plane_at_a_time(master):
-    """Streaming, not stacking (~9.4 GB on the real set otherwise). Asserted on read ORDER, not
-    RSS: all of plane k's reads must happen before any of plane k+1's."""
+    """Streaming, not stacking (~9.4 GB on the real set otherwise)."""
     reader = _ZReader(master)
     stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator=None,
                   register=False, correct_illumination=False)
@@ -119,9 +106,7 @@ def test_the_z_loop_reads_one_plane_at_a_time(master):
 
 
 def test_every_plane_is_fused_with_the_same_solved_offsets(master):
-    """Registration is solved once, on one raw plane; a per-plane re-solve would shear the stack
-    with depth. Proven two ways: the solver is called once, and each fused plane equals a
-    single-plane fuse of the same data to within 1 count (float32 blend, uint16 round-trip)."""
+    """Registration is solved once, on one raw plane; a per-plane re-solve would shear the stack with depth."""
     error = {1: (0.0, 5.0), 2: (4.0, 0.0)}      # a real, registrable stage error to solve away
     reader = _ZReader(_master(), error_px=error)
 
@@ -173,8 +158,7 @@ def test_the_placement_reports_one_solve_for_the_whole_stack(master):
 
 
 def _flatfield_test_op(profiles: dict):
-    """What the shelved `flatfield` operator declared, test-owned: a plane-op stamped
-    corrects_illumination=True with per-channel binding via for_channel."""
+    """What the shelved `flatfield` operator declared, test-owned: a plane-op stamped corrects_illumination=True with per-channel binding via for_channel."""
     from squidxplorer.projection import plane_op
 
     def _op_for(profile):
@@ -190,8 +174,7 @@ def _flatfield_test_op(profiles: dict):
 
 
 def test_the_flatfield_correction_is_not_idempotent(master):
-    """The premise of the guard, measured rather than assumed: correcting twice divides the dim
-    corners by the gain field's square, it is not a no-op."""
+    """The premise of the guard, measured rather than assumed: correcting twice divides the dim corners by the gain field's square, it is not a no-op."""
     profile = _vignette_profile()
     plane = master[:TILE, :TILE]
     once = correct_flatfield(plane, profile)
@@ -205,8 +188,7 @@ def test_the_flatfield_correction_is_not_idempotent(master):
 
 
 def test_stitching_a_correcting_operator_with_read_path_correction_refuses(master):
-    """Keyed on the corrects_illumination DECLARATION, not any operator name: exactly one of
-    the read path and the operator may flat-field per pass."""
+    """Keyed on the corrects_illumination DECLARATION, not any operator name: exactly one of the read path and the operator may flat-field per pass."""
     profile = _vignette_profile()
     name = "ff_test_guard"
     add_operator(name, _flatfield_test_op({c: profile for c in CHANNELS}))
@@ -223,9 +205,7 @@ def test_stitching_a_correcting_operator_with_read_path_correction_refuses(maste
 
 
 def test_each_single_correction_path_stays_available_and_corrects_exactly_once(master):
-    """The guard must refuse the double, never the single. Fusing raw data then correcting the
-    result is NOT equivalent to correcting per-tile before the blend, so what's asserted is that
-    the two single-correction spellings agree with each other and both differ from uncorrected."""
+    """The guard must refuse the double, never the single."""
     profile = _vignette_profile()
     fovs = list(range(GRID * GRID))
 
@@ -252,9 +232,7 @@ def test_each_single_correction_path_stays_available_and_corrects_exactly_once(m
 
 
 def test_stitching_a_label_operator_refuses_rather_than_averaging_object_ids(master):
-    """Feathered blending of integer object ids produces objects that do not exist. The guard
-    reads produces=="labels" off the record — a test-registered labels op, since the built-in
-    segmenters were shelved 2026-08-24 (the labels vocabulary itself stays plugin surface)."""
+    """Feathered blending of integer object ids produces objects that do not exist."""
     from squidxplorer.projection import labels_op, plane_op
 
     name = "labels_zp_test"

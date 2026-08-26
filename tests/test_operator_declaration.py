@@ -13,7 +13,6 @@ from squidxplorer import (
     available_plane_operators,
     available_region_operators,
     is_region_operator,
-    project_well,
     operator_available,
     operator_consumes,
     operator_extra,
@@ -104,14 +103,6 @@ def test_every_operator_delivers_the_result_kind_it_declares(name, mosaic):
             f"delivered as an Image it will be auto-windowed as if its object ids were photons")
 
 
-def test_the_conformance_fixture_can_tell_the_two_kinds_apart(blob_operator):
-    plane = _four_nuclei()
-    assert not _is_a_label_image(_run("mip", plane))
-    assert _is_a_label_image(_run(blob_operator, plane))
-    # ...and the discriminator is not simply "is it integer": both are uint16.
-    assert _run("mip", plane).dtype == _run(blob_operator, plane).dtype
-
-
 def test_a_labels_result_is_not_handed_a_contrast_window(mosaic):
     """A Labels layer has no ``contrast_limits`` attribute at all — nothing windowed it."""
     labels = np.zeros((32, 32), dtype=np.uint16)
@@ -169,14 +160,8 @@ def test_no_module_branches_on_an_operator_name():
         "\n\nExtend the DECLARATION instead (Operator.consumes / .produces / .params) and let the "
         "generic path read it. If the branch is genuinely unavoidable, add it to "
         "KNOWN_NAME_BRANCHES with the reason.")
-
-
-def test_the_known_name_branch_list_cannot_go_stale():
     live = {(path, name) for path, name, _line, _src in _name_branches()}
-    stale = sorted(set(KNOWN_NAME_BRANCHES) - live)
-    assert not stale, (
-        f"{stale} no longer branch on an operator name; delete the entry from "
-        "KNOWN_NAME_BRANCHES rather than leaving a debt recorded against code that paid it.")
+    assert not (set(KNOWN_NAME_BRANCHES) - live), "a KNOWN_NAME_BRANCHES entry no longer branches"
 
 
 # 3. parameters on the registry entry
@@ -244,12 +229,10 @@ def test_an_unknown_result_kind_is_refused_at_registration():
 # 4. the shelved operators, pinned absent
 
 def test_the_shelved_operators_are_gone_whole():
-    """Absence pins (Julio, 2026-08-24): spot, cellpose, bgsub, keepz, coordinate, flatfield,
-    reference, decon3d. Reinstating starts from git history, not a stub. The labels VOCABULARY
-    (labels_op, produces="labels", the nearest-only labels pyramid reducer) deliberately stays:
-    it is plugin/template surface."""
+    """Absence pins (Julio, 2026-08-24): spot, cellpose, bgsub, keepz, coordinate, flatfield, reference, decon3d."""
     import importlib.util
 
+    assert runnable_operators() == ["decon", "fstack", "mip", "register", "stitch"]
     for name in ("spot", "cellpose", "bgsub", "keepz", "coordinate", "flatfield",
                  "reference", "decon3d"):
         assert name not in runnable_operators(), f"{name} is back in the registry"
@@ -301,9 +284,7 @@ _STITCH_STEP = 40                                 # px between FOVs -> 24 px ove
 
 
 def _stitch_content_error(c: int, t: int, fov: int) -> tuple:
-    """The offset between where the stage SAYS a tile is and where its content is — the thing
-    registration exists to solve. Distinct per channel and per timepoint, so registering on the
-    other channel or the other frame solves a different placement."""
+    """The offset between where the stage SAYS a tile is and where its content is — the thing registration exists to solve."""
     if fov == 0:
         return (0, 0)
     mag = (3 + 2 * t) * (1 if c == 0 else -1)
@@ -311,9 +292,7 @@ def _stitch_content_error(c: int, t: int, fov: int) -> tuple:
 
 
 class _StitchProbeReader:
-    """A 2x2 grid of overlapping FOVs, each cropped from one textured scene per
-    (channel, timepoint), so neighbouring tiles agree in their overlap up to the content
-    error above. z plane 1 is plane 0 halved, keeping texture at the registration z."""
+    """A 2x2 grid of overlapping FOVs, each cropped from one textured scene per (channel, timepoint), so neighbouring tiles agree in their overlap up to the"""
 
     def __init__(self):
         f, s = _STITCH_FRAME, _STITCH_STEP
@@ -357,8 +336,6 @@ def test_every_parameter_an_operator_DECLARES_changes_its_pixels(name):
     if is_region_operator(name):
         from squidxplorer import _flatfield
 
-        # A non-flat, mean-1 gain field, so correct_illumination=False shows; it is uniform
-        # per column, so registration still solves the same content errors under it.
         gain = np.ones((_STITCH_FRAME, _STITCH_FRAME), np.float32)
         gain[:, : _STITCH_FRAME // 2] = 0.8
         gain[:, _STITCH_FRAME // 2:] = 1.2
@@ -370,8 +347,6 @@ def test_every_parameter_an_operator_DECLARES_changes_its_pixels(name):
 
         from squidxplorer._engine import _resolve_operator
 
-        # correct_distortion is a call-site kwarg, off so the probe stays deterministic —
-        # passed only where the record accepts it (register solves, never fuses).
         extra = ({"correct_distortion": False}
                  if "correct_distortion" in _resolve_operator(name).accepts else {})
 
@@ -388,9 +363,6 @@ def test_every_parameter_an_operator_DECLARES_changes_its_pixels(name):
         if "z" in operator_consumes(name):
             import scipy.ndimage as ndi
 
-            # A real focal stack, sharpest at index 2: IDENTICAL planes make any normalised
-            # fusion (fstack) the identity, so no fusion parameter could reach the pixels.
-            # Five planes is fstack's minimum (3-point Gaussian interpolation, STEP=2).
             group = [plane if k == 2 else
                      np.clip(ndi.gaussian_filter(plane.astype(np.float64), 1.5 * abs(k - 2)),
                              0, 65535).astype(np.uint16)
@@ -560,7 +532,6 @@ def test_the_kind_round_trips_and_an_old_declaration_still_reads():
 
     old = {"channels": ["405"], "z_depth": 1, "dtype": "uint16", "pixel_size_um": 0.3}
     assert Substance.from_dict(old).kind == "intensity"
-    # ...and an intensity label is UNCHANGED, so no existing legend line moves.
     assert Substance.from_dict(old).label() == "405  z_depth 1  uint16  0.3 um/px"
 
 

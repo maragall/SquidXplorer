@@ -1,10 +1,4 @@
-"""The runner seam: a declared interface, with the in-process engine as its one implementation.
-
-`_dispatch` reaches the engine only through `_dispatch._RUNNER` — THE substitution point — and
-the run crosses it as a RunSpec (name and kwargs, never a bound callable). The parity pins here
-are the ones the old accidental seam provided: monkeypatching ``squidxplorer.write_plate`` /
-``run_plate`` on the package still intercepts, and both arms receive the SAME spec.
-"""
+"""The runner seam: a declared interface, with the in-process engine as its one implementation."""
 
 from __future__ import annotations
 
@@ -26,20 +20,13 @@ class _Reader:
 
 # ------------------------------------------------------------------ the protocol's shape
 
-def test_the_in_process_runner_satisfies_the_protocol():
-    assert isinstance(InProcessRunner(), Runner)
-
-
-def test_a_one_armed_class_does_not_satisfy_the_protocol():
+def test_the_protocol_needs_both_arms_and_the_dispatch_holds_the_in_process_one():
     class SaveOnly:
         def run_save(self, reader, spec, **kw):
             return {}
 
+    assert isinstance(InProcessRunner(), Runner)
     assert not isinstance(SaveOnly(), Runner)
-
-
-def test_the_dispatch_module_holds_the_substitution_point():
-    assert isinstance(dispatch_mod._RUNNER, Runner)
     assert type(dispatch_mod._RUNNER) is InProcessRunner
 
 
@@ -95,7 +82,7 @@ class _RecordingRunner:
         return dict(self.manifest)
 
     def run_preview(self, reader, spec, *, workers=None, on_well=None,
-                    on_error=None, stop=None):
+                    on_error=None, stop=None, z_level=None, windows=None):
         self.calls.append(("preview", reader, spec, None))
         return 1, False
 
@@ -131,8 +118,6 @@ def test_a_substituted_runner_receives_the_spec_on_the_preview_arm(monkeypatch):
 
 
 def test_the_copy_arm_reaches_a_runner_as_a_preview_with_copy_true(monkeypatch, tmp_path):
-    # operator_saves_copy flips the save into the engine's copy=True run BEFORE the spec is
-    # captured, so the spec records what actually ran.
     rec = _RecordingRunner()
     monkeypatch.setattr(dispatch_mod, "_RUNNER", rec)
     src = tmp_path / "acq"

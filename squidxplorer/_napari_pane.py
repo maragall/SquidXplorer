@@ -136,6 +136,158 @@ def _say_max_3d_texture(value: int, *, measured: bool) -> int:
     return int(value)
 
 
+#: Layer-controls rows the app does not need on screen (hero declutter, team feedback
+#: 2026-08-25: "minimize most of the Napari-Native tools"; Julio, live: "Layer controls,
+#: too much height"). Matched against the form's own label text, lowercased. What a
+#: life-science user touches stays: contrast limits, auto-contrast, colormap. Everything
+#: else goes: rendering choices the app sets itself (blending, opacity), z policy the
+#: app's own slider and operators own (projection mode, depiction), and knobs no user of
+#: this app has needed (interpolation, gamma). gamma and opacity stay IDENTITY_PROPS:
+#: the model still mirrors them; only their napari rows are gone.
+NATIVE_HIDDEN_ROWS = ("blending:", "projection mode:", "interpolation:",
+                      "gamma:", "opacity:", "depiction:",
+                      # A Shapes layer's styling: the ROI rectangle's look is the app's, not
+                      # the user's (Julio, 2026-08-25, "realstate not being allocated").
+                      "edge width:", "edge color:", "face color:", "display text:")
+
+#: The row that marks a SHAPES form; with it, the shape-tool button grid is chrome too.
+_SHAPES_SIGNATURE_ROW = "edge width:"
+#: napari's autoscale row: kept, minus its per-slice "continuous" button.
+_AUTOSCALE_ROW = "auto-contrast:"
+
+
+def hide_native_rows(controls_widget) -> "list[str]":
+    """Hide the :data:`NATIVE_HIDDEN_ROWS` of one layer-controls form; returns what it hid.
+
+    Idempotent, and matched by the LABEL TEXT of the form's own rows, never by napari
+    widget attribute names, so a napari rename degrades to rows staying visible rather
+    than an AttributeError."""
+    from qtpy.QtWidgets import QFormLayout
+
+    lay = controls_widget.layout() if controls_widget is not None else None
+    if not isinstance(lay, QFormLayout):
+        return []
+    # Roughly HALF the resting height comes from chrome, not rows (Julio, live
+    # 2026-08-25): squeeze the form's own vertical spacing and margins too.
+    lay.setVerticalSpacing(2)
+    m = lay.contentsMargins()
+    lay.setContentsMargins(m.left(), 2, m.right(), 2)
+    hidden = []
+    is_shapes = False
+    for i in range(lay.rowCount()):
+        item = lay.itemAt(i, QFormLayout.LabelRole)
+        label = item.widget() if item is not None else None
+        text = str(label.text()).strip().lower() if hasattr(label, "text") else ""
+        is_shapes = is_shapes or text == _SHAPES_SIGNATURE_ROW
+        if text not in NATIVE_HIDDEN_ROWS:
+            continue
+        try:
+            lay.setRowVisible(i, False)          # Qt >= 6.4: hides the whole row
+        except AttributeError:
+            field = lay.itemAt(i, QFormLayout.FieldRole)
+            label.hide()
+            if field is not None and field.widget() is not None:
+                field.widget().hide()
+        hidden.append(text)
+    # The autoscale row STAYS (its once button runs the app's rule, see
+    # MosaicLayers.on_reset_contrast); its "continuous" button fires per slice and is not
+    # cheap (9.3 ms per frame measured), so that one is hidden, matched by its own text.
+    for i in range(lay.rowCount()):
+        item = lay.itemAt(i, QFormLayout.LabelRole)
+        label = item.widget() if item is not None else None
+        if str(getattr(label, "text", lambda: "")()).strip().lower() != _AUTOSCALE_ROW:
+            continue
+        field = lay.itemAt(i, QFormLayout.FieldRole)
+        holder = field.widget() if field is not None else None
+        if holder is None:
+            continue
+        from qtpy.QtWidgets import QAbstractButton
+
+        for b in holder.findChildren(QAbstractButton):
+            if str(b.text()).strip().lower() == "continuous":
+                b.hide()
+                hidden.append("continuous autoscale")
+    grid = getattr(controls_widget, "button_grid", None)
+    if is_shapes and grid is not None:
+        # The shape-tool row (select / add rectangle / ...): the app sets the layer's mode
+        # itself, so the grid is chrome on a Shapes form. An Image form keeps its own.
+        for j in range(grid.count()):
+            w = grid.itemAt(j).widget() if grid.itemAt(j) is not None else None
+            if w is not None:
+                w.hide()
+        hidden.append("shape tools")
+    return hidden
+
+
+def fit_controls_container(container) -> None:
+    """Cap napari's layer-controls container at its CURRENT page's need. The container is
+    a QStackedWidget whose hint is its TALLEST page (an Image form, 289 px measured), so a
+    Shapes page - or a dieted Image page - sat over a blank band."""
+    current = container.currentWidget() if hasattr(container, "currentWidget") else None
+    if current is None:
+        return
+    lay = current.layout()
+    if lay is not None:
+        lay.activate()
+    container.setMaximumHeight(max(1, int(current.sizeHint().height())))
+
+
+def slim_dock_title(dock) -> None:
+    """Replace *dock*'s title bar with a zero-height widget: one window, so docks neither
+    float nor close, and the ~20 px per title goes to the hero surfaces instead."""
+    bar = QWidget(dock)
+    bar.setFixedHeight(0)
+    dock.setTitleBarWidget(bar)
+
+
+def keep_dock_slim(dock) -> None:
+    """Re-slim *dock* if something gave it a title bar back. napari's QtViewerDockWidget
+    re-installs its QtCustomTitleBar on EVERY visibilityChanged(True) (measured: the two
+    visible docks came back with 20 px titles right after show), so the pane connects this
+    after napari's own handler."""
+    tb = dock.titleBarWidget()
+    if tb is None or tb.maximumHeight() > 0:
+        slim_dock_title(dock)
+
+
+def minimize_native_chrome(qt_window, controls_widgets=()) -> "list[str]":
+    """Hide/slim the napari-native chrome the app does not need, and NAME what was hidden.
+
+    Three cuts, each measured on the embedded window (probe 2026-08-25): napari's own
+    status bar (27 px; the app's log panel is the one status surface), every dock's title
+    bar (20 px each; one window, docks neither float nor close), and the layer-controls
+    rows in :data:`NATIVE_HIDDEN_ROWS`. Returns the inventory; empty means nothing was
+    found to hide, which a caller should say rather than assume."""
+    from qtpy.QtWidgets import QDockWidget, QStatusBar
+
+    hidden: "list[str]" = []
+    # napari's MENU BAR (Julio, 2026-08-25: "This looks like lines and lines and lines of
+    # code, no need for that"): on macOS it becomes the global menu whenever the pane holds
+    # focus. Non-native, emptied (so its actions' shortcuts, Cmd+O/S/W, no longer fire
+    # napari's commands from the pane) and hidden. The ONE window's menu is the deck's.
+    try:
+        menubar = qt_window.menuBar()
+        if menubar is not None:
+            menubar.setNativeMenuBar(False)
+            menubar.clear()
+            menubar.hide()
+            hidden.append("menu bar")
+    except Exception:                            # noqa: BLE001 - not a QMainWindow
+        pass
+    for bar in qt_window.findChildren(QStatusBar):
+        if bar.isVisibleTo(qt_window):
+            hidden.append("status bar")
+        bar.hide()
+    for dock in qt_window.findChildren(QDockWidget):
+        tb = dock.titleBarWidget()
+        if tb is None or tb.maximumHeight() > 0:
+            slim_dock_title(dock)
+            hidden.append(f"dock title: {dock.windowTitle() or dock.objectName()}")
+    for w in controls_widgets:
+        hidden.extend(f"layer-controls row: {t}" for t in hide_native_rows(w))
+    return hidden
+
+
 class MosaicPane(QWidget):
     """Pane 2. Hosts the napari canvas, or a message saying why it could not be built."""
 
@@ -147,7 +299,6 @@ class MosaicPane(QWidget):
         self._native_window = None
         self.ndisplay_button: Optional[QWidget] = None
         self.layer_tree: Optional[QWidget] = None
-        self.view_controls_dock = None           # the window's chip block, once docked (below)
         self._button_source = None               # keeps napari's row alive; see _install_ndisplay
         self.canvas: Optional[QWidget] = None
         self.failure: Optional[str] = None
@@ -159,14 +310,16 @@ class MosaicPane(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        self._banner = QLabel("")
-        self._banner.setAlignment(Qt.AlignCenter)
-        self._banner.setWordWrap(True)
-        self._banner.setStyleSheet(
-            "background:#5a2d2d;color:#ffd7d7;padding:6px 10px;font-size:12px;"
-        )
-        self._banner.hide()
-        lay.addWidget(self._banner)
+        # NO BANNER STRIP (Julio, 2026-08-25: "I don't like the red strip that appears
+        # above the window when I run an operator. That should appear in the logger.").
+        # `say` routes through this readout: refusal-shaped text at WARNING, status at
+        # INFO, `.text()` the seam tools/gates and tests assert on. The collapsed log
+        # band's own latest-line display is what keeps a refusal noticed.
+        from squidxplorer._logpane import StatusReadout, get_logger
+
+        self.readout = StatusReadout(get_logger("view"))
+        #: Recording seam (tests and gates assert on it); never a pixel.
+        self.said: "list[str]" = []
 
         try:
             from squidxplorer._napari_view import build_pane
@@ -263,10 +416,7 @@ class MosaicPane(QWidget):
         try:
             from squidxplorer._layer_tree import MosaicTree
 
-            tree = MosaicTree(self.mosaic)
-            self._viewer.window.add_dock_widget(
-                tree, name="mosaic layers", area="left", tabify=True,
-            )
+            tree = MosaicTree(self.mosaic)     # the window's column hosts it (no dock)
             self._hide_flat_layer_list()
         except Exception as exc:                 # noqa: BLE001 - said out loud, never swallowed
             self.say(
@@ -332,53 +482,103 @@ class MosaicPane(QWidget):
             qt_window.setMinimumHeight(220)
         lay.addWidget(qt_window, 1)
         self._native_window = qt_window
+        if self.show_docks:
+            self._minimize_native_chrome(qt_window)
 
-    def dock_view_controls(self, widget: QWidget) -> bool:
-        """Dock *widget* (the window's "2D / 3D · ROI" chip block) at the TOP of napari's left
-        column, above the layer controls (UI feedback 2026-08-19: the chips belong "on the left
-        column, where the controls are", freeing the viewer's top edge).
+    #: What the chrome diet hid on this pane, for tests and the log. Empty until the embed.
+    native_chrome_hidden: "list[str]" = []
 
-        Returns whether it docked; a False sends the caller to its own fallback (the window
-        body), so the chips are never lost. Failure is stated, never swallowed.
-        """
+    def _minimize_native_chrome(self, qt_window) -> None:
+        """Hero declutter (2026-08-25): hide the napari chrome the app does not need, and
+        keep hiding the layer-controls rows as napari builds new per-layer controls (its
+        container makes one widget per layer, lazily, so a one-shot pass would miss every
+        layer added after open)."""
+        from squidxplorer._logpane import get_logger
+
+        container = None
+        try:
+            container = self._viewer.window._qt_viewer.controls
+        except Exception as exc:                 # noqa: BLE001 - napari moved it: say so
+            get_logger("napari_pane").debug(
+                "the layer-controls container is unreachable (%s); its rows stay.", exc)
+        widgets = []
+        if container is not None:
+            try:
+                widgets = [container.widget(i) for i in range(container.count())]
+                container.currentChanged.connect(self._diet_current_controls)
+            except Exception as exc:             # noqa: BLE001 - degrade to the one-shot pass
+                get_logger("napari_pane").debug(
+                    "layer-controls diet cannot follow new layers (%s).", exc)
+        self._controls_container = container
+        self.native_chrome_hidden = minimize_native_chrome(qt_window, widgets)
+        if container is not None:
+            try:
+                fit_controls_container(container)
+            except Exception:                    # noqa: BLE001 - cosmetic, never fatal
+                pass
+        # Slim titles must STAY slim: napari re-installs its title bar on every
+        # visibilityChanged(True); connected here (after napari's own handler) so ours
+        # runs last in the same emission.
+        from qtpy.QtWidgets import QDockWidget
+
+        for dock in qt_window.findChildren(QDockWidget):
+            try:
+                dock.visibilityChanged.connect(
+                    lambda vis, d=dock: keep_dock_slim(d) if vis else None)
+            except Exception:                    # noqa: BLE001 - cosmetic, never fatal
+                pass
+        get_logger("napari_pane").debug(
+            "napari chrome minimized: %s", ", ".join(self.native_chrome_hidden) or "nothing")
+
+    def _diet_current_controls(self, index: int) -> None:
+        """Apply the row diet to the controls widget napari just switched to (new layers
+        get fresh controls widgets; this keeps the diet on all of them)."""
+        container = getattr(self, "_controls_container", None)
+        if container is None:
+            return
+        try:
+            hide_native_rows(container.widget(int(index)))
+            fit_controls_container(container)
+        except Exception:                        # noqa: BLE001 - cosmetic, never fatal
+            pass
+
+    def native_column_widgets(self):
+        """napari's layer-controls container and the app's layer tree, taken OUT of their
+        docks for the window's one plain column (Julio, 2026-08-25: nothing collapses,
+        one well-spaced column). ``(None, None)`` on a pane with no docks."""
+        if self._viewer is None or self._native_window is None or not self.show_docks:
+            return None, None
+        controls = None
+        try:
+            qt_viewer = self._viewer.window._qt_viewer
+            controls = qt_viewer.controls
+            qt_viewer.dockLayerControls.setVisible(False)
+            controls.setParent(None)
+            fit_controls_container(controls)
+        except Exception as exc:                 # noqa: BLE001 - napari moved it: say so
+            self.say(f"napari's layer controls could not join the column ({exc}).")
+            controls = None
+        return controls, self.layer_tree
+
+    def dock_left_column(self, widget: QWidget) -> bool:
+        """Dock the window's ONE left column; the only visible left dock, so it takes the
+        column's whole height. False sends the caller to the window body."""
         if self._viewer is None or self._native_window is None or not self.show_docks:
             return False
         try:
-            dock = self._viewer.window.add_dock_widget(
-                widget, name="2D / 3D · ROI", area="left")
+            dock = self._viewer.window.add_dock_widget(widget, name="column", area="left",
+                                                       add_vertical_stretch=False)
         except Exception as exc:                 # noqa: BLE001 - the caller has a fallback
-            self.say(f"the view controls could not be docked ({type(exc).__name__}: {exc}); "
-                     "they are in the window body instead.")
+            self.say(f"the column could not be docked ({type(exc).__name__}: {exc}); "
+                     "it is in the window body instead.")
             return False
         try:
-            self._hoist_left_dock(dock)
-        except Exception as exc:                 # noqa: BLE001 - in-column, just not on top
-            from squidxplorer._logpane import get_logger
-
-            get_logger("napari_pane").debug(
-                "the view controls docked but could not be hoisted above the layer "
-                "controls: %s", exc)
-        self.view_controls_dock = dock
+            slim_dock_title(dock)
+            dock.visibilityChanged.connect(
+                lambda vis, d=dock: keep_dock_slim(d) if vis else None)
+        except Exception:                        # noqa: BLE001 - cosmetic, never fatal
+            pass
         return True
-
-    def _hoist_left_dock(self, dock) -> None:
-        """Put *dock* FIRST in the left column by re-adding every other left dock below it.
-
-        Qt appends docks, so "insert above" is spelled remove-and-re-add. Visibility is kept per
-        dock: napari's flat layer list is hidden on purpose (`_hide_flat_layer_list`) and a
-        re-add must not resurrect it.
-        """
-        from qtpy.QtWidgets import QDockWidget
-
-        qt_window = self._native_window
-        others = [(d, d.isVisibleTo(qt_window))
-                  for d in qt_window.findChildren(QDockWidget)
-                  if d is not dock and qt_window.dockWidgetArea(d) == Qt.LeftDockWidgetArea]
-        for d, _ in others:
-            qt_window.removeDockWidget(d)
-        for d, was_visible in others:
-            qt_window.addDockWidget(Qt.LeftDockWidgetArea, d)
-            d.setVisible(was_visible)
 
     def _install_camera_settle(self) -> None:
         assert self.mosaic is not None
@@ -413,12 +613,12 @@ class MosaicPane(QWidget):
         self._on_settle = callback
 
     def say(self, text: str) -> None:
-        """Show a message to the user. Never log-and-continue."""
-        if not text:
-            self._banner.hide()
-            return
-        self._banner.setText(text)
-        self._banner.show()
+        """Tell the user via the LOGGER (the banner strip is retired, 2026-08-25); the
+        collapsed log band shows the latest line so this is still seen without expanding."""
+        if text:
+            self.said.append(str(text))
+            del self.said[:-500]                 # a seam, not a history
+        self.readout.setText(text)
 
     @property
     def ok(self) -> bool:
@@ -547,13 +747,27 @@ def model_pane_class():
 
         def __init__(self):
             super().__init__()
+            from squidxplorer._logpane import StatusReadout, get_logger
+
             self._viewer = ViewerModel()
             # The QtViewer half: without it, async slices compute and never land.
             self._async_apply = attach_async_slice_apply(self._viewer)
             self.mosaic = MosaicLayers(self._viewer)
+            # The column's layer list, so the headless window-body column carries the same
+            # tree the docked one does (its minimum height is a pinned layout rule).
+            from squidxplorer._layer_tree import MosaicTree
+
+            self.layer_tree = MosaicTree(self.mosaic)
             self.said = []
+            # The same seam the real pane has: say() IS a log line (banner retired
+            # 2026-08-25), and .readout.text() is what harnesses assert on.
+            self.readout = StatusReadout(get_logger("view"))
             self.shutdowns = 0
             self._on_settle = None
+
+        def native_column_widgets(self):
+            """No napari layer controls headless; the tree joins the window-body column."""
+            return None, self.layer_tree
 
         def on_camera_settled(self, callback):
             # The real pane debounces camera events into this; headless harnesses (conftest,
@@ -562,6 +776,7 @@ def model_pane_class():
 
         def say(self, text):
             self.said.append(text)
+            self.readout.setText(text)
 
         def shutdown(self):
             """COUNTS, rather than no-ops. The real ``MosaicPane.shutdown`` is what closes the

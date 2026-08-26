@@ -1,9 +1,4 @@
-"""ONE source of truth for "where are these pixels".
-
-`Placement` is that answer as a value object, and it travels WITH the array (see `PlacedArray`)
-rather than in a side channel a caller can forget. It records `reg_channel` and `reg_t` — which
-channel and timepoint solved the transform — so the data carries its own provenance.
-"""
+"""ONE source of truth for "where are these pixels"."""
 
 from __future__ import annotations
 
@@ -30,81 +25,29 @@ def _p(**over):
     return Placement(**kw)
 
 
-# --- the value object -------------------------------------------------------------------
-
-def test_it_records_which_channel_and_timepoint_solved_the_transform():
+def test_the_placement_records_by_NAME_which_channel_and_timepoint_solved_it_and_is_immutable():
     p = _p()
-    assert p.reg_channel == "Fluorescence_488_nm_Ex"
+    assert p.reg_channel == "Fluorescence_488_nm_Ex" and isinstance(p.reg_channel, str)
     assert p.reg_t == 0
-
-
-def test_an_unregistered_placement_says_so_rather_than_naming_a_channel_it_did_not_use():
-    # register=False is pure coordinate placement; naming a reg_channel there would be a lie.
-    p = _p(reg_channel=None, reg_t=None, offsets_px=((0.0, 0.0),) * 4)
-    assert p.reg_channel is None and p.reg_t is None
-    assert not p.registered
-
-
-def test_registered_is_not_inferred_from_the_offsets_being_nonzero():
-    # A real solve can legitimately return all-zero offsets (no overlap, every pair rejected),
-    # and that is still a REGISTERED placement.
-    p = _p(offsets_px=((0.0, 0.0),) * 4)
-    assert p.registered
-
-
-def test_it_is_immutable_so_it_cannot_drift_from_the_array_it_describes():
-    p = _p()
     with pytest.raises(Exception):
         p.pixel_size_um = 999.0
+    unreg = _p(reg_channel=None, reg_t=None, offsets_px=((0.0, 0.0),) * 4)
+    assert unreg.reg_channel is None and unreg.reg_t is None and not unreg.registered
+    assert _p(offsets_px=((0.0, 0.0),) * 4).registered, "registered is declared, not inferred from zero offsets"
 
 
-def test_the_channel_is_a_NAME_not_an_index():
-    # An index re-breaks the moment channel selection or the reader's axis order changes; names
-    # survive both.
-    assert isinstance(_p().reg_channel, str)
-
-
-def test_fov_count_must_match_the_offsets_and_origins():
+def test_the_placement_refuses_a_mismatched_fov_count_or_a_nonpositive_pixel_size():
     with pytest.raises(ValueError, match="fovs"):
         _p(fovs=(0, 1))
-
-
-def test_a_nonpositive_pixel_size_is_refused():
     with pytest.raises(ValueError, match="pixel_size_um"):
         _p(pixel_size_um=0.0)
 
 
-# --- travelling WITH the array ----------------------------------------------------------
-
-def test_a_placed_array_is_still_an_ndarray_for_every_existing_consumer():
-    """the region loop yields these straight into the viewer's worker and the OME-Zarr writer;
-    if a PlacedArray were not substitutable for an ndarray, both would need changes."""
-    arr = PlacedArray(np.zeros((1, 2, 1, 8, 8), dtype=np.uint16), _p())
-    assert isinstance(arr, np.ndarray)
-    assert arr.shape == (1, 2, 1, 8, 8)
-    assert arr.dtype == np.uint16
-    assert float(arr.sum()) == 0.0
-    np.testing.assert_array_equal(np.asarray(arr), np.zeros((1, 2, 1, 8, 8)))
-
-
-def test_the_placement_rides_along_and_cannot_be_forgotten():
+def test_a_placed_array_is_an_ndarray_whose_placement_survives_a_slice():
     p = _p()
-    arr = PlacedArray(np.zeros((1, 1, 1, 4, 4)), p)
-    assert arr.placement is p
-
-
-def test_the_placement_survives_a_slice_because_a_view_is_still_those_pixels():
-    p = _p()
-    arr = PlacedArray(np.zeros((2, 3, 1, 4, 4)), p)
-    assert arr[0].placement is p
-    assert arr[:, 0].placement is p
-
-
-def test_asking_a_plain_array_for_its_placement_fails_loudly():
-    with pytest.raises(AttributeError):
-        np.zeros((1, 1, 1, 4, 4)).placement          # noqa: B018
-
-
-def test_the_placement_must_actually_be_one():
+    arr = PlacedArray(np.zeros((2, 3, 1, 8, 8), dtype=np.uint16), p)
+    assert isinstance(arr, np.ndarray) and arr.shape == (2, 3, 1, 8, 8) and arr.dtype == np.uint16
+    np.testing.assert_array_equal(np.asarray(arr), np.zeros((2, 3, 1, 8, 8)))
+    assert arr.placement is p and arr[0].placement is p and arr[:, 0].placement is p
     with pytest.raises(TypeError, match="Placement"):
         PlacedArray(np.zeros((1, 1, 1, 4, 4)), {"pixel_size_um": 0.5})

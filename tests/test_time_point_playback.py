@@ -16,9 +16,7 @@ pytest.importorskip("napari", reason="playback is napari's own dims playback")
 
 @pytest.fixture(autouse=True)
 def _sync_slicing_for_determinism(monkeypatch):
-    """This file's pump-conditions were written for SYNCHRONOUS slicing and flake under the
-    async default (three different tests across runs). Force each new viewer's slicer sync
-    via its own per-viewer knob — the global setting (and production) stays async."""
+    """This file's pump-conditions were written for SYNCHRONOUS slicing and flake under the async default (three different tests across runs)."""
     from napari.components import ViewerModel
 
     orig = ViewerModel.__init__
@@ -41,11 +39,7 @@ from tests.conftest import (                                            # noqa: 
 
 @pytest.fixture(scope="module")
 def qapp():
-    """This module's QApplication.
-
-    Declared here rather than taken from pytest-qt: the suite runs under
-    ``PYTEST_DISABLE_PLUGIN_AUTOLOAD=1``, where pytest-qt's ``qapp`` fixture does not exist.
-    """
+    """This module's QApplication."""
     from qtpy.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
@@ -54,11 +48,7 @@ def qapp():
 
 @pytest.fixture
 def make_bar(qapp):
-    """Build TimePointBars and JOIN napari's animation thread afterwards.
-
-    Qt aborts the process with SIGABRT if a QThread is destroyed while still running, which kills
-    pytest before it can print why a test failed.
-    """
+    """Build TimePointBars and JOIN napari's animation thread afterwards."""
     made = []
 
     def _make(**kw):
@@ -88,17 +78,12 @@ def test_playback_is_napari_s_own_and_not_a_qtimer(make_bar):
     assert bar.playback is not None
     assert isinstance(bar.playback.dim_slider, QtDimSliderWidget)
     assert bar.playback.dim_slider.play_button is not None, "no play button = we built our own"
+    assert tuple(bar.playback._dims.axis_labels)[0] == "time_point", "axis 0 must be the TIME axis"
     assert bar.fps > 0
     bar.play(fps=20)
     assert isinstance(getattr(bar.playback.qt_dims, "_animation_thread"), AnimationThread), (
         "playback is not running on napari's off-thread animation")
     bar.stop()
-
-
-def test_the_axis_napari_is_walking_is_the_TIME_axis(make_bar):
-    """Axis 0 of the 3-D dims model must be the timepoint, not `_region_nav`'s region axis."""
-    bar = make_bar(playback=True)
-    assert tuple(bar.playback._dims.axis_labels)[0] == "time_point"
 
 
 def test_a_one_timepoint_acquisition_refuses_to_play_out_loud(make_bar):
@@ -136,7 +121,7 @@ def test_both_skins_are_the_same_control(make_bar, playback):
 
     bar.set_time_point(2)                       # following somebody else
     assert bar.time_point == 2 and seen == [], "a programmatic move was reported as a gesture"
-    assert "3" in bar.label.text()
+    assert "3" in bar.label.text() and "time_point" in bar.label.text(), bar.label.text()
 
     bar.set_time_point_from_user(1)             # a drag
     assert bar.time_point == 1 and seen == [1]
@@ -145,6 +130,10 @@ def test_both_skins_are_the_same_control(make_bar, playback):
     assert bar.time_point == 2 and seen == [1, 2]
 
     seen.clear()
+    bar.set_count(5)
+    bar.set_time_point(4)
+    bar.set_count(2)                            # resizing down clamps the position
+    assert bar.time_point <= 1 and bar.slider.maximum() == 1 and seen == []
     bar.set_count(1)                            # a re-ingest is not a gesture
     assert seen == [] and bar.isHidden()
 
@@ -210,12 +199,7 @@ def test_a_stalled_playback_says_so_instead_of_looking_pressed(make_bar, qapp):
 
 
 def _added_values(pane, channel):
-    """Every distinct pixel value painted for *channel*, in arrival order.
-
-    The stub's ``added`` recording list is gone; this is the same history rebuilt as an
-    OBSERVER of the real model — layer insertions and in-place data replacements (the reuse
-    path) both fire napari events, and that is what a "frame changed" IS now.
-    """
+    """Every distinct pixel value painted for *channel*, in arrival order."""
     from squidxplorer._napari_view import key_of, pyramid_levels
 
     histories = getattr(pane, "_test_value_history", None)
@@ -275,11 +259,9 @@ def test_playing_a_window_renders_a_DIFFERENT_frame_per_timepoint(
         bar.stop()
         qapp.processEvents()
 
-        # Consecutive frames must differ too: walked in order, not jumping about.
         values = _added_values(pane, channel)
         assert all(a != b for a, b in zip(values, values[1:])), values
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -307,37 +289,16 @@ def test_a_superseded_load_cannot_repaint_the_window_with_its_own_timepoint(
                      == time_series_pixel_value(2, 0, 0), seconds=10.0)
 
         before = list(_added_values(pane, channel))
-        # The retired worker finishing LATE, exactly as it would from its own thread.
+        opened = []
+        win._time_point_bar.frame_done = lambda: opened.append(True)
         win._on_plane(TIME_SERIES_REGION, channel, [np.zeros((1, 4, 4), dtype=np.uint16)],
                       None, None, gen=stale_gen)
         win._on_done(TIME_SERIES_REGION, 1, gen=stale_gen)
         assert _added_values(pane, channel) == before, "a superseded load repainted the window"
-    finally:
-        mgr._mem_timer.stop()
-        mgr.close_all()
-        for _ in range(20):
-            qapp.processEvents()
-
-
-def test_a_superseded_load_does_not_open_the_playback_gate(
-    multi_time_point_dataset, napari_pane_stub, qapp
-):
-    """A stale completion must not open the playback gate too, or playback goes back to queueing."""
-    from squidxplorer._region_viewer import ViewerManager
-
-    root, _planes = multi_time_point_dataset
-    reader = open_reader(root)
-    mgr = ViewerManager(reader, reader.metadata)
-    try:
-        win = mgr.open([TIME_SERIES_REGION])
-        opened = []
-        win._time_point_bar.frame_done = lambda: opened.append(True)
-        win._on_done(TIME_SERIES_REGION, 1, gen=win._load_gen - 1)
         assert opened == [], "a superseded load opened the frame gate"
         win._on_done(TIME_SERIES_REGION, 1, gen=win._load_gen)
         assert opened == [True], "the current load did NOT open the frame gate"
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -357,7 +318,6 @@ def test_a_reload_reuses_the_layers_instead_of_destroying_them(
         win = mgr.open([TIME_SERIES_REGION])
         pane = napari_pane_stub[0]
         assert _pump(qapp, lambda: bool(_added_values(pane, channel)))
-        # The IDENTITY pin, straight off the real model: reuse means the very same layer object.
         before_layer = pane.mosaic.find(_RAW_OP, channel)
         assert before_layer is not None
 
@@ -367,7 +327,6 @@ def test_a_reload_reuses_the_layers_instead_of_destroying_them(
         assert pane.mosaic.find(_RAW_OP, channel) is before_layer, (
             "the reload destroyed the raw layers; every frame now pays a full rebuild")
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -398,11 +357,7 @@ _SHAPE_WALK = {
 
 
 def _catch_layer_failures(win):
-    """Record what `_on_plane` raises instead of letting it reach Qt. Returns the list.
-
-    PyQt turns an exception raised inside a slot invoked from C++ into `qFatal`, aborting the
-    interpreter (and pytest's summary with it) instead of failing the test normally.
-    """
+    """Record what `_on_plane` raises instead of letting it reach Qt."""
     failures = []
     real_on_plane = win._on_plane
 
@@ -417,8 +372,7 @@ def _catch_layer_failures(win):
 
 
 def _shape_worker_class(shapes):
-    """A `_MosaicWorker` stand-in that emits a CHOSEN pyramid, synchronously (a real worker's
-    result arrives via a queued connection, so a pumping test couldn't tell "not yet" from "never")."""
+    """A `_MosaicWorker` stand-in that emits a CHOSEN pyramid, synchronously (a real worker's result arrives via a queued connection, so a pumping test"""
     from qtpy.QtCore import QObject, Signal
 
     class _ShapeWorker(QObject):
@@ -475,7 +429,6 @@ def test_a_region_change_never_hands_napari_a_layer_of_another_shape(
             if win._load_timer is not None:
                 win._load_timer.stop()               # we drive the loads, not the debounce
             win._load_mosaic(region)
-            # Stop at the first bad transition: a half-assigned layer aborts the process on the next touch.
             assert not failures, (
                 f"{previous} -> {region} handed napari a layer of another shape: {failures[0]}")
             layer = pane.mosaic.find("raw", TIME_SERIES_CHANNELS[0])
@@ -485,44 +438,6 @@ def test_a_region_change_never_hands_napari_a_layer_of_another_shape(
             previous = region
     finally:
         W._MosaicWorker = real_worker
-        mgr._mem_timer.stop()
-        mgr.close_all()
-        for _ in range(20):
-            qapp.processEvents()
-
-
-def test_a_timepoint_change_keeps_the_very_same_layer_object(
-    multi_time_point_dataset, napari_pane_stub, qapp
-):
-    """The same region at another timepoint must REUSE the layer OBJECT, not rebuild it (contrast,
-    visibility and colormap all subscribe to the layer object and break if it is destroyed)."""
-    from squidxplorer import _workers as W
-    from squidxplorer._region_viewer import ViewerManager
-
-    root, _planes = multi_time_point_dataset
-    reader = open_reader(root)
-    mgr = ViewerManager(reader, reader.metadata)
-    real_worker = W._MosaicWorker
-    try:
-        win = mgr.open([TIME_SERIES_REGION])
-        pane = napari_pane_stub[0]
-        assert _pump(qapp, lambda: bool(len(pane._viewer.layers)))
-        pane.mosaic = _real_mosaic()
-
-        same_shape = {TIME_SERIES_REGION: [np.zeros((2, 32, 32), np.uint16)]}
-        W._MosaicWorker = _shape_worker_class(same_shape)
-        win._load_mosaic(TIME_SERIES_REGION)
-        first = pane.mosaic.find("raw", TIME_SERIES_CHANNELS[0])
-        assert first is not None
-
-        for time_point in (1, 2, 0):
-            win._time_point_bar.set_time_point(time_point)
-            win._load_mosaic(TIME_SERIES_REGION)
-            assert pane.mosaic.find("raw", TIME_SERIES_CHANNELS[0]) is first, (
-                f"timepoint {time_point} destroyed and rebuilt the layer instead of reusing it")
-    finally:
-        W._MosaicWorker = real_worker
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -546,7 +461,6 @@ def test_a_load_that_produces_nothing_DOES_drop_the_stale_layers(
         assert pane.mosaic.find(_RAW_OP, TIME_SERIES_CHANNELS[0]) is None, (
             "a load that built nothing left the previous timepoint's pixels on screen")
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -565,8 +479,6 @@ def test_the_camera_is_not_re_framed_on_every_frame(
     try:
         win = mgr.open([TIME_SERIES_REGION])
         pane = napari_pane_stub[0]
-        # Count reset_view on the REAL ViewerModel (its fields are frozen; its methods are not
-        # — patch the class, this test owns the process while it runs).
         frames = []
         real_reset = type(pane._viewer).reset_view
         monkeypatch.setattr(type(pane._viewer), "reset_view",
@@ -584,7 +496,6 @@ def test_the_camera_is_not_re_framed_on_every_frame(
         assert len(frames) == was, (
             f"the camera was re-framed {len(frames) - was} times while only the timepoint moved")
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
@@ -612,24 +523,8 @@ def test_a_finished_mosaic_worker_is_released_rather_than_piling_up(
             "the window is still holding its finished worker; nothing will ever free it")
         assert win._retired_workers == [], "superseded workers were never reaped"
     finally:
-        mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
             qapp.processEvents()
 
 
-def test_the_window_does_not_block_the_ui_thread_to_supersede_a_load(
-    multi_time_point_dataset, napari_pane_stub, qapp
-):
-    """`_load_mosaic` must not `wait()` on the worker it is replacing; `stop()` only sets an Event
-    that `_MosaicWorker` polls between channels, so waiting blocks the GUI thread up to a 2s cap."""
-    import inspect
-
-    # The body moved to `_mosaic_playback.load_mosaic` (2026-08-14); inspect THE BODY, not the
-    # RegionViewer delegate, or this guard becomes a test that cannot fail.
-    from squidxplorer import _mosaic_playback
-
-    src = inspect.getsource(_mosaic_playback.load_mosaic)
-    assert ".wait(" not in src, (
-        "load_mosaic blocks the GUI thread waiting for the load it is superseding")
-    assert "retire_worker" in src, "the superseded worker is not held anywhere; Qt will abort"

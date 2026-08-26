@@ -1,8 +1,4 @@
-"""The high-resolution PNG export: data pixels through the one compositor, never a screenshot.
-
-The window half mirrors ``test_video_window.py`` on purpose: same fixtures, same
-thread-discipline instrument, one export path per artifact kind.
-"""
+"""The high-resolution PNG export: data pixels through the one compositor, never a screenshot."""
 
 from __future__ import annotations
 
@@ -87,8 +83,7 @@ def _png_pixels(path) -> np.ndarray:
 
 def test_the_png_is_the_mosaics_native_size_not_the_screens(
         qapp, napari_pane_stub, five_d_root, save_dialog):
-    """The export writes the layer's full-resolution pixels: a 64 px mosaic is a 64 px PNG,
-    whatever the (headless, tiny) canvas measures."""
+    """The export writes the layer's full-resolution pixels: a 64 px mosaic is a 64 px PNG, whatever the (headless, tiny) canvas measures."""
     from squidxplorer._napari_view import full_res_level
 
     win, w = _open_window(qapp, five_d_root)
@@ -170,8 +165,7 @@ def test_a_3d_view_is_refused_with_a_reason(
 
 def test_the_export_never_reads_a_plane_on_the_qt_thread(
         qapp, napari_pane_stub, five_d_root, save_dialog):
-    """Every decode of the whole export, pinned by thread ident — the reader is wrapped BEFORE
-    the window opens, so the raw pyramid's own lazy reads are the ones recorded."""
+    """Every decode of the whole export, pinned by thread ident — the reader is wrapped BEFORE the window opens, so the raw pyramid's own lazy reads are the"""
     from squidxplorer._mosaic_source import plane_cache
 
     from .test_gallery import _RecordingReader

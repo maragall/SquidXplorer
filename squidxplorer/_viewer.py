@@ -17,12 +17,12 @@ from typing import Optional
 
 import numpy as np
 from qtpy.QtCore import (  # QThread/Signal: kept for tests that build a stub worker as V.QThread
-    QEvent, QObject, Qt, QThread, QTimer, Signal,  # noqa: F401 (tests/test_viewer.py::_BlockingWorker)
+    QEvent, QObject, QSize, Qt, QThread, QTimer, Signal,  # noqa: F401 (tests/test_viewer.py::_BlockingWorker)
 )
 from qtpy.QtGui import QColor, QKeySequence, QPalette
 from qtpy.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QMainWindow, QPushButton, QScrollArea, QShortcut, QSpinBox,
+    QMainWindow, QPushButton, QScrollArea, QShortcut, QSizePolicy, QSpinBox,
     QSplitter, QStyleFactory, QVBoxLayout, QWidget,
 )
 
@@ -67,7 +67,7 @@ from squidxplorer._montage import _hex_to_rgb01, channel_tint01
 from squidxplorer._output import incomplete_reason, parse_well_id
 from squidxplorer._activity import ActivityLog
 from squidxplorer._address import Extent
-from squidxplorer._logpane import LogBus, ViewLog
+from squidxplorer._logpane import LogBus, StatusReadout, ViewLog
 from squidxplorer._logpanel import LogPanel
 from squidxplorer._plate import PlateBuildError, build_plate
 from squidxplorer._plate_shape import PlateShapeError
@@ -161,95 +161,40 @@ _BAND_DEFAULT_PX = 365
 _BAND_MAX_PX = 520
 
 
-class _LogReadout:
-    """The plate's one reply channel — a LOG LINE, not a widget (2026-08-19).
-
-    Julio: "log messages that show around the GUI and not in the log" is the complaint. The
-    status strip is gone; every ``setText`` that painted it lands in the console instead, so
-    the ~60 call sites (and the tools/tests that read ``.text()``) keep their one-line call.
-    Refusal-shaped sentences go out at WARNING, status at INFO; a repeat of the current text
-    is dropped so idempotent writers do not spam the console.
-    """
-
-    #: A message carrying one of these reads as a refusal or a failure.
-    _WARN_MARKS = (
-        "fail", "could not", "cannot", "error", "not an .hcs", "no plate",
-        "already processing", "empty selection", "open an acquisition", "open a view",
-        "pick wells first", "not in the current region order", "nowhere to put",
-        "no region is open", "no acquisition open", "stranded",
-    )
-
-    def __init__(self, logger) -> None:
-        self._log = logger
-        self._text = ""
-
-    def setText(self, text) -> None:                     # noqa: N802 - keeps the QLabel spelling
-        text = str(text or "")
-        if text == self._text:
-            return
-        self._text = text
-        if not text:
-            return
-        low = text.lower()
-        level = logging.WARNING if any(m in low for m in self._WARN_MARKS) else logging.INFO
-        self._log.log(level, "%s", text)
-
-    def text(self) -> str:
-        return self._text
+# The plate's one reply channel is a LOG LINE, not a widget (2026-08-19), and the same
+# mechanism retired the view banner on 2026-08-25 - the class moved to its Qt-free home.
+_LogReadout = StatusReadout
 
 #: Operator-over-Log split inside the band's right column (starting position).
 _RIGHT_COL_SIZES = [215, 165]
 
 
 class _PlateSlotBox(QWidget):
-    """THE PLATE SLOT: a fixed-height box the plate view renders in when it is hosted
-    inside the view window's left column (one window, Julio 2026-08-25), collapsible to a
-    grip. Fixed on purpose: inserting a slot shrinks the FLEXIBLE neighbours (layer
-    controls, toggles, log), never this one.
-    """
+    """THE PLATE SLOT: a fixed-height box the plate view renders in inside the view window's
+    column. Fixed on purpose; never collapsible (Julio, 2026-08-25: "the plate shouldn't
+    be collapsible")."""
 
-    #: The slot's fixed height while open, and the grip's height while collapsed.
     PLATE_SLOT_PX = 240
-    GRIP_PX = 18
+    #: The floor a short screen shrinks the slot to: the plate is a NAVIGATOR and the layer
+    #: list is a control, so when the column cannot hold both it is the plate that gives.
+    PLATE_SLOT_MIN_PX = 160
 
     def __init__(self) -> None:
         super().__init__()
-        self.collapsed = False
-        v = QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-        self.grip = QPushButton("▾ plate")
-        self.grip.setCursor(Qt.PointingHandCursor)
-        self.grip.setToolTip("Collapse or expand the plate view.")
-        self.grip.setStyleSheet(
-            "QPushButton{background:#161b22;color:#8b98ad;border:1px solid #232b3a;"
-            "border-radius:3px;font-size:10px;padding:1px 6px;text-align:left;}"
-            "QPushButton:hover{color:#c9d1d9;}")
-        self.grip.setFixedHeight(self.GRIP_PX - 4)
-        self.grip.clicked.connect(self.toggle)
-        v.addWidget(self.grip, 0)
-        self._body = QWidget()
-        self._bv = QVBoxLayout(self._body)
+        self._bv = QVBoxLayout(self)
         self._bv.setContentsMargins(0, 0, 0, 0)
         self._bv.setSpacing(0)
-        v.addWidget(self._body, 1)
-        self._apply_height()
+        self.setMinimumHeight(self.PLATE_SLOT_MIN_PX)
+        self.setMaximumHeight(self.PLATE_SLOT_PX)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+
+    def sizeHint(self):
+        return QSize(super().sizeHint().width(), self.PLATE_SLOT_PX)
 
     def set_view(self, widget: QWidget) -> None:
-        """Mount the plate view (rebuilt per ingest) as the slot's body content."""
+        """Mount the plate view (rebuilt per ingest) as the slot's content."""
         self._bv.addWidget(widget, 1)
-        widget.setVisible(not self.collapsed)
-
-    def toggle(self, *_) -> None:
-        self.collapsed = not self.collapsed
-        self._body.setVisible(not self.collapsed)
-        self.grip.setText("▸ plate" if self.collapsed else "▾ plate")
-        self._apply_height()
-
-    def _apply_height(self) -> None:
-        h = self.GRIP_PX if self.collapsed else self.PLATE_SLOT_PX
-        self.setMinimumHeight(h)
-        self.setMaximumHeight(h)
+        widget.setVisible(True)
 
 
 # --- the main window: the plate on top, the Open View list and the console below --------------
@@ -528,9 +473,11 @@ class PlateWindow(QMainWindow):
         # docked, collapsed or floated. What changes is where it is, never whether it is. Floating
         # RELOCATES the console; nothing destroys it. That is why `_float_log`'s close handler
         # re-docks instead of routing through `_dispose_tab_widget` the way an operator float does.
+        # COLLAPSED BY DEFAULT (hero declutter, team feedback 2026-08-25: "There are too many
+        # controls and logs"): the log is a slot the user opens (its own toggle, View > Log),
+        # not a broadcast. Session-scoped; no prefs file.
         self._log_panel = LogPanel(self._log_bus, self._activity)
         self._log_panel.start()
-        self._log_panel.float_requested.connect(self._float_log)
 
         # NO CENTRAL VIEWER (decentralized, 2026-07-23; the guards finally cut, 2026-08-06).
         # Viewing happens in INDEPENDENT windows spawned from the plate (see _region_viewer), each
@@ -600,10 +547,12 @@ class PlateWindow(QMainWindow):
             "processed appear here - a result computed in one window is that window's, and does "
             "not give the plate pixels for its other wells.")
         self._view_combo.currentIndexChanged.connect(self._on_view_combo)
-        _tb.addWidget(QLabel("view:"))
+        self._view_caption = QLabel("view:")
+        _tb.addWidget(self._view_caption)
         _tb.addWidget(self._view_combo)
-        self._drop = QLabel("Drop a Squid acquisition folder here\n\n"
-                            "then pick an operator in  Process wells")
+        # THE EMPTY STATE: the hero area is a drop target saying ONE line (Julio,
+        # 2026-08-25); `_set_empty_state` is the one writer of what shows with no data.
+        self._drop = QLabel("drop an acquisition folder here, or File > Open")
         self._drop.setAlignment(Qt.AlignCenter)
         self._drop.setStyleSheet("color:#8b98ad;font-size:16px;border:2px dashed #232b3a;border-radius:12px;margin:24px;")
         plate_host = QWidget()
@@ -635,21 +584,6 @@ class PlateWindow(QMainWindow):
             "QPushButton:hover{background:#388bfd;}")
         self._open_sel_btn.clicked.connect(self._open_selected_view)
         _tb.addWidget(self._open_sel_btn)
-
-        # THE ONE plate-side LUT control (Julio, 2026-08-19: "I like the plate side paste
-        # button"): paste the window-filled clipboard straight onto the plate. A deliberate
-        # gesture, so it latches manual and outranks the RGB-component full-range latch.
-        self._plate_paste_btn = QPushButton("⇩ paste LUTs")
-        self._plate_paste_btn.setCursor(Qt.PointingHandCursor)
-        self._plate_paste_btn.setStyleSheet(
-            "QPushButton{background:#0b0e14;color:#c9d1d9;border:1px solid #232b3a;"
-            "border-radius:4px;padding:3px 8px;font-size:12px;}"
-            "QPushButton:hover{border-color:#1f6feb;}")
-        self._plate_paste_btn.setToolTip(
-            "Paste the LUT clipboard (filled by a view's copy LUTs) onto the plate's channels: "
-            "contrast and on/off, latched so streaming wells cannot stomp it.")
-        self._plate_paste_btn.clicked.connect(self._paste_luts_onto_plate)
-        _tb.addWidget(self._plate_paste_btn)
 
         # ACQUISITION-SET CYCLING (2026-08-19). A dropped folder OF acquisitions gets a compact
         # "acquisition k of N" indicator with prev/next in this (nearly empty) title bar, plus
@@ -687,6 +621,7 @@ class PlateWindow(QMainWindow):
         _sc_next.activated.connect(lambda: self._cycle_acq(+1))
 
         self._left_l.addWidget(self._drop, 1)    # the plate overview replaces this on ingest
+        self._set_empty_state(True)
 
         # THE REGION SLIDER — the navigation control, replacing the FOV slider. It lives in the
         # PLATE pane, directly under the plate, because the thing it moves is the red ROI frame
@@ -851,18 +786,12 @@ class PlateWindow(QMainWindow):
         # `show_log` — the console is reachable from here whether it is docked, collapsed or
         # floated, which is what makes "you cannot lose it" survive the log becoming floatable.
         view_menu = self.menuBar().addMenu("&View")
-        self._log_act = QAction("&Log", self)
-        self._log_act.triggered.connect(self.show_log)
-        view_menu.addAction(self._log_act)
         # Julio's drawing: "Log (option to open in a new window)". The panel's header carries the
         # same gesture as a ⧉ button; this is the discoverable duplicate, and it doubles as the way
         # back if the float is somehow off-screen (it raises rather than building a second). It sits
         # DIRECTLY under "Log" because the two are one pair — where the console is, and where you
         # would rather it were. The separator below keeps them from reading as a list with Gallery
         # View, which is a different kind of thing entirely.
-        self._log_float_act = QAction("Log in a &New Window", self)
-        self._log_float_act.triggered.connect(self._float_log)
-        view_menu.addAction(self._log_float_act)
         view_menu.addSeparator()
         # SELECT ALL left the top bar (2026-08-19 mock): the menu action and the plate's own
         # Cmd/Ctrl-A (`PlateOverview.keyPressEvent`) are the two ways in. No shortcut ON the
@@ -1037,18 +966,29 @@ class PlateWindow(QMainWindow):
         # is at best ignored and at worst fights the tab widget's own layout.
         win = getattr(win, "host", None) or win
         try:
-            want = beside_rect(screen.availableGeometry(), self.frameGeometry())
-            frame, client = win.frameGeometry(), win.geometry()
-            left_m = client.left() - frame.left()
-            top_m = client.top() - frame.top()
-            win.setGeometry(
-                want.left() + left_m,
-                want.top() + top_m,
-                want.width() - (frame.width() - client.width()),
-                want.height() - (frame.height() - client.height()),
-            )
+            avail = screen.availableGeometry()
+            # ONE WINDOW (Julio, live 2026-08-25: "The new one window should take up the
+            # whole screen. Not in fullscreen, but we add the space where the old plate
+            # window was."): once this window hides for a hosted plate, the deck takes the
+            # WHOLE work area. `_spawn` hosts (and hides) BEFORE this runs, so a beside-rect
+            # here used to re-place the deck at 4/5 of the screen with a blank fifth left.
+            want = avail if self._hidden_for_one_window else beside_rect(avail, self.frameGeometry())
+            self._fit_frame(win, want)
         except Exception:                     # noqa: BLE001 - a layout is never worth a crash
             pass
+
+    @staticmethod
+    def _fit_frame(win, want) -> None:
+        """Put *win*'s FRAME on *want*. `setGeometry` positions the CLIENT area, so the frame
+        margins are subtracted - measured on the PR machine without this: the view's title
+        bar a title-bar's height off the top of the screen."""
+        frame, client = win.frameGeometry(), win.geometry()
+        win.setGeometry(
+            want.left() + (client.left() - frame.left()),
+            want.top() + (client.top() - frame.top()),
+            want.width() - (frame.width() - client.width()),
+            want.height() - (frame.height() - client.height()),
+        )
 
     def _ui_scale(self) -> float:
         """How much bigger the window is than the shape the type was written for."""
@@ -1101,36 +1041,6 @@ class PlateWindow(QMainWindow):
 
     # -- operator UIs live as tabs in the band's right column: the Operators home tab, one tab
     # -- per operator you open, and any result a panel publishes. ---------------------------------
-    def _paste_luts_onto_plate(self) -> None:
-        """Paste the LUT clipboard onto the plate's channels: clim + on/off, by channel name.
-
-        The one plate-side LUT control. A deliberate user gesture: ``set_channel_window``
-        latches manual, so it outranks both the running histograms and the RGB-component
-        full-range latch.
-        """
-        from squidxplorer._lut_clipboard import CLIPBOARD
-
-        if self._overview is None or self._meta is None:
-            self._readout.setText("open an acquisition first")
-            return
-        if not CLIPBOARD:
-            self._readout.setText("the LUT clipboard is empty - copy LUTs in a view first")
-            return
-        applied = 0
-        for i, c in enumerate(self._meta["channels"]):
-            lut = CLIPBOARD.get(c["name"]) or CLIPBOARD.get(c.get("display_name") or "")
-            if not lut:
-                continue
-            if lut.get("clim") is not None:
-                lo, hi = lut["clim"]
-                self._overview.set_channel_window(i, float(lo), float(hi))
-                applied += 1
-            if lut.get("on") is not None:
-                self._overview.set_channel_visible(i, bool(lut["on"]))
-        self._readout.setText(
-            f"pasted LUTs onto the plate - {applied} channel(s)" if applied
-            else "the clipboard names no channel of this acquisition - nothing pasted")
-
     def _open_op_tab(self, key: str, title: str, builder, tabs=None):
         """Open (or focus) a UI as a tab. Built lazily, once. *tabs* is the bar it belongs in;
         there is one bar (the band's right column) and it is the default.
@@ -1147,93 +1057,9 @@ class PlateWindow(QMainWindow):
     def _sync_left_tabs_visible(self) -> None:
         """The operator-tab bar exists only while it holds a tab; the log owns the band otherwise."""
         tabs = getattr(self, "_left_tabs", None)
-        if tabs is not None:
-            tabs.setVisible(tabs.count() > 0)
-
-    #: Registry key for the floated log in `_floating`. Not an entry in `_op_tabs`: the log is not
-    #: an operator UI and must never be routed through `_dispose_tab_widget`, which deletes.
-    _LOG_FLOAT_KEY = "__log__"
-
-    def show_log(self) -> None:
-        """Bring the one global console to the front, wherever it currently is.
-
-        THE INVARIANT: the panel exists for the life of the window and is reachable from View > Log
-        in every state — docked, collapsed or floated. This is the method that makes that true, so
-        it has to answer for all three:
-
-        * floated  -> raise and activate its window;
-        * collapsed -> expand it;
-        * docked   -> make sure the strip is showing it (it always is: it is a splitter child that
-          cannot be collapsed to zero).
-
-        It used to end in ``_left_tabs.setCurrentWidget(panel)``, which was the whole of it while
-        the log was a tab. There is no tab to select now.
-        """
-        panel = getattr(self, "_log_panel", None)
-        if panel is None:
+        if tabs is None:
             return
-        win = self._floating.get(self._LOG_FLOAT_KEY)
-        if win is not None:
-            if panel.collapsed:
-                panel.set_collapsed(False)
-            win.show()
-            win.raise_()
-            win.activateWindow()
-            return
-        if panel.collapsed:
-            panel.set_collapsed(False)
-        panel.setVisible(True)
-
-    # -- the console in a window of its own (Julio: "Log (option to open in a new window)") --------
-    def _float_log(self):
-        """Open the one global console in its own window, and give it back on Re-dock.
-
-        THIS PARTLY REVERSES 2026-07-29 Task 1, deliberately, and the difference is the whole
-        justification. The `_log_window` that was deleted was constructed and shown on EVERY
-        launch, which is why Spencer saw it "open over the main window" every time. This is a user
-        gesture on an always-present panel: docked by default, a window only when asked for.
-
-        It reuses `_FloatWindow` rather than hand-rolling a second float, which matters: the old
-        `_log_window` was one of the four widgets handed a Python-owned Fusion QStyle that ~QWidget
-        then unpolished after GC (the segfault pinned by tests/test_window_lifetime.py), and
-        `_FloatWindow` explicitly refuses that style for that reason (_qt_tabs.py:94-97). The
-        hazard is fixed AT THE SEAM a new float uses, not merely absent.
-
-        Its close handler RE-DOCKS. An operator float's close disposes the widget through
-        `_dispose_tab_widget`; doing that to the console would delete a live sink on the
-        process-wide root logger and lose it for good, which is the one outcome that would make
-        this the wrong call.
-        """
-        panel = getattr(self, "_log_panel", None)
-        if panel is None:
-            return None
-        win = self._floating.get(self._LOG_FLOAT_KEY)
-        if win is not None:                     # already out: raise it, never build a second
-            win.raise_()
-            win.activateWindow()
-            return win
-        if panel.collapsed:
-            panel.set_collapsed(False)          # a floated console that shows only its header is a
-                                                # window with nothing in it
-        # Through the ONE float mechanism. dispose_on_close=False is the log's whole policy:
-        # closing the window RE-DOCKS, because the panel is a live sink on the process-wide root
-        # logger and disposing it would lose the console for good.
-        return self._tabman.float_out(self._LOG_FLOAT_KEY, "Log", panel,
-                                      restore=self._return_log_home, dispose_on_close=False)
-
-    def _return_log_home(self, panel):
-        """Put the console back in `_right_col`, under the operators — the SAME widget, so the
-        log's scrollback survives. The log's `restore` for `TabManager.float_out`."""
-        col = getattr(self, "_right_col", None)
-        if col is None:                         # no layout to return to (never in a built window)
-            return
-        col.addWidget(panel)                    # index 1: _left_tabs is still index 0
-        panel.setVisible(True)
-        col.setSizes(list(_RIGHT_COL_SIZES))    # the same split it opened at, not a second guess
-
-    def _redock_log(self):
-        """Re-dock the floated console. Idempotent; routes through the one float mechanism."""
-        self._tabman.redock(self._LOG_FLOAT_KEY)
+        tabs.setVisible(tabs.count() > 0)
 
     def _close_op_tab(self, index: int, tabs=None):
         self._tabman.close_tab(index, tabs=tabs)
@@ -1605,11 +1431,10 @@ class PlateWindow(QMainWindow):
         defect shape as `_workers._OperatorWorker`'s preview branch and `_command.EngineExecutor`'s,
         both fixed on 2026-08-05/06: two entry points to one run must pass the same arguments.
 
-        ONE READER, and it reads the PANEL rather than a copy of its values. Both panel families
-        already answer ``kwargs()`` -- the hand-written ones (``StitcherPanel``) and the ones
-        generated from an operator's declared ``params``
-        (``_param_panel.GenericOperatorPanel``) -- so this needs no per-operator case and a plugin's
-        operator is covered with no edit here.
+        ONE READER, and it reads the PANEL rather than a copy of its values. Every panel is
+        generated from the operator's declared ``params`` (``_param_panel``; the pages are
+        shelved, 2026-08-25) and answers ``kwargs()``, so this needs no per-operator case
+        and a plugin's operator is covered with no edit here.
 
         ``{}`` when the operator's tab has never been opened, which means "run with the declared
         defaults" and is exactly right: there is no panel, so there is nothing the user has set.
@@ -1631,14 +1456,6 @@ class PlateWindow(QMainWindow):
             log.warning("%s panel could not report its parameters: %s: %s",
                         key, type(exc).__name__, exc)
             return {}
-        # The stitcher's z handling lives on its own combo rather than in `kwargs()` (which is
-        # `stitch_region`'s keyword set). It is a PARAMETER of the run, so it is added here;
-        # the keep-every-plane label spells z_operator=None (`z_operator_choice`).
-        combo = getattr(panel, "z_operator_combo", None)
-        if combo is not None and "z_operator" not in kwargs:
-            from squidxplorer._op_panels import z_operator_choice
-
-            kwargs["z_operator"] = z_operator_choice(combo.currentText())
         return kwargs
 
     def operator_params_text(self, key: str) -> str:
@@ -1657,6 +1474,17 @@ class PlateWindow(QMainWindow):
             kwargs = self.operator_kwargs_for(key)
         except ValueError as exc:                # a refused setting: the summary IS the refusal
             return str(exc)
+        # Only what DIFFERS from the declaration: a row listing every advanced default is
+        # a paragraph with nothing to say (verbosity strip, 2026-08-25; fstack's three
+        # advanced knobs printed as a row under an empty headline).
+        try:
+            from squidxplorer import operator_params
+
+            declared = {p.name: p.default for p in operator_params(key)}
+        except Exception:                        # noqa: BLE001 - no declaration: print all
+            declared = {}
+        kwargs = {n: v for n, v in kwargs.items()
+                  if n not in declared or v != declared[n]}
         if not kwargs:
             return "defaults"
         parts = []
@@ -1718,37 +1546,31 @@ class PlateWindow(QMainWindow):
             return f"{key}: {type(exc).__name__}: {exc}"
 
     def _activate_operator(self, key: str):
-        """Operator menu clicked: open the operator's UI as a plate tab.
+        """Operator menu clicked: put the operator's controls INLINE in the active view.
 
-        Two panel sources, in this order, and NEITHER of them is silent:
-
-        1. a HAND-WRITTEN panel, named by the ``Operation`` template's ``build_tab``
-           (``StitcherPanel`` converts units and refuses a plane-op; ``DeconQCPanel`` runs
-           the QC sweep inline), so they win.
-        2. otherwise a panel built FROM THE DECLARATION — :class:`squidxplorer._param_panel
-           .GenericOperatorPanel` over the operator's ``params``.
-
-        The right-edge dock and its cards are retired (2026-08-25); a view's ⚙ controls
-        inserts the SAME panel (``ensure_operator_panel`` + ``release_operator_panel``) into
-        that view's own left column. ONE live panel per key: the widget stays in
-        ``_op_tabs``, so ``operator_kwargs_for`` and app-exit disposal see it wherever it is
-        hosted, and this method re-tabs a panel a view currently holds.
+        The per-operator PAGES are shelved (Julio, 2026-08-25: "You should shelf those
+        operator pages"): the only parameter surface is the slot under a view's operators
+        row, so this selects *key* in the active view's dropdown and inserts its controls
+        there. The one page left is the NON-operator illumination tab (`illumination` is a
+        loader, not a run). With no view open the refusal names the fix.
         """
         if self._reader is None or self._overview is None:
             self._readout.setText("open an acquisition first")
             return
-        op = _OPERATIONS_BY_KEY.get(key)
-        if op is not None:
-            key, title, builder = op.key, op.label, getattr(self, op.build_tab)
+        if key == "illumination":
+            op = _OPERATIONS_BY_KEY.get(key)
+            self._open_op_tab(op.key, op.label, getattr(self, op.build_tab))
+            return
+        view = self._viewer_manager.active_view() if self._viewer_manager else None
+        if view is None:
+            self._readout.setText("open a view first: the operator controls live under "
+                                  "its operators row.")
+            return
+        show = getattr(view, "show_operator_controls_for", None)
+        if callable(show):
+            show(str(key))
         else:
-            from squidxplorer._param_panel import GenericOperatorPanel, panel_refusal
-
-            why = panel_refusal(key)
-            if why:
-                self._readout.setText(why)
-                return
-            title, builder = operator_label(key), (lambda k=key: GenericOperatorPanel(self, k))
-        self._open_op_tab(key, title, builder)
+            self._readout.setText(f"the active view cannot host {key!r}'s controls.")
 
     def release_operator_panel(self, key: str):
         """Detach *key*'s live panel from wherever it is hosted and hand it over.
@@ -1767,20 +1589,20 @@ class PlateWindow(QMainWindow):
         return panel
 
     def adopt_operator_panel(self, key: str) -> None:
-        """Take *key*'s live panel back as a plate tab when nothing else hosts it.
+        """PARK *key*'s live panel, hidden, when nothing else hosts it.
 
         The other half of :meth:`release_operator_panel`: a panel a view's param slot lets
         go of must never be left a parentless orphan (a deleteLater on one measured a
-        segfault in the next window's teardown), so removal hands it straight back here.
+        segfault in the next window's teardown). It used to come back as a plate TAB; the
+        operator pages are shelved (Julio, 2026-08-25), so it parks unseen until the next
+        insertion - still filed in ``_op_tabs``, still the run's single source of truth.
         """
         panel = (getattr(self, "_op_tabs", None) or {}).get(str(key))
         if panel is None or not _widget_alive(panel):
             return
-        if self._left_tabs.indexOf(panel) < 0:
-            panel.setMaximumHeight(16777215)     # undo the param slot's fixed-slot ceiling
-            self._left_tabs.addTab(panel, operator_label(str(key)))
-            panel.setVisible(True)
-        self._sync_left_tabs_visible()
+        panel.hide()
+        panel.setParent(self)                    # parked, never parentless
+        panel.setMaximumHeight(16777215)         # undo the param slot's fixed-slot ceiling
 
     # -- ONE WINDOW: the plate VIEW and the LOG render as slots in the view window ---------------
     # Julio (2026-08-25): "this refactor enables us to have only one window." The books stay
@@ -1803,8 +1625,6 @@ class PlateWindow(QMainWindow):
             box = self._plate_slot_box = _PlateSlotBox()
         self._plate_hosted = True
         self._mount_overview()
-        # The log opens at 3/4 of the plate slot's height (the chart's rule); flexible below.
-        self._log_panel.setMaximumHeight(int(box.PLATE_SLOT_PX * 3 / 4))
         return box, self._log_panel
 
     def _mount_overview(self) -> None:
@@ -1833,7 +1653,6 @@ class PlateWindow(QMainWindow):
             self._mount_overview()
         log_panel = getattr(self, "_log_panel", None)
         if log_panel is not None and _widget_alive(log_panel):
-            log_panel.setMaximumHeight(16777215)
             col = getattr(self, "_right_col", None)
             if col is not None and log_panel.parentWidget() is not col:
                 col.addWidget(log_panel)
@@ -1854,14 +1673,7 @@ class PlateWindow(QMainWindow):
         if deck is None or screen is None:
             return
         try:
-            avail = screen.availableGeometry()
-            frame, client = deck.frameGeometry(), deck.geometry()
-            deck.setGeometry(
-                avail.left() + (client.left() - frame.left()),
-                avail.top() + (client.top() - frame.top()),
-                avail.width() - (frame.width() - client.width()),
-                avail.height() - (frame.height() - client.height()),
-            )
+            self._fit_frame(deck, screen.availableGeometry())
         except Exception:                        # noqa: BLE001 - geometry is never worth a crash
             pass
 
@@ -1887,19 +1699,20 @@ class PlateWindow(QMainWindow):
         return GenericOperatorPanel(self, "mip")
 
     def _build_stitch_tab(self) -> QWidget:
-        """maragall/stitcher's control surface, in pane 1 (IMA-decon-stitch-ui).
+        # The PAGES are shelved (Julio, 2026-08-25): stitch's controls are its declaration,
+        # drawn by the generic form (the z-handling param renders as a combo with the
+        # keep-every-plane label; registration_channel/_t and correct_illumination sit
+        # behind "advanced parameters"). StitcherPanel is gone whole.
+        from squidxplorer._param_panel import GenericOperatorPanel
 
-        This used to be `_build_run_tab` -- a destination picker and a "first N wells"
-        spinner, with NO stitcher controls at all. Julio: "Right now I'm blocked in testing
-        the post-processing because Stitcher doesn't have that maragall/Stitcher interface
-        embedded in our top-left subpane." What a user tunes on a registration/fusion run
-        (registration on/off, registration channel, feather width, blunder thresholds,
-        which channels to fuse) now lives in `_op_panels.StitcherPanel` and travels to both
-        the preview and the saved run through `operator_kwargs`.
-        """
-        from squidxplorer._op_panels import StitcherPanel
+        return GenericOperatorPanel(self, "stitch")
 
-        return StitcherPanel(self)
+    def _build_fstack_tab(self) -> QWidget:
+        # fstack's three knobs are all declared advanced: the generic form's headline is
+        # empty and only the "advanced parameters" disclosure renders (Julio, 2026-08-25).
+        from squidxplorer._param_panel import GenericOperatorPanel
+
+        return GenericOperatorPanel(self, "fstack")
 
     def _build_register_tab(self) -> QWidget:
         # The declared params plus the copy switch; the registered copy is the disk artifact.
@@ -1908,17 +1721,12 @@ class PlateWindow(QMainWindow):
         return RegisterPanel(self)
 
     def _build_decon_tab(self) -> QWidget:
-        """The RL semi-convergence sweep's controls (IMA-252 + IMA-decon-stitch-ui).
+        # The QC sweep is shelved whole (Julio, 2026-08-25: "The sweep code should be
+        # shelved. I can just run on an ROI iteration by iteration."): iterations headline
+        # plus the NI row, and the user steps iterations by hand with ROI previews.
+        from squidxplorer._param_panel import DeconPanel
 
-        The picture the sweep produces -- the deconvolved image in turbo with the x-z and y-z
-        strips, steppable iteration by iteration -- lives INLINE in the panel (2026-08-24), so
-        the whole choose-the-iteration loop travels with the panel into the operator dock. It
-        was `_build_plane_op_tab` (a preview button and nothing else), which gave no way to
-        choose an iteration count at all.
-        """
-        from squidxplorer._op_panels import DeconQCPanel
-
-        return DeconQCPanel(self)
+        return DeconPanel(self)
 
     # -- the host surface the pane-1 operator panels use -----------------------------------
     #
@@ -1930,20 +1738,8 @@ class PlateWindow(QMainWindow):
         if text:
             self._run_readout(text)
 
-    def publish_qc_result(self, widget: QWidget, title: str) -> None:
-        """Show *widget* as a result tab beside the operators, and bring it to the front.
-
-        THE seam between an operator panel and the window. Keyed by title, so re-running the same
-        subject reuses its tab instead of stacking one per iteration.
-
-        IT LANDS IN `_left_tabs`, WHICH IS ON SCREEN. It used to go to the exploration pane's tab
-        bar, and for six weeks after 2b8fbc5 that bar had no parent at all: the decon QC composite
-        — the turbo x-y / x-z / y-z picture the whole iterate-and-look loop exists for — was
-        computed, put in a tab, and shown to nobody. Pressing Run silently produced nothing the
-        user could see. The pane is gone now, and the result goes where the controls that asked
-        for it already are.
-        """
-        self._open_op_tab(f"qc:{title}", title, lambda w=widget: w)
+    # publish_qc_result is DELETED with the QC sweep (Julio, 2026-08-25): no operator
+    # publishes a result tab any more; a preview lands as a data layer in the asking view.
 
     def _build_illumination_tab(self) -> QWidget:
         """The illumination-profile loader and estimator THAT FEED STITCH.
@@ -2054,12 +1850,7 @@ class PlateWindow(QMainWindow):
         v.addWidget(est_btn)
         v.addWidget(prof_lbl)
 
-        note = QLabel("Profiles installed here are what a stitch run's illumination correction "
-                      "uses when it covers every channel of the run; otherwise stitch estimates "
-                      "its own from the tiles. The raw acquisition is never modified.")
-        note.setWordWrap(True)
-        note.setStyleSheet("color:#8b98ad;font-size:11px;")
-        v.addWidget(note)
+        # No explanatory paragraph (Julio, 2026-08-25): the loader's controls are the tab.
         v.addStretch(1)
         return w
 
@@ -2171,7 +1962,16 @@ class PlateWindow(QMainWindow):
         if menu is not None:                       # the uncarded operators gate on the same flag
             menu.setEnabled(flag)
 
-    # -- drag & drop --
+    # -- the empty state and drag & drop --
+    def _set_empty_state(self, empty: bool) -> None:
+        """THE empty launch (Julio, 2026-08-25): the hero area is a drop target saying one
+        centred line, and the data-bound title controls (the view combo, Open view, paste
+        LUTs) wait for an acquisition - a control with nothing to act on is a dead control.
+        One writer: ingest's refusal arms and its success, and the computed-plate opener."""
+        self._drop.setVisible(empty)
+        for w in (self._view_caption, self._view_combo, self._open_sel_btn):
+            w.setVisible(not empty)
+
     def _open_acquisition_dialog(self):
         """File > Open: pick a Squid acquisition folder (the reliable alternative to drag-drop)."""
         d = QFileDialog.getExistingDirectory(self, "Open a Squid acquisition folder")
@@ -2330,13 +2130,6 @@ class PlateWindow(QMainWindow):
         # latch, and never a plate write from the window's side. Contrast only: a stain-LUT
         # channel's plate look must remain the LUT rendering after a paste, so no colormap and
         # no eye icons travel.
-        sig = getattr(win, "lutsPasted", None)
-        if sig is not None:
-            try:
-                sig.connect(self._follow_window_luts)
-            except Exception:                    # noqa: BLE001 - a stub window without the signal
-                pass
-
         # `on_user_op` is KEPT for its own reason: which processing LAYER the plate draws is a
         # different quantity from how it is windowed, and it has exactly one honest answer.
 
@@ -2353,24 +2146,6 @@ class PlateWindow(QMainWindow):
         if callable(sub):
             sub(_op_sink)
         bound.add(wid)
-
-    def _follow_window_luts(self, win) -> None:
-        """A view pasted LUTs: the plate takes each channel's window off that view's own layers.
-
-        The parity Julio named (plate contrast must equal the window's after a paste), through
-        the one reader (`per_channel_luts`) and the plate's FOLLOW path. Contrast only.
-        """
-        from squidxplorer._lut_clipboard import per_channel_luts
-
-        try:
-            luts = per_channel_luts(win)
-        except Exception as exc:                 # noqa: BLE001 - a dead window is not a crash
-            log.warning("the plate could not read the pasted window's LUTs: %s", exc)
-            return
-        for name, lut in (luts or {}).items():
-            clim = lut.get("clim")
-            if clim is not None:
-                self._follow_window_contrast(str(name), float(clim[0]), float(clim[1]))
 
     def _follow_window_contrast(self, channel: str, lo: float, hi: float) -> None:
         """The plate takes ONE channel's resolved window from a view, through the FOLLOW path.
@@ -2599,7 +2374,7 @@ class PlateWindow(QMainWindow):
         self._op_stack.reset(); self._op_stack.add("computed", "computed MIP")
         self._apply_layers()
         self._refresh_layers_tab()
-        self._drop.hide()
+        self._set_empty_state(False)
         self._left_l.addWidget(self._overview, 1)
         self._declare_channel_axis(channels, np.uint16)
         self._enable_operators(False)             # no raw data -> operators stay disabled
@@ -2658,7 +2433,8 @@ class PlateWindow(QMainWindow):
                      regions: Optional[list] = None, save: bool = True,
                      operator_kwargs: Optional[dict] = None,
                      requester: Optional[Any] = None,
-                     z_level: int = 0):
+                     z_level: int = 0, preview_z_level: Optional[int] = None,
+                     windows: Optional[dict] = None, deliver_depth: bool = False):
         """Run a plane operator (MIP / reference) over the plate, or over a subset of it.
 
         ``requester`` IS THE COMPLETION CALLBACK, and its absence was the root fault Julio
@@ -2765,6 +2541,11 @@ class PlateWindow(QMainWindow):
             scope = f"{len(regions)} selected well(s)"
         else:
             scope = f"{len(regions)} well" + ("s" if len(regions) != 1 else "")
+        # ROI windows (ruling z) ride ONLY on a field-mapped PREVIEW: a save writes whole fields.
+        if windows and (save or not isinstance(regions, dict)):
+            self._readout.setText(
+                "ROI windows need a preview over {region: [fov, ...]}; a save writes whole fields")
+            return
 
         # CONFIRM THE RESOLVED TARGET SET, by name, before the QThread starts (Defect 2).
         # The selector names the RULE ("selected wells"); this names the ANSWER. They differ
@@ -2865,7 +2646,8 @@ class PlateWindow(QMainWindow):
         worker = _OperatorWorker(key, self._reader, self._meta, self._fov_index,
                                  str(out_dir) if out_dir else "", regions=regions, save=save,
                                  n_fovs=None, operator_kwargs=operator_kwargs,
-                                 z_level=z_level)
+                                 z_level=z_level, preview_z_level=preview_z_level,
+                                 windows=windows, deliver_depth=bool(deliver_depth and not save))
         self._overview.set_mosaic_boxes(worker.mosaic_boxes)
         # A re-run must not composite on top of the LAST run's pixels: with a mosaic, a run that
         # lands fewer FOVs would otherwise leave the previous run's fields standing in the same
@@ -2929,7 +2711,9 @@ class PlateWindow(QMainWindow):
             requester=requester,
             # Is this run only PART of each well? A mapping means explicit fields (see `_on_tile`).
             is_partial=isinstance(regions, dict),
-            t0=t0)
+            t0=t0,
+            scope=regions if isinstance(regions, dict) else None,
+            windows=windows)
         self._tell_requester(requester, "operator_started", label)
         self.log.started(self._run.action, address=self._run.address)
         self._run_readout(f"● {label} · {scope}{dest} …")
@@ -3142,6 +2926,10 @@ class PlateWindow(QMainWindow):
                 # in no registry, so asking with it accumulated a stitch as if it were a per-FOV
                 # operator. `operator_name` strips the namespace; see `operator_layer_key`.
                 region_operator=is_region_operator(operator_name(op)),
+                # A scoped run ({region: [fov, ...]}) owes ONLY its own fields (2026-08-25).
+                fovs=(run.scope or {}).get(str(region)),
+                # ...and a windowed one places each field's window at its own corner.
+                windows=run.region_windows(str(region)),
             )
             accs[str(region)] = acc
         try:
@@ -3230,7 +3018,11 @@ class PlateWindow(QMainWindow):
         # same-process reuse, not IPC, and nothing has to be serialised.
         from squidxplorer._recipe import acquisition_version, cache_operator_result
 
-        cache_operator_result(op, result, acquisition_version(self._reader))
+        # A SCOPED result (an ROI preview's own fields) is never cached: the cache is per
+        # region, and a replay would hand a later mosaic window a partial layer as if it
+        # were the region's (Julio, 2026-08-25: "decon layer is != raw view").
+        if self._run is None or self._run.scope is None:
+            cache_operator_result(op, result, acquisition_version(self._reader))
         added = self._deliver_to_views(op, result)
         if added:
             self._readout.setText(
@@ -3260,8 +3052,13 @@ class PlateWindow(QMainWindow):
         if mgr is None:
             return 0
         requester = self._run.requester if self._run is not None else None
+        # THE VIEW THAT ASKED IS THE ONLY SINK (Julio, 2026-08-25: a preview's layer "lands
+        # ONLY in that view"; live, an ROI child's decon reached the mosaic tab). The dark
+        # fan-out survives only for a run no view asked for (a plate-scoped save).
+        sinks = ([requester] if getattr(requester, "deliver_result", None) is not None
+                 else list(mgr.windows))
         added = 0
-        for win in mgr.windows:
+        for win in sinks:
             deliver = getattr(win, "deliver_result", None)
             if deliver is None:
                 continue
@@ -3682,7 +3479,12 @@ class PlateWindow(QMainWindow):
         # CLEARED rather than re-read, which is what makes this once-only across re-shows.
         if self._pending_default_view:
             self._pending_default_view = False
-            self._open_default_view()
+            # ON THE NEXT LOOP TURN, never inside this show event. Opening the view here
+            # hosts the plate and hides THIS window while Qt is still mapping it: the widget
+            # reads hidden and the platform window stays on screen (Julio, live 2026-08-25:
+            # "I still see the blank screen where the old plate window used to go";
+            # reproduced offscreen through windowHandle().isVisible()).
+            QTimer.singleShot(0, self._open_default_view)
 
     #: Session flag behind the close-all confirmation. True (the default) = ask. Class-level on
     #: purpose: "don't show me this again" is about the application, not one window. It does not
@@ -3820,7 +3622,6 @@ class PlateWindow(QMainWindow):
         # "windows are peers that outlive the plate", the log float must be explicitly excluded —
         # the panel is a live sink on the process-wide root logger and the bus is uninstalled a few
         # lines below, so a surviving log window would be a console attached to nothing.
-        self._redock_log()
         for key in list(self._floating):   # floated tabs are top-levels of their own — Qt won't
             win = self._floating.pop(key)  # close them for us, and each may hold a live shell
             w = win.take_content()

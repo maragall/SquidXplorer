@@ -298,6 +298,10 @@ def colormap_mid_rgb(layer: Any) -> "Optional[tuple[int, int, int]]":
         return None
 
 
+#: A displayed slice smaller than this is napari's pre-slice placeholder, not data.
+_SLICE_MIN_PX = 4096
+
+
 class MosaicLayers:
     """The two-level hierarchy over a napari ``ViewerModel``."""
 
@@ -308,6 +312,7 @@ class MosaicLayers:
         self._programmatic = 0
         self._user_contrast_cbs: list[Any] = []
         self._user_visibility_cbs: list[Any] = []
+        self._reset_contrast_cbs: list[Any] = []
         self._last_visible: dict[str, bool] = {}
         self._user_op_cbs: list[Any] = []
         self._last_op_visible: dict[str, bool] = {}
@@ -521,7 +526,7 @@ class MosaicLayers:
             return False
         return True
 
-    def widen_contrast_range(self, lo: float, hi: float) -> int:
+    def widen_contrast_range(self, channel: str, lo: float, hi: float) -> int:
         """Open every image layer's contrast slider to at least ``(lo, hi)``. Returns how many moved.
 
         Called when `_bitdepth` raises the dataset ceiling -- the C3-then-E7 case, where the
@@ -539,7 +544,9 @@ class MosaicLayers:
         """
         moved = 0
         with self.programmatic():
-            for layer in list(getattr(self._model, "layers", []) or []):
+            # PER CHANNEL (Julio, 2026-08-25: a dim channel's slider spanned the saturated
+            # channel's 16 bits): only this channel's own layers, never another's ceiling.
+            for layer in list(self._by_channel.get(str(channel)) or []):
                 if getattr(layer, "rgb", False):
                     continue
                 if self._widen_range(layer, lo, hi):
@@ -890,7 +897,7 @@ class MosaicLayers:
             # the clipped slider this change exists to remove.
             try:
                 dt = getattr(_first_level(data, bool(multiscale)), "dtype", None)
-                lo_r, hi_r = _bitdepth.range_for(dt)
+                lo_r, hi_r = _bitdepth.range_for(dt, channel)
                 lo_w, hi_w = kwargs.get("contrast_limits", (lo_r, hi_r))
                 # Never narrower than what is displayed, or napari clamps the window itself.
                 layer.contrast_limits_range = (min(lo_r, float(lo_w)), max(hi_r, float(hi_w)))
@@ -1009,7 +1016,8 @@ class MosaicLayers:
             # and the layer's own current window is the floor, so the VALUE cannot move.
             try:
                 dt = getattr(_first_level(data, bool(multiscale)), "dtype", None)
-                lo_r, hi_r = _bitdepth.range_for(dt)
+                key = key_of(layer)
+                lo_r, hi_r = _bitdepth.range_for(dt, key.channel if key else None)
                 lo_w, hi_w = (float(v) for v in layer.contrast_limits)
                 self._widen_range(layer, min(lo_r, lo_w), max(hi_r, hi_w))
             except Exception:                    # noqa: BLE001 - cosmetic; the data already landed
@@ -1136,6 +1144,7 @@ class MosaicLayers:
     def _register_channel(self, channel: str, layer: Any) -> None:
         peers = self._by_channel.setdefault(channel, [])
         peers.append(layer)
+        self._bind_reset_contrast(channel, layer)
         # Mirror FIRST: the identity must agree with itself before any tap is told about it.
         self._connect_identity_mirror(layer)
         # Connections are made HERE, per layer, because layer objects are destroyed and
@@ -1316,6 +1325,56 @@ class MosaicLayers:
             bool(getattr(p, "visible", False)) for p in (self._by_channel.get(channel) or []))
         layer.events.visible.connect(_fire)
 
+    # -- napari's "once" autoscale is OUR window rule (Julio, 2026-08-25: "the napari
+    # autocontrast SUCKS for the G7 dataset"; then "why did you do an auto button?": no new
+    # control). The layer-controls once button calls `layer.reset_contrast_limits`; every
+    # app layer gets a per-instance bind that samples the slice napari has ALREADY
+    # materialised (`_data_view`) and hands (channel, sample) to the subscriber, which
+    # computes off the Qt thread and lands through set_contrast so the identity mirror
+    # holds. With no subscriber (a bare model) it computes in place.
+    def _bind_reset_contrast(self, channel: str, layer: Any) -> None:
+        def _reset(mode=None, _ch=channel, _ly=layer):
+            self._request_reset_contrast(_ch, _ly)
+
+        try:
+            layer.reset_contrast_limits = _reset
+        except Exception:                        # noqa: BLE001 - a layer type without it
+            pass
+
+    @staticmethod
+    def displayed_sample(layer: Any) -> Any:
+        """What napari is showing for *layer* right now: its materialised slice, else the
+        coarsest rung (never level 0 of a lazy pyramid on this thread)."""
+        view = getattr(layer, "_data_view", None)
+        # A slice napari has computed (a placeholder before the first slice is 1 px).
+        if view is not None and getattr(view, "size", 0) >= _SLICE_MIN_PX:
+            return view
+        # Before the first slice (napari calls reset itself for a layer that arrived with no
+        # window): ONE plane of the coarsest rung, never a whole lazy stack (measured: the
+        # stack fallback materialised every z of the region on add).
+        from squidxplorer._contrast import sample_plane
+
+        levels = pyramid_levels(layer.data)
+        return sample_plane(levels if levels else [layer.data])
+
+    def _request_reset_contrast(self, channel: str, layer: Any) -> None:
+        sample = self.displayed_sample(layer)
+        if self._reset_contrast_cbs:
+            for cb in list(self._reset_contrast_cbs):
+                cb(channel, sample)
+            return
+        from squidxplorer._contrast import auto_contrast
+
+        window = auto_contrast(np.asarray(sample))
+        if window is not None:
+            with self.programmatic():
+                self.set_contrast(channel, *window)
+
+    def on_reset_contrast(self, callback) -> None:
+        """Subscribe to napari's once-autoscale requests: ``callback(channel, sample)`` owns
+        the compute (off the Qt thread) and lands the window through ``set_contrast``."""
+        self._reset_contrast_cbs.append(callback)
+
     def on_user_visibility(self, callback) -> None:
         """Subscribe to channel visibility the USER changed. ``callback(channel, visible)``."""
         self._user_visibility_cbs.append(callback)
@@ -1437,11 +1496,11 @@ class MosaicLayers:
 
 def _auto_window_for(data: Any, multiscale: bool) -> Optional[tuple[float, float]]:
     """The seed contrast window for *data*, or None to let napari autoscale."""
-    from squidxplorer._contrast import auto_contrast, sample_plane
+    from squidxplorer._contrast import SEED_MAX_PX, auto_contrast, sample_plane
 
     try:
         levels = data if multiscale else [data]
-        plane = sample_plane(levels)
+        plane = sample_plane(levels, max_px=SEED_MAX_PX)   # the finest rung the budget allows
         return None if plane is None else auto_contrast(plane)
     except Exception:                       # noqa: BLE001 - seeding is cosmetic, never fatal
         return None

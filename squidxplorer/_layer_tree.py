@@ -14,9 +14,12 @@ from qtpy.QtGui import QImage
 from qtpy.QtWidgets import QFrame, QTreeView
 
 from squidxplorer._napari_view import MosaicLayers, key_of
+from squidxplorer._logpane import get_logger
 
 #: internalId marking a top-level (processing-layer) row; a child stores its op row there.
 _TOP = 0xFFFFFFFF
+
+log = get_logger("layers")
 
 
 #: napari's own delegate roles, resolved once and defensively: a napari upgrade that moves
@@ -246,6 +249,23 @@ class MosaicTreeModel(QAbstractItemModel):
             return Qt.Unchecked
         return _check_state(group)
 
+    def _visibility(self) -> dict:
+        """``{id(layer): (layer, visible)}`` over every app layer, for the diagnostic below."""
+        return {id(ly): (ly, bool(getattr(ly, "visible", False))) for ly in self._mosaic.ours()}
+
+    def _log_write(self, what: str, want: bool, before: dict) -> None:
+        """ONE DEBUG line per checkbox write (ruling u diagnostic, Julio: "when I turn off
+        layer 561 for decon, the whole decon layer turns off"): the identity written and
+        every layer whose ``visible`` changed as a consequence, by name, op and channel."""
+        changed = []
+        for ident, (ly, now) in self._visibility().items():
+            if now != before.get(ident, (ly, None))[1]:
+                k = key_of(ly)
+                name = getattr(ly, "name", "?")
+                changed.append(f"{name} ({k.op}/{k.channel})" if k is not None else str(name))
+        log.debug("layer checkbox: %s -> %s; changed %d layer(s): %s", what,
+                  "on" if want else "off", len(changed), ", ".join(changed) or "none")
+
     def setData(self, index=QModelIndex(), value=None, role=Qt.EditRole) -> bool:
         if not index.isValid() or role != Qt.CheckStateRole:
             return False
@@ -257,8 +277,10 @@ class MosaicTreeModel(QAbstractItemModel):
             layers = self._mosaic.layers_for(*key)
             if not layers:
                 return False
+            before = self._visibility()
             for layer in layers:
                 layer.visible = want
+            self._log_write(f"{key[0]}/{key[1]}", want, before)
             self.dataChanged.emit(index, index, [role])
             # The parent's state is derived from this leaf; repaint it too.
             parent = self.parent(index)
@@ -269,8 +291,10 @@ class MosaicTreeModel(QAbstractItemModel):
         if index.row() >= len(self._rows):
             return False
         op = self._rows[index.row()][0]
+        before = self._visibility()
         for layer in self._mosaic.group(op):
             layer.visible = want
+        self._log_write(f"{op} (group)", want, before)
         self.dataChanged.emit(index, index, [role])
         # Toggling a group changes every child; emit for each so their checkboxes repaint.
         for child_row in range(self.rowCount(index)):
@@ -338,6 +362,24 @@ class MosaicTree(QTreeView):
         self.setStyleSheet(_napari_stylesheet())
         _install_napari_delegate(self)
         self.selectionModel().currentChanged.connect(self._select_in_napari)
+        # The column's list must show a whole group without scrolling (measured on an 862 px
+        # screen: ~80 px, one of three raw channels behind a scrollbar). The minimum follows
+        # the layers: one group header plus the largest group's channel rows.
+        self.model().modelReset.connect(self._refit_minimum)
+        self._refit_minimum()
+
+    def rows_wanted(self) -> int:
+        """One group header plus the largest group's channel rows (at least two rows)."""
+        model = self.model()
+        largest = max((model.rowCount(model.index(r, 0)) for r in range(model.rowCount())),
+                      default=1)
+        return 1 + max(1, int(largest))
+
+    def _refit_minimum(self) -> None:
+        row = self.sizeHintForRow(0) if self.model().rowCount() else 0
+        if row <= 0:
+            row = self.fontMetrics().height() + 8
+        self.setMinimumHeight(self.rows_wanted() * int(row) + 2 * self.frameWidth())
 
     def _select_in_napari(self, current, _previous=None) -> None:
         """Selecting a row here selects the layer(s) in napari, so its controls follow."""

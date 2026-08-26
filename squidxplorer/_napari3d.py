@@ -456,8 +456,8 @@ def open_native_3d(
         pass
     # Free the native stacks the instant the popout is closed.
     _wire_close_to_release_memory(viewer)
-    log.info("3D native: opened %s / fov %s, %d channel(s), %d z at native %.3f um/px, dz %.2f um",
-             region, fov, len(viewer.layers), n_z, px, dz)
+    log.debug("3D native: opened %s / fov %s, %d channel(s), %d z at native %.3f um/px, dz %.2f um",
+              region, fov, len(viewer.layers), n_z, px, dz)
     return viewer
 
 
@@ -543,5 +543,5 @@ def open_native_3d_volume(
     except Exception:                                   # noqa: BLE001 - cosmetic
         pass
     _wire_close_to_release_memory(viewer)
-    log.info("3D native volume: %d channel(s), shape %s, scale %s", len(vols), first.shape, scale)
+    log.debug("3D native volume: %d channel(s), shape %s, scale %s", len(vols), first.shape, scale)
     return viewer

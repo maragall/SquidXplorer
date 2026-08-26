@@ -1,25 +1,4 @@
-"""Which view is ACTIVE — and the registry learning it from the user, not only from itself.
-
-THE DEFECT THIS CLOSES. ``ViewerManager._focused_id`` was written by five places, and every one of
-them was the app moving focus: ``_spawn``, ``focus``, ``set_selected``, ``clear_focus``,
-``collapse_all``. None of them was the USER moving it. ``RegionViewer.changeEvent`` already saw
-every activation — it used the signal to halt playback in a window nobody was watching — and told
-the registry nothing.
-
-So clicking a view's title bar changed nothing the app believed. The plate kept washing whichever
-window was focused last time the app decided, and anything reading ``focused_id`` as "the window
-the user is looking at" read the contrast of a window the user had left. It was a lie about the
-user, told by a registry that only watched itself.
-
-That matters now because the plate is becoming a navigator: "click a well to move the active view"
-is only meaningful if "the active view" is the window the user actually last worked in.
-
-WHY OFFSCREEN TESTS DRIVE ``changeEvent`` DIRECTLY. Real activation needs a window manager, and
-there is none under ``QT_QPA_PLATFORM=offscreen`` — ``activateWindow()`` and ``isActiveWindow()``
-do not describe anything. So these tests state the window's answer (monkeypatching
-``isActiveWindow``) and hand Qt's own event in, which exercises the real handler rather than a
-paraphrase of it.
-"""
+"""Which view is ACTIVE — and the registry learning it from the user, not only from itself."""
 
 from __future__ import annotations
 
@@ -65,33 +44,19 @@ def _plate_with_two_views(qapp, root):
     return win, a, b
 
 
-def test_activating_a_window_makes_it_the_active_view(qapp, napari_pane_stub, squid_dataset,
-                                                      monkeypatch):
-    """THE DEFECT, stated directly. Spawning b left b focused; the user going back to a must move
-    the registry with them."""
-    root, _ = squid_dataset
-    win, a, b = _plate_with_two_views(qapp, root)
-    mgr = win._viewer_manager
-    try:
-        assert mgr.focused_id == b.window_id, "the newest window should start focused"
-        _activate(monkeypatch, a, other=b)
-        assert mgr.focused_id == a.window_id, "activating a window did not move the focus"
-        assert mgr.active_view() is a
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
-def test_activating_a_window_moves_the_plate_wash(qapp, napari_pane_stub, squid_dataset,
-                                                  monkeypatch):
-    """``viewFocused`` is what repaints the plate's per-view hue. Recording the focus without
-    announcing it would leave the plate showing the previous window's wells."""
+def test_activating_a_window_makes_it_the_active_view_and_moves_the_plate_wash(
+        qapp, napari_pane_stub, squid_dataset, monkeypatch):
+    """THE DEFECT, stated directly; ``viewFocused`` is what repaints the plate's per-view hue."""
     root, _ = squid_dataset
     win, a, b = _plate_with_two_views(qapp, root)
     mgr = win._viewer_manager
     seen = []
     mgr.viewFocused.connect(lambda regions: seen.append(list(regions)))
     try:
+        assert mgr.focused_id == b.window_id, "the newest window should start focused"
         _activate(monkeypatch, a, other=b)
+        assert mgr.focused_id == a.window_id, "activating a window did not move the focus"
+        assert mgr.active_view() is a
         assert seen, "activating a window announced nothing"
         assert seen[-1] == list(a._regions), "the wash moved to the wrong window's regions"
     finally:
@@ -100,11 +65,7 @@ def test_activating_a_window_moves_the_plate_wash(qapp, napari_pane_stub, squid_
 
 def test_reactivating_the_already_focused_window_announces_nothing(qapp, napari_pane_stub,
                                                                    squid_dataset, monkeypatch):
-    """THE PING-PONG GUARD, and the reason ``focus`` sets ``_focused_id`` before it activates.
-
-    ``focus()`` calls ``activateWindow()``, which fires ``changeEvent``, which lands in
-    ``note_focus``. Without the unchanged-id early return that is a loop with the window manager —
-    and a plate that repaints its hue on every frame of it."""
+    """THE PING-PONG GUARD, and the reason ``focus`` sets ``_focused_id`` before it activates."""
     root, _ = squid_dataset
     win, a, b = _plate_with_two_views(qapp, root)
     mgr = win._viewer_manager
@@ -119,29 +80,9 @@ def test_reactivating_the_already_focused_window_announces_nothing(qapp, napari_
         shutdown_plate_window(qapp, win)
 
 
-def test_focus_does_not_ping_pong_through_the_window_manager(qapp, napari_pane_stub, squid_dataset):
-    """The same guard, exercised through the real ``focus()`` path rather than a synthetic event."""
-    root, _ = squid_dataset
-    win, a, b = _plate_with_two_views(qapp, root)
-    mgr = win._viewer_manager
-    mgr.focus(a.window_id)
-    seen = []
-    mgr.viewFocused.connect(lambda regions: seen.append(list(regions)))
-    try:
-        mgr.focus(a.window_id)
-        qapp.processEvents()
-        assert len(seen) <= 1, f"focusing the focused window announced {len(seen)} times"
-    finally:
-        shutdown_plate_window(qapp, win)
-
-
 def test_deactivating_does_not_clear_the_active_view(qapp, napari_pane_stub, squid_dataset,
                                                      monkeypatch):
-    """CLICKING THE PLATE MUST NOT COST THE PLATE ITS TARGET.
-
-    Deactivation is not "no view is focused" — it is usually the user reaching for the plate, and
-    the plate is how the focused view gets driven. Clearing on the way out would mean the target
-    disappeared at the exact moment it was needed. ``_focused_id`` therefore means LAST-focused."""
+    """CLICKING THE PLATE MUST NOT COST THE PLATE ITS TARGET."""
     root, _ = squid_dataset
     win, a, b = _plate_with_two_views(qapp, root)
     mgr = win._viewer_manager
@@ -156,16 +97,13 @@ def test_deactivating_does_not_clear_the_active_view(qapp, napari_pane_stub, squ
 
 
 def test_deactivating_still_halts_playback(qapp, napari_pane_stub, squid_dataset, monkeypatch):
-    """The job ``changeEvent`` already had. Adding the registry report must not displace it — a
-    window nobody is watching still has to stop drawing."""
+    """The job ``changeEvent`` already had."""
     root, _ = squid_dataset
     win, a, b = _plate_with_two_views(qapp, root)
     stopped = []
 
     class _Playing:
-        """A control that is playing. Stands IN FOR the slider rather than mutating it: the real
-        ``is_playing`` is a read-only property over the animation thread, and a test that could
-        set it would be describing a slider this app does not have."""
+        """A control that is playing."""
 
         is_playing = True
 
@@ -179,10 +117,6 @@ def test_deactivating_still_halts_playback(qapp, napari_pane_stub, squid_dataset
         a.changeEvent(QEvent(QEvent.ActivationChange))
         assert stopped, "deactivating a window no longer halts its playback"
     finally:
-        # PUT THE REAL SLIDER BACK BEFORE TEARDOWN. `dispose` joins the slider's animation thread
-        # through this attribute, so a window torn down while the stub is installed destroys a live
-        # QThread and aborts the interpreter (0xC0000409, measured). Not monkeypatch: its undo runs
-        # after this block, which is already too late.
         a._slider = real_slider
         shutdown_plate_window(qapp, win)
 

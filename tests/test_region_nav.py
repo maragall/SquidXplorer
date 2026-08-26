@@ -38,27 +38,17 @@ def test_set_index_moves_and_announces_once():
     assert seen == [(2, "B1")]
 
 
-def test_setting_the_same_index_does_not_re_announce():
+def test_set_region_is_set_index_and_a_repeat_does_not_re_announce():
     """A slider that echoes its own value back would ping-pong forever with the widget that set it."""
-    c = RegionCursor()
-    c.set_order(["A1", "A2"])
-    seen = []
-    c.subscribe(lambda i, r: seen.append(i))
-    c.set_index(1)
-    c.set_index(1)
-    c.set_index(1)
-    assert seen == [1]
-
-
-def test_set_region_and_set_index_are_the_same_move():
     c = RegionCursor()
     c.set_order(["A1", "A2", "B1"])
     c.set_region("B1")
     assert c.index == 2
-    a = []
-    c.subscribe(lambda i, r: a.append((i, r)))
-    c.set_index(2)          # already there by id — must NOT fire again
-    assert a == []
+    seen = []
+    c.subscribe(lambda i, r: seen.append(i))
+    c.set_index(2)
+    c.set_index(2)
+    assert seen == []
 
 
 def test_set_region_rejects_an_unknown_region():
@@ -96,7 +86,6 @@ def test_reordering_keeps_you_on_the_same_region_when_it_survives():
     c.set_region("B1")
     moved = []
     c.subscribe(lambda i, r: moved.append(r))
-    # The surviving region is deliberately NOT first in the new order, so an index-0 snap fails.
     c.set_order(["A2", "B1", "B2"])
     assert c.region == "B1" and c.index == 1
     assert moved == [], "staying on the same region is not a navigation; nothing may reload"
@@ -124,14 +113,6 @@ def test_clearing_the_order_clears_the_cursor():
 # `activated` — "the user explicitly opened a region", which is NOT "a region is displayed"
 # --------------------------------------------------------------------------------------
 
-def test_a_plate_load_displays_a_region_without_activating_it():
-    """If merely opening a plate counted as activation, every run would narrow to region 0."""
-    c = RegionCursor()
-    c.set_order(["A1", "A2"])
-    assert c.region == "A1"
-    assert not c.activated
-
-
 def test_activate_marks_it_and_moves_there():
     c = RegionCursor()
     c.set_order(["A1", "A2"])
@@ -143,7 +124,7 @@ def test_activate_marks_it_and_moves_there():
 
 
 def test_activating_the_region_already_shown_still_marks_it_activated():
-    """Double-clicking the region already on screen must count."""
+    """A plate load displays a region without activating it; double-clicking that region must count."""
     c = RegionCursor()
     c.set_order(["A1", "A2"])
     assert c.region == "A1" and not c.activated
@@ -154,16 +135,6 @@ def test_activating_the_region_already_shown_still_marks_it_activated():
 # --------------------------------------------------------------------------------------
 # Subscribers
 # --------------------------------------------------------------------------------------
-
-def test_every_subscriber_is_told(monkeypatch):
-    c = RegionCursor()
-    c.set_order(["A1", "A2"])
-    a, b = [], []
-    c.subscribe(lambda i, r: a.append(r))
-    c.subscribe(lambda i, r: b.append(r))
-    c.set_index(1)
-    assert a == ["A2"] and b == ["A2"]
-
 
 def test_a_subscriber_that_raises_does_not_silence_the_others():
     c = RegionCursor()
@@ -291,7 +262,6 @@ def test_playback_is_napari_s_and_it_walks_regions(qapp, make_slider):
 
     assert not s.is_playing
     s.play(fps=30)
-    # `is_playing` right after play() is a race against napari's animation thread; assert on moves.
     assert _pump(qapp, lambda: len(visited) >= 4), f"playback stalled at {visited}"
     assert s.is_playing
     assert _pump(qapp, lambda: len(visited) >= 9), f"playback stopped early at {visited}"

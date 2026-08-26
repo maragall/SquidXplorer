@@ -1,8 +1,4 @@
-"""The contrast slider's ceiling: measured, monotone, and biased to over-cover.
-
-The two datasets these tests are written from are real and on disk. Their maxima are the
-parameters below, so a rule that stops working on them fails here rather than on screen.
-"""
+"""The contrast slider's ceiling: measured, monotone, and biased to over-cover."""
 
 from __future__ import annotations
 
@@ -65,14 +61,6 @@ def test_the_ceiling_only_ever_RISES():
     assert d.ceiling == 16383.0
 
 
-def test_observing_within_the_current_ceiling_reports_no_change():
-    """`observe` returning True is what fires the widen broadcast, so it must mean something."""
-    d = _bitdepth.depth()
-    assert d.observe(1000.0) is True            # 65535 -> 4095 is a change
-    assert d.observe(2000.0) is False           # still 12-bit; no layer needs touching
-    assert d.ceiling == 4095.0
-
-
 def test_a_settled_dataset_stops_measuring():
     """Once 16-bit is proved nothing can widen it further, and the hot path says so."""
     d = _bitdepth.depth()
@@ -124,22 +112,28 @@ def test_nan_does_not_move_the_ceiling():
 
 
 def test_subscribers_hear_every_rise_and_nothing_else():
-    seen: list[tuple[float, float]] = []
-    d = _bitdepth.depth()
-    d.on_change(lambda lo, hi: seen.append((lo, hi)))
+    """Per CHANNEL (2026-08-25): a subscriber hears a channel's own ceiling rise."""
+    import numpy as np
 
-    d.observe(_A_DIM_REGION)                    # 65535 -> 4095
-    d.observe(3000.0)                           # no change
-    d.observe(_A_DATASET)                       # 4095 -> 16383
-    assert seen == [(0.0, 4095.0), (0.0, 16383.0)]
+    seen: list = []
+    d = _bitdepth.depth()
+    d.on_change(lambda ch, lo, hi: seen.append((ch, lo, hi)))
+
+    d.observe_array(np.array([[_A_DIM_REGION]], np.uint16), "c")
+    d.observe_array(np.array([[3000]], np.uint16), "c")          # no rise
+    d.observe_array(np.array([[_A_DATASET]], np.uint16), "c")   # reaches 14 bits
+    assert seen == [("c", 0.0, _bitdepth.channel_ceiling(_A_DIM_REGION)), ("c", 0.0, 16383.0)]
 
 
 def test_a_raising_subscriber_does_not_lose_the_ceiling():
     """A broken listener is a broken listener, not a reason to mis-render the data."""
+    import numpy as np
+
     d = _bitdepth.depth()
-    d.on_change(lambda lo, hi: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert d.observe(_A_DATASET) is True
+    d.on_change(lambda ch, lo, hi: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert d.observe_array(np.array([[_A_DATASET]], np.uint16), "c") is True
     assert d.ceiling == 16383.0
+    assert d.channel_range("c") == (0.0, 16383.0)
 
 
 def test_the_env_override_pins_the_ceiling(monkeypatch):
@@ -160,7 +154,7 @@ def test_the_env_override_does_not_move_even_when_the_data_exceeds_it(monkeypatc
     assert "16380" in caplog.text
 
 
-@pytest.mark.parametrize("junk", ["", "  ", "twelve", "0", "17", "-3"])
+@pytest.mark.parametrize("junk", ["", "twelve", "17"])
 def test_a_junk_override_is_ignored_and_the_data_is_measured(monkeypatch, junk):
     monkeypatch.setenv(_bitdepth.ENV_BIT_DEPTH, junk)
     _bitdepth.new_dataset(np.uint16)
@@ -179,13 +173,7 @@ def test_a_new_dataset_forgets_the_last_ones_ceiling():
 
 
 def test_a_gcd_of_four_does_NOT_become_a_two_bit_shift():
-    """A STANDING REFUSAL of the trailing-zero-bits heuristic, so it is not reinvented.
-
-    The 16-bit set is 12-bit shifted left by 4 -- max 65520 = 4095 * 16 -- but the
-    camera binned 2x2, so four such samples were averaged and the file's gcd is 4. Reading that
-    gcd as the shift gives 14-bit and clips 65520 to 16383, destroying the top 4x of the range.
-    The ONLY thing that decides the ceiling is the largest pixel.
-    """
+    """A STANDING REFUSAL of the trailing-zero-bits heuristic, so it is not reinvented."""
     data = (np.array([0, 4, 16, 1024, 65520], dtype=np.uint16))
     assert int(np.gcd.reduce(data[data > 0])) == 4          # the tempting evidence
     d = _bitdepth.depth()

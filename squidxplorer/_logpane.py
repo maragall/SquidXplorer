@@ -92,6 +92,48 @@ def format_record(record: logging.LogRecord) -> str:
             f"{message} ({record.filename}:{record.lineno})")
 
 
+#: A message carrying one of these reads as a refusal or a failure.
+STATUS_WARN_MARKS = (
+    "fail", "could not", "cannot", "error", "not an .hcs", "no plate",
+    "already processing", "empty selection", "open an acquisition", "open a view",
+    "pick wells first", "not in the current region order", "nowhere to put",
+    "no region is open", "no acquisition open", "stranded",
+)
+
+
+def status_level(text: str) -> int:
+    """WARNING for refusal-shaped status text, INFO otherwise - the one classification."""
+    low = str(text).lower()
+    return logging.WARNING if any(m in low for m in STATUS_WARN_MARKS) else logging.INFO
+
+
+class StatusReadout:
+    """A status surface that IS a log line (2026-08-19, plate; 2026-08-25, every banner).
+
+    Julio: "log messages that show around the GUI and not in the log" was the plate
+    complaint; "I don't like the red strip that appears above the window" retired the view
+    banner the same way. Every ``setText`` lands in the console (refusal-shaped sentences
+    at WARNING, status at INFO; a repeat of the current text is dropped so idempotent
+    writers do not spam), and ``text()`` stays the seam tools/gates and tests assert on.
+    """
+
+    def __init__(self, logger) -> None:
+        self._log = logger
+        self._text = ""
+
+    def setText(self, text) -> None:                 # noqa: N802 - keeps the QLabel spelling
+        text = str(text or "")
+        if text == self._text:
+            return
+        self._text = text
+        if not text:
+            return
+        self._log.log(status_level(text), "%s", text)
+
+    def text(self) -> str:
+        return self._text
+
+
 class ViewLog(logging.LoggerAdapter):
     """A window's logger: every line it emits carries the view id and the address.
 

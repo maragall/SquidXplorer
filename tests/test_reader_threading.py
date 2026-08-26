@@ -1,11 +1,4 @@
-"""`reader._TiffHandles` is the mutual exclusion around a decode. These pin the mechanism.
-
-A cached `tifffile.TiffFile` is a FILE OBJECT: `pages[p].asarray()` seeks, so two threads decoding
-two pages of one file move one seek position under each other. These install a fake handle whose
-decode BLOCKS on a barrier, so "is there mutual exclusion?" has a yes/no answer with no timing
-luck: two threads on ONE file must not overlap, but two threads on DIFFERENT files must, because
-the lock is per FILE (a global lock would pass the first and serialise every FOV).
-"""
+"""`reader._TiffHandles` is the mutual exclusion around a decode."""
 
 from __future__ import annotations
 
@@ -63,7 +56,6 @@ def test_two_threads_never_decode_one_file_at_the_same_time():
             depth[0] += 1
             if depth[0] > 1:
                 overlapped.set()      # a second decoder got in: the lock is not doing its job
-        # Hold the file "open" long enough that an unguarded second thread is certain to enter.
         inside.acquire(timeout=1.0)
         with depth_lock:
             depth[0] -= 1
@@ -85,8 +77,6 @@ def test_two_threads_DO_decode_two_different_files_at_the_same_time():
     """The lock is per FILE. A global one would pass the test above and serialise every FOV."""
     handles = R._TiffHandles()
     paths = [Path("a.ome.tiff"), Path("b.ome.tiff")]
-    # Both decoders must arrive before either may leave; under a global lock the first holds it
-    # while waiting for a second that can never start, so this is a deadlock detector.
     barrier = threading.Barrier(2, timeout=5.0)
 
     def on_decode(_index):
@@ -103,8 +93,7 @@ def test_two_threads_DO_decode_two_different_files_at_the_same_time():
 
 @pytest.mark.parametrize("fixture_name", ["ome_tiff_dataset", "multipage_dataset"])
 def test_every_tiff_read_goes_through_the_guarded_handle_cache(request, fixture_name):
-    """Asserts the class-level fact instead of the timing one: the only route to a page is
-    `_TiffHandles.page`, so every decode is inside the lock by construction."""
+    """Asserts the class-level fact instead of the timing one: the only route to a page is `_TiffHandles.page`, so every decode is inside the lock by construction."""
     root, _ = request.getfixturevalue(fixture_name)
     rdr = R.open_reader(str(root))
     handles = getattr(rdr, "_handles", None)

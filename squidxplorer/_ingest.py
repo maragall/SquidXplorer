@@ -61,7 +61,7 @@ def ingest(win, path: str) -> None:
         meta = reader.metadata
     except Exception as e:   # not a Squid acquisition / unreadable -> report, don't crash the app
         win._readout.setText(f"not a readable Squid acquisition: {e}")
-        win._drop.show()
+        win._set_empty_state(True)
         return
     # Resolve the layout format ONCE: an explicit override wins, then the declared field, then
     # inference from the well ids (IMA-219 — two real acquisitions carry no format at all).
@@ -75,7 +75,7 @@ def ingest(win, path: str) -> None:
         plate = build_plate(meta, override=win._plate_format_override)
     except (PlateShapeError, PlateBuildError) as e:
         win._readout.setText(f"cannot lay out this acquisition: {e}")
-        win._drop.show()
+        win._set_empty_state(True)
         return
     win._plate = plate
     win._plate_format = plate.format_name
@@ -102,7 +102,9 @@ def ingest(win, path: str) -> None:
     # acquisition with no usable stage positions keeps the montage and nothing else changes.
     if win._overview.set_tile_source(reader, meta):
         g = win._overview._ladder.geometry
-        log.info("deep zoom armed: %d rungs, %.3f-%.1f um/px, %d tiles at fit",
+        # Mechanics, not a fact a user acts on (log diet, 2026-08-25); the not-armed arm
+        # below stays INFO because it states a limitation of THIS acquisition.
+        log.debug("deep zoom armed: %d rungs, %.3f-%.1f um/px, %d tiles at fit",
                  len(g), g.levels[0].scale_um_per_px, g.levels[-1].scale_um_per_px,
                  g.worst_case_tiles)
     else:
@@ -123,7 +125,7 @@ def ingest(win, path: str) -> None:
     win._apply_layers()                         # sets _plate_mode and the plate-pane title
     win._active_op_key = None
     win._refresh_layers_tab()
-    win._drop.hide()
+    win._set_empty_state(False)
     # ONE mount point: the hosted plate slot when a view holds it (one window), else the
     # plate window's own column. Fills the pane and self-fits — no scrollbars.
     win._mount_overview()

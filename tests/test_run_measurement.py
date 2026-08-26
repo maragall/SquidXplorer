@@ -1,7 +1,4 @@
-"""First paint, the persistent run log, and the window-open clock.
-
-Per docs/adr/0001-ci-gates-work-not-time.md, nothing here asserts a duration.
-"""
+"""First paint, the persistent run log, and the window-open clock."""
 
 import json
 
@@ -35,57 +32,38 @@ def _run(metrics, operator="mip", target="2 regions", first_paint=None, boom=Fal
     return metrics.last()
 
 
-def test_a_run_that_never_painted_reports_no_first_paint():
-    """None, not 0.0."""
-    m = _run(MetricsLog())
-    assert m.first_paint_seconds is None
+def test_first_paint_is_the_first_valid_report_inside_the_run_or_none():
+    """None (not 0.0) when never painted; first wins; negative and post-run reports are ignored."""
+    assert _run(MetricsLog()).first_paint_seconds is None
+    m = _run(MetricsLog(), first_paint=0.01)
+    assert m.first_paint_seconds == pytest.approx(0.01) and m.first_paint_seconds != m.seconds
+    failed = _run(MetricsLog(), first_paint=1.5, boom=True)
+    assert failed.outcome == FAILED and failed.first_paint_seconds == pytest.approx(1.5)
 
-
-def test_first_paint_reported_by_the_caller_lands_on_the_record():
-    m = _run(MetricsLog(), first_paint=0.25)
-    assert m.first_paint_seconds == pytest.approx(0.25)
-
-
-def test_first_paint_survives_a_failed_run():
-    m = _run(MetricsLog(), first_paint=1.5, boom=True)
-    assert m.outcome == FAILED
-    assert m.first_paint_seconds == pytest.approx(1.5)
-
-
-def test_only_the_first_report_counts():
-    """Last-wins would silently turn first paint into last paint on a long run."""
     metrics = MetricsLog()
     with measure_run("mip", "2 regions", metrics=metrics, announce=False) as run:
         run.first_paint(0.4)
         run.first_paint(9.9)
-    assert metrics.last().first_paint_seconds == pytest.approx(0.4)
-
-
-def test_a_negative_report_is_refused_rather_than_recorded():
-    """A negative duration in a comparison table is silently the best result in it."""
-    metrics = MetricsLog()
+    assert metrics.last().first_paint_seconds == pytest.approx(0.4), "last-wins turns first paint into last paint"
     with measure_run("mip", "2 regions", metrics=metrics, announce=False) as run:
         run.first_paint(-3.0)
+    assert metrics.last().first_paint_seconds is None, "a negative duration is silently the best result in a table"
+    with measure_run("mip", "2 regions", metrics=metrics, announce=False) as run:
+        pass
+    run.first_paint(0.5)
     assert metrics.last().first_paint_seconds is None
 
 
-def test_the_log_line_names_first_paint_when_there_is_one():
+def test_first_paint_reaches_the_line_and_the_serialised_form_and_the_record_stays_frozen():
     m = _run(MetricsLog(), first_paint=0.25)
     assert "first paint" in m.line()
-
-
-def test_the_log_line_says_nothing_about_first_paint_when_there_is_none():
+    assert m.as_dict()["first_paint_seconds"] == pytest.approx(0.25)
     assert "first paint" not in _run(MetricsLog()).line()
-
-
-def test_the_serialised_form_carries_first_paint():
-    d = _run(MetricsLog(), first_paint=0.25).as_dict()
-    assert d["first_paint_seconds"] == pytest.approx(0.25)
-
-
-def test_first_paint_is_not_the_run_duration():
-    m = _run(MetricsLog(), first_paint=0.01)
-    assert m.first_paint_seconds != m.seconds
+    with pytest.raises(Exception):
+        m.first_paint_seconds = 99.0  # type: ignore[misc]
+    bare = RunMetrics(operator="mip", target="1 region", n_targets=1, seconds=1.0,
+                      peak_rss=None, start_rss=None, outcome=OK)
+    assert bare.first_paint_seconds is None
 
 
 def test_the_run_log_sits_under_the_user_cache_root(tmp_path, monkeypatch):
@@ -96,45 +74,19 @@ def test_the_run_log_sits_under_the_user_cache_root(tmp_path, monkeypatch):
     assert run_log_path().parent == tmp_path
 
 
-def test_a_finished_run_appends_one_line(tmp_path):
+def test_the_run_log_appends_one_json_line_per_run_failures_included(tmp_path):
     metrics = MetricsLog()
     path = tmp_path / "runs.jsonl"
     persist_runs(metrics=metrics, path=path)
-    _run(metrics, first_paint=0.25)
-
-    lines = path.read_text().splitlines()
-    assert len(lines) == 1
-    assert json.loads(lines[0])["first_paint_seconds"] == pytest.approx(0.25)
-
-
-def test_runs_accumulate_rather_than_replace(tmp_path):
-    metrics = MetricsLog()
-    path = tmp_path / "runs.jsonl"
-    persist_runs(metrics=metrics, path=path)
-    _run(metrics, operator="mip")
+    persist_runs(metrics=metrics, path=path)          # installing twice must not double-write
+    _run(metrics, operator="mip", first_paint=0.25)
     _run(metrics, operator="stitch")
+    _run(metrics, operator="decon", boom=True)
 
-    operators = [json.loads(line)["operator"] for line in path.read_text().splitlines()]
-    assert operators == ["mip", "stitch"]
-
-
-def test_a_failed_run_is_written_too(tmp_path):
-    metrics = MetricsLog()
-    path = tmp_path / "runs.jsonl"
-    persist_runs(metrics=metrics, path=path)
-    _run(metrics, boom=True)
-
-    assert json.loads(path.read_text().splitlines()[0])["outcome"] == FAILED
-
-
-def test_installing_twice_does_not_double_write(tmp_path):
-    metrics = MetricsLog()
-    path = tmp_path / "runs.jsonl"
-    persist_runs(metrics=metrics, path=path)
-    persist_runs(metrics=metrics, path=path)
-    _run(metrics)
-
-    assert len(path.read_text().splitlines()) == 1
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [d["operator"] for d in lines] == ["mip", "stitch", "decon"]
+    assert lines[0]["first_paint_seconds"] == pytest.approx(0.25)
+    assert lines[2]["outcome"] == FAILED
 
 
 def test_an_unwritable_log_does_not_fail_the_run(tmp_path):
@@ -147,40 +99,6 @@ def test_an_unwritable_log_does_not_fail_the_run(tmp_path):
     m = _run(metrics)
     assert m.outcome == OK
     assert len(metrics) == 1
-
-
-def test_every_line_is_one_json_object(tmp_path):
-    metrics = MetricsLog()
-    path = tmp_path / "runs.jsonl"
-    persist_runs(metrics=metrics, path=path)
-    for _ in range(3):
-        _run(metrics)
-
-    lines = path.read_text().splitlines()
-    # The count guards against persist_runs writing nothing and the loop iterating zero times.
-    assert len(lines) == 3, lines
-    for line in lines:
-        assert isinstance(json.loads(line), dict)
-
-
-def test_the_record_is_still_frozen():
-    m = _run(MetricsLog(), first_paint=0.25)
-    with pytest.raises(Exception):
-        m.first_paint_seconds = 99.0  # type: ignore[misc]
-
-
-def test_a_first_paint_report_after_the_run_ended_is_ignored():
-    metrics = MetricsLog()
-    with measure_run("mip", "2 regions", metrics=metrics, announce=False) as run:
-        pass
-    run.first_paint(0.5)
-    assert metrics.last().first_paint_seconds is None
-
-
-def test_RunMetrics_can_still_be_built_without_first_paint():
-    m = RunMetrics(operator="mip", target="1 region", n_targets=1, seconds=1.0,
-                   peak_rss=None, start_rss=None, outcome=OK)
-    assert m.first_paint_seconds is None
 
 
 # The window-open clock. The Qt wiring is pinned in tests/test_window_open_measurement.py.
@@ -196,20 +114,7 @@ class _Clock:
         return self.t
 
 
-def test_a_window_open_records_the_wait_from_request_to_loaded():
-    metrics, clock = MetricsLog(), _Clock()
-    w = WindowOpen("1 region: A1", metrics=metrics, clock=clock)
-    clock.t = 3.0
-    w.finish()
-
-    m = metrics.last()
-    assert m.operator == WINDOW_OPEN
-    assert m.target == "1 region: A1"
-    assert m.seconds == pytest.approx(3.0)
-    assert m.outcome == OK
-
-
-def test_window_open_first_paint_is_the_first_layer_not_the_last():
+def test_a_window_open_records_the_wait_and_its_first_layer_separately():
     metrics, clock = MetricsLog(), _Clock()
     w = WindowOpen("1 region: A1", metrics=metrics, clock=clock)
     clock.t = 1.0
@@ -220,54 +125,37 @@ def test_window_open_first_paint_is_the_first_layer_not_the_last():
     w.finish()
 
     m = metrics.last()
+    assert m.operator == WINDOW_OPEN and m.target == "1 region: A1" and m.outcome == OK
     assert m.first_paint_seconds == pytest.approx(1.0)
     assert m.seconds == pytest.approx(3.0), "first paint and the whole open are different facts"
 
 
-def test_a_window_that_never_showed_a_layer_records_no_first_paint():
-    """None, not 0.0."""
-    metrics, clock = MetricsLog(), _Clock()
-    WindowOpen("1 region: A1", metrics=metrics, clock=clock).finish(FAILED, "no mosaic")
-
-    assert metrics.last().first_paint_seconds is None
-    assert metrics.last().outcome == FAILED
-
-
-def test_a_window_closed_before_its_mosaic_landed_still_leaves_a_record():
-    """The wait somebody gave up on is the most interesting one there is."""
+@pytest.mark.parametrize("outcome, detail, t", [(FAILED, "no mosaic", 0.0),
+                                                (STOPPED, "closed before its mosaic landed", 9.0)])
+def test_a_window_that_never_showed_a_layer_still_leaves_a_record(outcome, detail, t):
+    """The wait somebody gave up on is the most interesting one there is; first paint is None, not 0.0."""
     metrics, clock = MetricsLog(), _Clock()
     w = WindowOpen("1 region: A1", metrics=metrics, clock=clock)
-    clock.t = 9.0
-    w.finish(STOPPED, "closed before its mosaic landed")
+    clock.t = t
+    w.finish(outcome, detail)
 
     m = metrics.last()
-    assert m.outcome == STOPPED
-    assert m.seconds == pytest.approx(9.0)
+    assert m.outcome == outcome and m.seconds == pytest.approx(t)
     assert m.first_paint_seconds is None
 
 
-def test_an_open_is_recorded_once_however_many_times_it_ends():
+def test_an_open_is_recorded_once_and_nothing_after_the_end_alters_it():
     metrics, clock = MetricsLog(), _Clock()
     w = WindowOpen("1 region: A1", metrics=metrics, clock=clock)
     clock.t = 2.0
     w.finish()
     clock.t = 60.0
     assert w.finish(STOPPED, "closed") is None
-
-    assert len(metrics) == 1
-    assert metrics.last().outcome == OK
-    assert metrics.last().seconds == pytest.approx(2.0)
-
-
-def test_a_layer_arriving_after_the_open_ended_does_not_alter_it():
-    metrics, clock = MetricsLog(), _Clock()
-    w = WindowOpen("1 region: A1", metrics=metrics, clock=clock)
-    w.finish()
-    clock.t = 5.0
     w.first_layer()
 
-    assert metrics.last().first_paint_seconds is None
-    assert w.first_paint_seconds is None
+    assert len(metrics) == 1
+    assert metrics.last().outcome == OK and metrics.last().seconds == pytest.approx(2.0)
+    assert metrics.last().first_paint_seconds is None and w.first_paint_seconds is None
 
 
 def test_a_window_open_is_appended_to_the_same_run_log(tmp_path):

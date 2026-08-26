@@ -15,7 +15,6 @@ import tifffile
 
 from squidxplorer import open_reader, project_well, run_plate, select_fovs, write_plate
 from squidxplorer._output import plate_metadata, split_well, write_from_stream
-from tests.test_performance import benchmark_single_well
 
 
 def _read_zarr_array(path) -> np.ndarray:
@@ -58,12 +57,6 @@ def test_sim1536_metadata_sanity(sim_1536wp):
     ys = sorted({round(v[1], 1) for v in meta["fov_positions_um"].values()})
     assert (len(xs), len(ys)) == (48, 32)
     assert round(xs[1] - xs[0]) == 2250 and round(ys[1] - ys[0]) == 2250
-
-
-@pytest.mark.filterwarnings("ignore:Recorded Nz")
-@pytest.mark.integration
-def test_sim1536_select_one_fov_per_well(sim_1536wp):
-    meta = open_reader(sim_1536wp).metadata
     wells = select_fovs(meta, n_fovs=1)
     assert len(wells) == 1536
     assert all(fovs == [0] for fovs in wells.values())
@@ -83,24 +76,15 @@ def test_sim1536_project_sampled_wells_pixel_exact(sim_1536wp):
 
 
 @pytest.mark.integration
-def test_real_acquisition_pipeline_end_to_end(real_dataset):
+def test_real_acquisition_pipeline_end_to_end_and_the_mip_actually_combines_z(real_dataset):
     reader = open_reader(real_dataset)
     meta = reader.metadata
-    assert meta["regions"]
-    assert meta["z_levels"]
-    assert meta["channels"]
+    assert meta["regions"] and meta["z_levels"] and meta["channels"]
     wells = select_fovs(meta, n_fovs=1)
     assert set(wells) == set(meta["regions"])
     region = meta["regions"][0]
-    _assert_well_matches_np_max(reader, region, wells[region][0])
-
-
-@pytest.mark.integration
-def test_real_acquisition_mip_actually_combines_z(real_dataset):
-    reader = open_reader(real_dataset)
-    meta = reader.metadata
-    region = meta["regions"][0]
-    fov = meta["fovs_per_region"][region][0]
+    fov = wells[region][0]
+    _assert_well_matches_np_max(reader, region, fov)
     z_levels = meta["z_levels"]
     out = project_well(reader, region, fov)
     for t in range(meta["n_t"]):
@@ -185,7 +169,10 @@ def test_ima188_sim1536_scaling_measured_no_regression(sim_1536wp, capsys):
 @pytest.mark.integration
 def test_ima188_sim1536_memory_bounded_by_workers_not_plate(sim_1536wp):
     reader = open_reader(sim_1536wp)
-    base = benchmark_single_well(reader, reader.metadata["regions"][0], 0)
+    m = reader.metadata
+    y, x = m["frame_shape"]
+    plane_bytes = y * x * np.dtype(m["dtype"]).itemsize
+    result_bytes = project_well(reader, m["regions"][0], 0).nbytes
     workers = 4
 
     tracemalloc.start()
@@ -194,22 +181,15 @@ def test_ima188_sim1536_memory_bounded_by_workers_not_plate(sim_1536wp):
     peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
 
-    assert peak < (workers + 2) * (base["result_bytes"] + 6 * base["plane_bytes"])
+    assert peak < (workers + 2) * (result_bytes + 6 * plane_bytes)
 
 
 @pytest.mark.integration
-def test_ima188_real_parallel_pixel_identical(real_dataset):
+def test_ima188_real_parallel_pixel_identical_through_the_registry(real_dataset):
     reader = open_reader(real_dataset)
-    projected = _first_n_projected(reader, 4, workers=4)
+    projected = _first_n_projected(reader, 4, workers=4, operator="mip")
     assert projected
     for (region, fov), img in projected.items():
-        np.testing.assert_array_equal(img, project_well(reader, region, fov))
-
-
-@pytest.mark.integration
-def test_ima188_real_operator_registry_swap_end_to_end(real_dataset):
-    reader = open_reader(real_dataset)
-    for region, fov, img in islice(run_plate(reader, workers=4, operator="mip"), 3):
         np.testing.assert_array_equal(img, project_well(reader, region, fov))
 
 
@@ -232,7 +212,7 @@ def test_ima184_real_plate_roundtrip(real_dataset, tmp_path):
     assert structure == "hcs_plate"
     assert {f["region"] for f in fovs} == set(meta["regions"])
 
-    from tests.ngff_check import assert_valid_ngff_plate
+    from squidxplorer.contract.validate import assert_valid_ngff_plate
 
     assert_valid_ngff_plate(tmp_path / "plate.ome.zarr")
 

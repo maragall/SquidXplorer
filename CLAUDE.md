@@ -161,6 +161,24 @@ prompt on a real tty, so a piped or CI run never blocks. What is NOT done: the b
 unsigned — macOS first launch is right-click → Open, and Linux needs one `chmod +x`
 (`scripts/installer/README.md` is the user-facing story).
 
+**decon installs EVERYWHERE, and the GPU probe is a fact, not a shade** (2026-08-25, branch
+gpu-setup; Julio: "It looks like it couldn't detect my GPU for Mac. What about
+Linux/Windows?"). Measured: `torch` was declared nowhere (the MPS backend worked in the dev env
+by accident, a customer Mac always ran CPU) and the installer shaded decon on every Mac and
+every non-NVIDIA box because its probe was `nvidia-smi` alone. Now `bootstrap.gpu_backend()`
+answers one of three, shown as the decon row's note and printed by the install: `GPU: CUDA
+(petakit)` (an NVIDIA driver speaking CUDA 12; the installer adds the `decon-cuda` extra,
+cupy-cuda12x, petakit's own path), `GPU: Apple (torch MPS)` (Apple Silicon; `torch` rides the
+`decon` extra by `sys_platform == 'darwin' and platform_machine == 'arm64'` marker), or `CPU
+only: <why>` (everything else, Intel Macs included; petakit's numpy path). decon defaults
+checked on every machine. torch is Apple-only ON PURPOSE: `_decon_gpu` never runs on a CPU
+torch device, the PyPI Linux wheel drags the CUDA runtime (gigabytes) and the Windows one is
+CPU-only, so elsewhere it would be weight that changes no pixel. What is NOT done: CUDA torch
+wheels (index-specific, download.pytorch.org) are installed by nothing here, NVIDIA is CuPy's.
+The petakit pin is main 97b06b0 (cupy is `petakit[cuda12]`, optional), verified as a 200
+tarball and a `pip download`; `build-installer.yml` proves the decon install on all three
+runners, macOS included.
+
 **ONE table** (`_engine._OPERATORS`, 2026-08-05). `add_operator` and `add_region_operator` are two
 registrars over one record, sharing one validator (`_engine._declare`); `add_region_operator`
 stamps `consumes=REGION_OP` (`{"fov"}`) and that declaration is what the region loop selects on
@@ -661,6 +679,11 @@ The rules:
 - A run that showed memory pressure (MemoryError, killed workers, wildly slow collection) is not
   an authoritative result. Rerun it solo and say that happened; never report it as a plain pass
   or failure.
+- **The full suite and GATE 3 run at MERGE time, not per agent report** (Julio, 2026-08-25):
+  an agent runs the focused files for what it touched; the merge is the one full run.
+- **One pin per ruling** (Julio, 2026-08-25): a ruling gets the ONE test that would have caught
+  the defect seen, never a set of facets; an absence pin for a deletion is git history's job, not
+  the suite's, unless the thing came back once or CLAUDE.md names the pin as a rule's guard.
 - **The suite renders offscreen by default** (`tests/conftest.py` sets
   `QT_QPA_PLATFORM=offscreen` via setdefault): on the native platform every real widget test
   opens actual windows and macOS yanks focus to each one, stealing the keyboard from whoever is
@@ -778,7 +801,11 @@ Julio's rulings, verbatim: "spot, shelf"; "cellpose, shelf"; Detect row -> "Shel
 ("3D decon would still use a 2D PSF, since there is no more to draw from"). The Minerva rule
 applies: deleted whole, grep-proven, reinstating starts from git history, absences pinned in
 tests (`test_operator_declaration.py::test_the_shelved_operators_are_gone_whole` and per-file
-pins). **The surviving registry is exactly `mip`, `decon`, `stitch`, `register`.**
+pins). **The surviving registry is exactly `mip`, `decon`, `fstack`, `stitch`, `register`**
+(fstack, 4d25302, gained its card on 2026-08-25: "Focus stack (all-in-focus)", generic
+declaration panel, all three knobs advanced; `_operations.CLI_ONLY_OPERATORS` is empty and
+`test_every_runnable_operator_has_a_card` fails the build on a registry entry with no card;
+measured 2.33 GiB peak per FOV on this Mac, 15z x 3ch x 2050^2, one FOV in flight).
 
 - **Shelved whole**: `_background.py` (bgsub + its exports + scikit-image core dep, whose one
   stated consumer was rolling_ball — napari declares scikit-image itself, measured, so the
@@ -801,7 +828,23 @@ pins). **The surviving registry is exactly `mip`, `decon`, `stitch`, `register`.
   `deconvolve_plane`, `make_psf_2d`, `deconvolve`, `decon3d_op` are gone; `decon_op` builds the
   volume solve; `"decon3d"` is refused BY NAME with a pointer to `decon`
   (`_engine._resolve_operator`). The decon card (QC panel) is unchanged — it always ran the
-  3-D solve.
+  3-D solve. Backends (2026-08-25): petakit CuPy on NVIDIA, `_decon_gpu` torch/MPS on Apple
+  Silicon (z-tiled over `min(recommended_max_memory, free RAM)` with petakit's own tile plan;
+  the tiled solve equals petakit's tiled solve to 1 count and is NOT the whole solve, up to
+  25% of peak at seams with a 95-plane PSF, the log line says so), petakit numpy elsewhere.
+- **A channel with NO emission line is COPIED THROUGH unchanged, named once** (Julio,
+  2026-08-25: "copy BF through unchanged with a named log line"). Measured on
+  G7_2026-08-20 (BF_LED_matrix_full + 488 + 561, nz 15): `project_well` binds every channel
+  up front and the LED channel's `emission_um_for` refusal took the two fluorescence
+  channels down with it. `_decon.NoEmissionLine` is the typed refusal (kept through
+  `optics_for_channel`'s wrap); `_decon_for_channel` absorbs exactly that one into
+  `_copy_through` (z-consuming, depth-keeping identity: same shape, dtype, every plane) and
+  logs ONE INFO line per (acquisition, channel) per process ("<ch>: no emission wavelength,
+  copied unchanged, not deconvolved"; a limitation line stays INFO). Driven by the channel's
+  declared optics, never a name match. Unreadable optics, a missing path or an impossible NA
+  stay the run's refusal, and `projection._refuse_all_copied_through` refuses a run in which
+  EVERY channel declares `copies_through` (declaration-driven, no operator name in
+  projection). Preview and save agree because both ride `project_well`.
 - **`z_operator=None` means KEEP EVERY PLANE** — the shelved `keepz`'s one load-bearing job.
   `stitch_region` resolves None to a module-local identity record (`_stitch._KEEP_EVERY_PLANE`,
   deliberately NOT in the registry), `operator_output` answers `(False, "intensity")` for a
@@ -988,8 +1031,8 @@ per run; composition stays refused. Owed: per-set disk estimate; a set-run cance
 - **"Match layers to raw" is shelved whole**: the button, `RegionViewer._match_raw_contrast`,
   `_lut_clipboard.match_raw_contrast` and `MosaicLayers.match_contrast_to` (the button chain
   was its last caller). Absences pinned in tests.
-- **The LUT clipboard is back as exactly two buttons** (Julio: "ultra simple, minimal, two
-  button logic"): `_lut_clipboard.CLIPBOARD` (one plain dict) + `copy_luts`/`paste_luts` over
+- **The LUT clipboard is back as exactly two buttons** (REVERSED 2026-08-25, ruling v4: shelved
+  whole, see the no-collapse section) (Julio: "ultra simple, minimal, two button logic"): `_lut_clipboard.CLIPBOARD` (one plain dict) + `copy_luts`/`paste_luts` over
   the surviving `per_channel_luts`/`apply_luts`, driven by two chips in the view-controls
   block. **The plate follows a PASTE and only a paste**: `RegionViewer.lutsPasted` →
   `PlateWindow._follow_window_luts` → `follow_channel_window` (contrast only, never the manual
@@ -1063,6 +1106,117 @@ Julio's declutter directive (chart: `~/Downloads/napari dock all states.png`; pl
 - **`RegionViewer.dispose` disarms the region/timepoint debounce timers** - a pending
   single-shot fired into a torn-down window during the deleteLater drain (deterministic
   segfault at PYTHONHASHSEED=0, gone with the disarm).
+
+## Hero declutter, then the no-collapse reversal (2026-08-25, branch hero-declutter)
+
+Team thread verbatim: "hiding all the 'Operator' controls"; "minimize most of the Napari-Native
+tools"; "The plate view and the image should be the 'hero' features". The first pass folded
+sections behind summon grips. Julio REVERSED that the same day, verbatim: "the plate shouldn't
+be collapsible, the dock shouldn't be collapsible, the contrast controls shouldn't be
+collapsible, the operators shouldn't collapse, the operator controls shouldn't collapse, the
+GUI buttons such as 'FOVs' shouldn't collapse. The left dock shouldn't collapse, it should
+display its buttons in a way that it's pleasing, appropriately sized, not overwhelming and
+clunky." And the standing framing: "we're doing a less is more effort, and that requires
+quality and simplicity." The rules now:
+
+- **Nothing collapses. ONE plain column, everything visible** (`RegionViewer._build`): a
+  QVBoxLayout with margins and gaps of `COLUMN_PX` holding, top to bottom, the chip grid
+  (3D, ROI, FOVs, select, clear, window, focus, movie, png; all top-level), the operators
+  row `[operator][Preview][Run on plate]` with the selected operator's panel ALWAYS under it,
+  napari's layer-controls container (taken out of its dock, capped at its current page by
+  `fit_controls_container`), the layer tree (THE stretch consumer), the plate slot
+  (`_PlateSlotBox`, fixed 240 px, no grip) and the log slot. Docked as ONE napari dock
+  (`MosaicPane.dock_left_column`, `native_column_widgets` hands over the controls and the
+  tree); headless it sits in the window body. Deleted whole, absence-pinned in
+  tests/test_hero_declutter.py: `_FoldSection`, `set_*_collapsed`, `summon_controls`, the
+  plate grip, `LogPanel.set_collapsed/toggle/collapsed/set_expanded_cap`, the dock-fit
+  mechanism (`_DockFitter`, `watch_dock_fit`, `stretch_dock`, `hoist_left_dock`,
+  `append_left_dock`), GATE 3's summon step.
+- **ONE parameter surface, ONE store** (ruling w: "we say 'iterations' 3 times"): the
+  ⚙ toggle, the inline iterations spin and the "iterations=9" summary are gone; the panel
+  under the row is what `operator_kwargs_for` reads. Decon's panel is exactly `iterations`
+  plus NI as a DROPDOWN, value with the medium beside it ("1.000 (air)" default, water,
+  silicone, glycerol, oil, custom). A parameter-less operator shows nothing under the row;
+  an all-advanced one (fstack) shows only the "advanced parameters" disclosure, the ONE
+  declaration-driven fold that survives.
+- **The log is a FIXED slot** (v2: "Re-docking the logger doesn't work"): the header plus
+  `LogPanel.LINES` (3) lines of its own font (`slot_px()`), scrollable, always visible under
+  the plate slot; no float, no collapse, no View > Log. Measured on Julio's 862 px screen:
+  132 px of log left the layer list ~80 px, one of three raw channels behind a scrollbar.
+  So the LIST has a minimum (`MosaicTree.rows_wanted`: a group header plus the largest
+  group's channel rows, refit on every model reset) and a screen too short for both
+  shrinks the PLATE slot (a navigator; `_PlateSlotBox` prefers 240 px, floor
+  `PLATE_SLOT_MIN_PX` 160), never the list. The headless `ModelPane` carries the same
+  tree in the window-body column so the rule is pinned offscreen. **The one bar is the run bar** (y: "The memory usage bar is confusing"): the
+  memory bar and the manager's memory poll are deleted; `StatusRow` is the run bar alone,
+  shown while a run is live, hidden after its drain.
+- **The LUT clipboard is shelved whole** (v4: "this will save us code lines"): the two chips,
+  `CLIPBOARD`/`copy_luts`/`paste_luts`, `lutsPasted`, the plate's paste button and
+  `_follow_window_luts`. `per_channel_luts`/`apply_luts` stay for the loupe, the movie and
+  the settings snapshots.
+- **napari's menu bar is chrome** (x: "lines and lines and lines of code"):
+  `minimize_native_chrome` makes it non-native, empties it (so Cmd+O/S/W no longer fire
+  napari's actions from the pane) and hides it. The ONE window's menu is the deck's: File
+  (Open Acquisition, Quit) and View (Select All Wells, Close All Views, Plate Window).
+- **A slider spans its OWN channel** (v1: "look how close to each other are the contrast
+  limits"): `_bitdepth.observe_array(frame, channel)` books a per-channel maximum, its
+  ceiling is `channel_ceiling` (the full-scale it reaches, else max x 1.05), `range_for(dtype,
+  channel)` seeds a layer from it, `depthChanged(channel, lo, hi)` widens only that channel's
+  layers, and a range never narrows per channel.
+- **napari's "once" IS the app's window rule; there is no auto chip** (Julio: "why did you do
+  an auto button?"): every app layer binds `reset_contrast_limits` per instance
+  (`MosaicLayers._bind_reset_contrast`), sampling the slice napari already materialised
+  (`displayed_sample`; before the first slice, ONE plane of the coarsest rung, never a whole
+  lazy stack) and handing (channel, sample) to `on_reset_contrast` subscribers; the view
+  computes on `_AutoContrastWorker` and lands through `set_contrast`. The "continuous" button
+  (per slice, 9.3 ms per 2050^2 frame) is hidden by its own text. The rule: floor =
+  max(mode + 2 sigma, the 99.5th percentile of the background population under mode +
+  6 sigma) (G7 561: mode 896, sigma 18.7; + 2 sigma left 16.7% of background above black);
+  ceiling = max(pmax percentile, the 99.5th percentile of pixels 5 sigma above the mode, at
+  least 16 sampled); the raw seed reads the finest rung within `SEED_MAX_PX`.
+- Kept from the first pass: the empty launch (one drop line, `_set_empty_state`), the
+  one-window showEvent fix, the ROI chip's two states, the scoped run's own FOV set, a
+  preview cropped to and delivered only in the asking view, the Shapes rows and shape-tool
+  grid as chrome, napari's status bar and dock titles hidden, the log diet (INFO for facts a
+  user acts on; `tests/test_hero_declutter.py` pins an ordinary session at <= 8 INFO lines).
+- **Measured, 2026-08-25**: ruling i's strip took the view column from 431 to 207 words at
+  rest (33 elements both) and from 1265 to 454 words with every operator panel inserted;
+  G7 488/FOV 1/z 7 windows: napari min/max (6416, 65520), auto full-res (18296, 65520).
+- **Ruling z, sub-FOV decon** (Julio: "so that we can try it and get results really fast"):
+  an ROI preview reads and solves the box PLUS A HALO and trims it. `RegionViewer._run_scope`
+  returns `(regions, windows)`, `windows={(region, fov): (r0, r1, c0, c1)}` in each touched
+  frame's own pixels (`_mosaic_source.fov_windows_px`, top-left convention), riding
+  `run_operator -> _OperatorWorker -> run_operator_once -> run_plate -> project_well(window=)`.
+  The halo is DECLARED on the operator callable (`halo_px`, read by
+  `projection.operator_halo_px`; decon's is `_decon.lateral_halo_px`: the radius holding
+  99.9% of the modelled PSF's z-integrated energy, floor `HALO_MIN_PX` 8, so 10 to 12 px on
+  G7's optics), per channel, clamped at the frame edge; z stays whole; `read_window` prefers
+  a reader's own `read_window` (the Zarr reader slices its array; the TIFF readers decode
+  the page and slice). The accumulator places each window at its FOV offset plus its corner
+  (`_fuse_windows`, the same `fov_offsets_px`) and the result's bbox is the windows' union.
+  A save and the region arm REFUSE windows by name. One INFO line per windowed run: "ROI
+  decon: 529x724 px window + 12 px halo, 15 plane(s)". Measured on G7 FOV 1 (2050^2, 3 ch,
+  15 z, 3 iterations, MPS): sub-FOV 1.69 s / 0.87 GB peak vs whole-field 10.07 s / 3.37 GB
+  (one plane: 0.56 s vs 0.67 s). Parity: within 1 count at 2 iterations (synthetic AND G7);
+  at 3 the interior differs (G7 488: max 7 at one plane, 216 over the stack, mean 0.72)
+  because the Biggs-Andrews acceleration's lambda is ONE scalar over the solved volume. That
+  is the solver's global step, not the halo, and it is stated here rather than hidden.
+- **Ruling aa, a 3D tab's preview is a VOLUME**: `RegionViewer._launch_operator` passes
+  `deliver_depth=True` from a view in 3D mode; `_OperatorWorker._result_pixels` then emits
+  `(C, Nz, Y, X)`, the accumulator fuses per z (`_fuse` stacks `(Nz, H, W)`), and
+  `deliver_result` hands a depth result in a 3D view to `_show_result_volume`: close the
+  volume up, `show_op(op)`, `_volume_view.open_3d` again, so the bricks are read off the
+  RESULT layers under their own LUTs. A 2D tab still gets one plane. BEFORE any read,
+  `_volume_preview_refusal` sizes the full-depth result (fields or windows x nz x channels x
+  itemsize) against `_brick_budget_bytes()` and refuses by name: "3D preview over 4 FOV(s) x
+  46 planes x 3 channel(s) needs ~X GB ... draw an ROI". Pinned in tests/test_volume_preview.py.
+- **Ruling u diagnostic**: `MosaicTreeModel.setData` logs ONE DEBUG line per checkbox write,
+  "layer checkbox: decon/561 -> off; changed N layer(s): ...", naming every layer whose
+  `visible` changed as a consequence. No behaviour change; headless the identity toggles alone.
+- **NOT done**: the TIFF readers decode a whole page for a window (the solve, not the read,
+  is the cost: a G7 page decodes in 4.6 ms median, measured); a 3D-tab preview over a region above the budget is
+  refused rather than bricked from disk. Offscreen has no OpenGL, so the docked real column
+  is unverified headless.
 
 ## Agent skills
 

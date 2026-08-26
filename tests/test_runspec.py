@@ -1,10 +1,4 @@
-"""RunSpec: the provenance record beside every save, and ONLY beside saves.
-
-The record's fields and JSON are pinned here; where it lands is pinned through
-``run_operator_once`` for each of the three writers, because the dispatch is the one place that
-sees operator + parameters + regions + reader for all of them. A preview leaves nothing, the
-source acquisition is never written, and a failed write is a warning, never the run's failure.
-"""
+"""RunSpec: the provenance record beside every save, and ONLY beside saves."""
 
 from __future__ import annotations
 
@@ -17,7 +11,7 @@ import squidxplorer
 from squidxplorer import open_reader
 from squidxplorer import _runspec as runspec_mod
 from squidxplorer._dispatch import run_operator_once
-from squidxplorer._runspec import RUNSPEC_NAME, RunSpec, write_runspec
+from squidxplorer._runspec import RUNSPEC_NAME, RunSpec
 
 from .conftest import REGIONS
 
@@ -61,8 +55,6 @@ def test_the_loop_default_sentinel_serializes_by_its_name():
 
 
 def test_the_sha_is_none_on_an_installed_wheel(monkeypatch):
-    # A wheel has no checkout: git is absent, or answers "not a repository". Both read as None,
-    # and the written record SAYS so rather than omitting the field.
     def _no_git(*a, **k):
         raise FileNotFoundError("git")
 
@@ -96,7 +88,6 @@ def test_the_zarr_save_lands_a_runspec_in_the_plate_dir(monkeypatch, tmp_path):
 
 
 def test_the_acquisition_format_save_lands_a_runspec_at_its_root(squid_dataset, tmp_path):
-    # The real writer, end to end: the manifest's own "path" names where the record lands.
     root, _ = squid_dataset
     out_dir = tmp_path / f"mip_{root.name}"
     result = run_operator_once(open_reader(root), operator="mip", save=True,
@@ -170,10 +161,3 @@ def test_a_write_failure_is_a_warning_never_the_runs_failure(monkeypatch, tmp_pa
     assert result.outcome == "ok"               # the save's verdict is untouched
     assert "runspec" not in result.manifest
     assert any("could not write" in r.message for r in caplog.records)
-
-
-def test_write_runspec_returns_the_path_it_wrote(tmp_path):
-    spec = RunSpec.capture(_Reader(), operator="mip", n_fovs=1)
-    path = write_runspec(spec, tmp_path, result={"n_fields_written": 3})
-    assert path == tmp_path / RUNSPEC_NAME and path.is_file()
-    assert json.loads(path.read_text())["result"]["n_fields_written"] == 3

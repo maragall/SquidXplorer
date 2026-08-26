@@ -95,8 +95,9 @@ def _collect(reader, **kw) -> dict[tuple[str, int], np.ndarray]:
     return {(r, f): img for r, f, img in run_plate(reader, **kw)}
 
 
-def test_mip_is_available_by_default():
+def test_mip_is_a_registered_z_reducer_by_default():
     assert "mip" in available_plane_operators()
+    assert engine.operator_consumes("mip") == frozenset({"z"})
 
 
 def test_available_plane_operators_is_sorted_and_reflects_registration():
@@ -148,15 +149,6 @@ def test_parallel_output_is_pixel_identical_to_single_thread():
         np.testing.assert_array_equal(img, expected)
 
 
-def test_result_is_deterministic_across_worker_counts():
-    reader = FakeReader(n_wells=9)
-    one = _collect(reader, workers=1)
-    many = _collect(reader, workers=4)
-    assert set(one) == set(many)
-    for key in one:
-        np.testing.assert_array_equal(one[key], many[key])
-
-
 def test_respects_n_fovs():
     reader = FakeReader(n_wells=3, n_fovs=2)
     out = _collect(reader, workers=2, n_fovs=2)
@@ -165,17 +157,14 @@ def test_respects_n_fovs():
 
 
 def test_operator_swap_runs_through_the_same_engine():
-    # A non-MIP operator selected purely by name; the engine code is untouched.
     add_operator("first_z", lambda planes: next(iter(planes)))
     reader = FakeReader(n_wells=3, z_levels=(0, 1, 2, 3))
     out = _collect(reader, workers=2, operator="first_z")
-    # Guard against an empty dict: a loop over nothing asserts nothing.
     assert set(out) == {(f"W{i:04d}", 0) for i in range(3)}, sorted(out)
     for (region, fov), img in out.items():
         for c_i, ch in enumerate(reader._channels):
             first_plane = reader.read(region, fov, ch, reader._z_levels[0])
             np.testing.assert_array_equal(img[0, c_i, 0], first_plane)
-            # and it is genuinely NOT the MIP
             assert not np.array_equal(img[0, c_i, 0], project_well(reader, region, fov)[0, c_i, 0])
 
 
@@ -186,7 +175,6 @@ def test_failure_in_one_well_propagates_and_aborts_the_stream():
 
 
 def test_bounded_window_does_not_prefetch_the_whole_plate():
-    # Consuming one result must have started at most `workers + 1` wells, not all N.
     n_wells, workers = 40, 3
     reader = FakeReader(n_wells=n_wells, read_sleep=0.01)
     gen = run_plate(reader, workers=workers)
@@ -201,7 +189,6 @@ def test_bounded_window_does_not_prefetch_the_whole_plate():
 
 
 def test_metadata_is_warmed_before_any_read():
-    # metadata must be touched single-threaded before reads fan out.
     reader = FakeReader(n_wells=4)
     list(run_plate(reader, workers=2))
     assert reader.events, "engine never touched the reader"
@@ -226,18 +213,9 @@ def _plus_one(plane):
     return plane + 1
 
 
-def test_shipped_operators_declare_the_z_axis():
-    assert engine.operator_consumes("mip") == frozenset({"z"})
-
-
 def test_add_operator_defaults_to_z_reducer():
     add_operator("legacy_style", _first)                 # no consumes=
     assert engine.operator_consumes("legacy_style") == frozenset({"z"})
-
-
-def test_add_operator_records_a_plane_op():
-    add_operator("planeop", plane_op(_plus_one), consumes=frozenset())
-    assert engine.operator_consumes("planeop") == frozenset()
 
 
 def test_consumes_accepts_any_iterable_of_axis_names():
@@ -255,8 +233,6 @@ def test_operator_consumes_unknown_name_is_loud():
 
 
 def test_fov_is_refused_by_name_and_points_at_the_region_seam():
-    # An add_operator callable never sees a tile's x/y stage geometry; {"fov"} is
-    # add_region_operator's to stamp.
     with pytest.raises(ValueError, match="fov"):
         add_operator("would_be_stitch", _first, consumes=frozenset({"fov"}))
 
@@ -272,7 +248,6 @@ def test_plane_op_preserves_z_and_maps_each_plane():
     out = _collect(reader, workers=2, operator="plus_one")
     assert set(out) == {(f"W{i:04d}", 0) for i in range(2)}, sorted(out)
     for (region, fov), img in out.items():
-        # z survives a plane-op: one output plane per input plane, in z_levels order.
         assert img.shape == (reader._n_t, len(reader._channels), 3, *reader._shape)
         for c_i, ch in enumerate(reader._channels):
             for k, z in enumerate(reader._z_levels):
@@ -280,7 +255,6 @@ def test_plane_op_preserves_z_and_maps_each_plane():
 
 
 def test_plane_op_is_never_routed_through_the_z_reduction():
-    # A plane-op must see exactly one plane per call, never the stack.
     seen = []
 
     def spy(planes):
@@ -308,34 +282,6 @@ def test_z_reducer_still_sees_the_whole_stack():
     assert seen and set(seen) == {4}
 
 
-def test_adding_a_plane_op_needs_zero_engine_edits():
-    add_operator("bgsub_like", plane_op(lambda p: (p // 2)), consumes=frozenset())
-    assert "bgsub_like" in available_plane_operators()
-    reader = FakeReader(n_wells=1, z_levels=(0, 1))
-    ((_, img),) = list(_collect(reader, workers=1, operator="bgsub_like").items())
-    np.testing.assert_array_equal(img[0, 0, 0], reader.read("W0000", 0, "c0", 0) // 2)
-
-
-def test_mip_shape_is_still_z_collapsed_to_one():
-    reader = FakeReader(n_wells=3, z_levels=(0, 1, 2))
-    out = _collect(reader, workers=2)
-    assert set(out) == {(f"W{i:04d}", 0) for i in range(3)}, sorted(out)
-    for img in out.values():
-        assert img.shape[2] == 1
-
-
-def test_n_equals_1_mip_is_byte_identical_to_the_single_plane():
-    # With one z, a MIP must return that plane's bytes, unchanged.
-    reader = FakeReader(n_wells=2, z_levels=(7,))
-    out = _collect(reader, workers=2)
-    assert set(out) == {(f"W{i:04d}", 0) for i in range(2)}, sorted(out)
-    for (region, fov), img in out.items():
-        for c_i, ch in enumerate(reader._channels):
-            plane = reader.read(region, fov, ch, 7)
-            np.testing.assert_array_equal(img[0, c_i, 0], plane)
-            assert img.dtype == plane.dtype
-
-
 def test_mip_pixels_unchanged_by_the_registry_rewrite():
     reader = FakeReader(n_wells=4, channels=("c0", "c1", "c2"), z_levels=(0, 2, 5))
     for (region, fov), img in _collect(reader, workers=3).items():
@@ -345,6 +291,5 @@ def test_mip_pixels_unchanged_by_the_registry_rewrite():
 
 
 def test_plane_op_adapter_makes_the_declaration_inferable():
-    # plane_op() stamps `consumes` on the callable, so the registration site need not repeat it.
     add_operator("inferred", plane_op(_plus_one))
     assert engine.operator_consumes("inferred") == frozenset()

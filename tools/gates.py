@@ -840,7 +840,6 @@ def _fingerprint(root, use_pixels: bool, blank=None) -> dict:
 NEUTRALISED_WHY = {
     "RegionViewer._open_3d": "vispy needs a live GL context; the volume path cannot be driven "
                              "offscreen (docs/rendering-contract.md)",
-    "RegionViewer._view_roi_2d": "opens a child window and a second preview stream",
     "RegionViewer._record_movie": "writes an .mp4 and runs a multi-second encode",
     "RegionViewer._open_roi_children": "opens one child window per ROI",
     "PlateWindow.run_operator": "a multi-minute operator run over the plate",
@@ -1074,7 +1073,7 @@ def _neutralise_view(monkey, called):
             return None
         return f
 
-    for m in ("_open_3d", "_record_movie", "_open_roi_children", "_view_roi_2d"):
+    for m in ("_open_3d", "_record_movie", "_open_roi_children"):
         if hasattr(RV.RegionViewer, m):
             monkey(RV.RegionViewer, m, rec(f"RegionViewer.{m}"))
     return called
@@ -1143,7 +1142,8 @@ def gate_no_dead_controls(dataset=PLATE, mutate_plate=None, mutate_view=None, ve
             # ONE recorder for both windows: a region chip that calls back into the plate (Run ->
             # PlateWindow.run_operator) has to be seen as reaching a neutralised entry point too.
             rows += [("view", *r) for r in sweep_controls(view, "view", app, watched=[win],
-                                                          recorder=recorded, observed=seen)]
+                                                          recorder=recorded, observed=seen,
+                                                          settle=None)]
             # The input controls the sweep skipped: proven by the arguments that arrive at the run.
             rows += prove_inputs_reach_the_run(view, detail, app)
     finally:
