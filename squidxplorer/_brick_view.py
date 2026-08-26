@@ -130,7 +130,7 @@ class BrickedVolume:
         self._step = 1
         self._noted_dropped = False      # the budget note is said ONCE per open, not per settle
         self._hidden: list = []          # pane layers we hid, to restore on close
-        #: (layer, identity) for every pane layer whose `(op, channel)` we took while 3D is up.
+        #: Every pane layer whose `(op, channel)` the model parked for us while 3D is up.
         self._surrendered: list = []
         self._closed = False
         self._adding_brick = False       # our own add_image must not get the arrival treatment
@@ -160,13 +160,12 @@ class BrickedVolume:
     def open(self) -> None:
         """Take the scene over: the 2D layers surrender their identity until close() gives it back."""
         self._t_open = time.perf_counter()
-        from squidxplorer._napari_view import META_KEY
-
         for ly in list(self._viewer.layers):
             try:
-                meta = getattr(ly, "metadata", None)
-                if isinstance(meta, dict) and META_KEY in meta:
-                    self._surrendered.append((ly, meta.pop(META_KEY)))
+                # Through the model: it keeps the parked identity (so a result arriving for
+                # it supersedes the layer) and tells the tree the identity moved.
+                if self._mosaic.surrender(ly) is not None:
+                    self._surrendered.append(ly)
                 if ly.visible:
                     self._hidden.append(ly)
                     ly.visible = False
@@ -256,17 +255,19 @@ class BrickedVolume:
         except Exception:                               # noqa: BLE001
             pass
         # Identity BEFORE visibility: a visible-but-foreign layer would paint with no tree row.
-        from squidxplorer._napari_view import META_KEY
-
-        for ly, identity in self._surrendered:
+        # `restore` answers False for a layer the model already superseded (a result for the
+        # same identity arrived while the volume was up): that one stays gone and dark.
+        superseded = set()
+        for ly in self._surrendered:
             try:
-                meta = getattr(ly, "metadata", None)
-                if isinstance(meta, dict):
-                    meta[META_KEY] = identity
+                if not self._mosaic.restore(ly):
+                    superseded.add(id(ly))
             except Exception:                           # noqa: BLE001 - the layer may be gone
                 pass
         self._surrendered = []
         for ly in self._hidden:
+            if id(ly) in superseded:
+                continue
             try:
                 ly.visible = True
             except Exception:                           # noqa: BLE001 - the layer may be gone
@@ -283,12 +284,9 @@ class BrickedVolume:
         ly = getattr(event, "value", None)
         if ly is None:
             return
-        from squidxplorer._napari_view import META_KEY
-
         try:
-            meta = getattr(ly, "metadata", None)
-            if isinstance(meta, dict) and META_KEY in meta:
-                self._surrendered.append((ly, meta.pop(META_KEY)))
+            if self._mosaic.surrender(ly) is not None:
+                self._surrendered.append(ly)
             if ly.visible:
                 self._hidden.append(ly)
                 ly.visible = False

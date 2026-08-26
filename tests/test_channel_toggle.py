@@ -82,10 +82,8 @@ def qapp():
     yield app
 
 
-@pytest.fixture
-def g7_dataset(tmp_path) -> Path:
+def build_g7_dataset(root: Path) -> Path:
     """G7's shape: one region, a 2x2 FOV grid, 4 z, three channels, 16 px frames."""
-    root = tmp_path / "G7_acq"
     folder = root / "0"
     folder.mkdir(parents=True)
     rng = np.random.default_rng(7)
@@ -104,6 +102,11 @@ def g7_dataset(tmp_path) -> Path:
     (root / "acquisition.yaml").write_text(_ACQ_YAML)
     (root / "acquisition parameters.json").write_text(json.dumps(_PARAMS))
     return root
+
+
+@pytest.fixture
+def g7_dataset(tmp_path) -> Path:
+    return build_g7_dataset(tmp_path / "G7_acq")
 
 
 def _drain_until(app, pred, timeout=30.0) -> bool:
@@ -214,5 +217,121 @@ def test_a_channel_checkbox_in_the_3d_roi_tab_darkens_every_brick_of_that_channe
         relit = _visible_by_channel(mosaic, "raw")
         assert all(relit[ch_off]), f"{ch_off} did not come back: {relit}"
         assert all(all(v) for v in relit.values()), relit
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+# --- a REAL operator preview through the plate's own run_operator ------------------------------
+
+def _run_preview(qapp, view, key: str, timeout: float = 180.0) -> None:
+    """Select *key* in *view*'s dropdown, press Preview, and wait for the run to report back."""
+    outcome: list = []
+    done, failed = view.operator_done, view.operator_failed
+    view.operator_done = lambda action, seconds: (outcome.append(("done", action)),
+                                                  done(action, seconds))
+    view.operator_failed = lambda action, reason: (outcome.append(("failed", reason)),
+                                                   failed(action, reason))
+    view.show_operator_controls_for(key)
+    assert view._op_combo.currentData() == key, f"{key!r} is not in the view's dropdown"
+    view._preview_view_operator()
+    assert _drain_until(qapp, lambda: bool(outcome), timeout=timeout), (
+        f"the {key} preview never reported back; said: {view._pane.said}")
+    assert outcome[0][0] == "done", f"the {key} preview failed: {outcome[0][1]}"
+    for _ in range(50):
+        qapp.processEvents()
+
+
+# --- (B) a 2D view: untick one decon channel, the other decon channels stay lit ----------------
+
+@pytest.mark.parametrize("where", ["parent", "roi-child-after-a-replayed-parent-result"])
+def test_unticking_one_decon_channel_leaves_the_other_decon_channels_lit(
+        qapp, napari_pane_stub, g7_dataset, caplog, where):
+    """*where*: the 2D view the preview runs in: the region view itself, or an ROI child that
+    first received the parent's cached result dark (replayed on open) and then ran its own."""
+    import logging
+
+    win, mgr, view = _open_plate(qapp, g7_dataset)
+    try:
+        if where != "parent":
+            _run_preview(qapp, view, "decon")
+            view = mgr.open_child([REGION], roi_bbox=_roi_bbox_um(view._meta),
+                                  parent_id=view.window_id)
+            assert _drain_until(qapp, lambda: _raw_landed(view))
+        _run_preview(qapp, view, "decon")
+        mosaic = view._pane.mosaic
+        assert set(mosaic.channels("decon")) == set(CHANNELS), (
+            f"decon landed on {mosaic.channels('decon')}, not every channel")
+        before = _visible_by_channel(mosaic, "decon")
+        assert all(all(v) for v in before.values()), f"decon did not arrive lit: {before}"
+        model = view._pane.layer_tree.model()
+        assert model._mosaic is mosaic
+
+        ch_off = CHANNELS[2]
+        with caplog.at_level(logging.DEBUG, logger="squid.xplorer.layers"):
+            ok = model.setData(_row_for(model, "decon", ch_off), Qt.Unchecked, Qt.CheckStateRole)
+            qapp.processEvents()
+        assert ok
+        after = _visible_by_channel(mosaic, "decon")
+        assert not any(after[ch_off]), f"decon/{ch_off} still lit: {after}"
+        for ch in CHANNELS[:2]:
+            assert all(after[ch]), (
+                f"decon/{ch} went dark with {ch_off}: {after}; log: "
+                f"{[r.getMessage() for r in caplog.records if 'checkbox' in r.getMessage()]}")
+        assert mosaic.visible_op() == "decon"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+# --- (C) a decon preview from a 3D ROI tab lands as a full-depth volume of decon ---------------
+
+@pytest.mark.parametrize("prior_2d_preview", [False, True],
+                         ids=["fresh", "after-a-2d-decon-preview-in-the-parent"])
+def test_a_decon_preview_from_a_3d_roi_tab_lands_as_a_full_depth_volume(
+        qapp, napari_pane_stub, g7_dataset, prior_2d_preview):
+    """*prior_2d_preview*: the parent already previewed decon in 2D (an unscoped run, so its
+    one-plane result is CACHED and replayed into every later tab over the region)."""
+    from squidxplorer._napari_view import full_res_level
+
+    win, mgr, view = _open_plate(qapp, g7_dataset)
+    try:
+        if prior_2d_preview:
+            _run_preview(qapp, view, "decon")
+            assert int(full_res_level(view._pane.mosaic.find("decon", CHANNELS[0]).data).ndim) == 2
+        child = mgr.open_child([REGION], roi_bbox=_roi_bbox_um(view._meta),
+                               parent_id=view.window_id)
+        assert _drain_until(qapp, lambda: _raw_landed(child))
+        tab = _open_3d_tab(qapp, mgr, child)
+        _run_preview(qapp, tab, "decon")
+        mosaic = tab._pane.mosaic
+        vol = tab._native3d
+        assert vol is not None and vol._op == "decon", (
+            f"the 3D tab's volume is {getattr(vol, '_op', None)!r}, not decon; "
+            f"said: {tab._pane.said}")
+        want = vol.brick_count * len(CHANNELS)
+        assert _drain_until(qapp, lambda: len(vol._layers) >= want, timeout=60), (
+            f"{len(vol._layers)} of {want} decon bricks landed: {tab._pane.said}")
+        for ch in CHANNELS:
+            bricks = mosaic.layers_for("decon", ch)
+            assert bricks, f"no decon brick for {ch}: {[ly.name for ly in mosaic.model.layers]}"
+            for ly in bricks:
+                assert ly.data.ndim == 3 and int(ly.data.shape[0]) == NZ, (
+                    f"decon/{ch} brick {ly.name} is {ly.data.shape}, not {NZ} planes deep")
+        flat = [ly for ly in mosaic.model.layers if str(ly.name).startswith("decon ·")]
+        assert len(flat) == len(CHANNELS), [ly.name for ly in mosaic.model.layers]
+        for ly in flat:
+            level0 = full_res_level(ly.data)
+            assert level0.ndim == 3 and int(level0.shape[0]) == NZ, (
+                f"{ly.name} landed {level0.shape}: flat, not {NZ} planes deep")
+        for line in tab._pane.said:
+            assert "no volume to render" not in line and "carries no z depth" not in line, line
+        # ...and the decon volume's channel checkboxes drive its bricks, one channel each.
+        model = tab._pane.layer_tree.model()
+        ch_off = CHANNELS[2]
+        assert model.setData(_row_for(model, "decon", ch_off), Qt.Unchecked, Qt.CheckStateRole)
+        qapp.processEvents()
+        after = _visible_by_channel(mosaic, "decon")
+        assert not any(after[ch_off]), after
+        for ch in CHANNELS[:2]:
+            assert all(after[ch]), f"decon/{ch} went dark with {ch_off}: {after}"
     finally:
         shutdown_plate_window(qapp, win)

@@ -331,6 +331,14 @@ class MosaicLayers:
         self._color_notes: dict[str, str] = {}
         # channel -> the op a channel-OFF toggle hid, so channel-ON brings the SAME thing back.
         self._channel_relight: dict[str, str] = {}
+        # id(layer) -> (layer, identity) for every layer whose identity a VOLUME holds right
+        # now (`surrender` / `restore`). Parked, not gone: a result arriving for the same
+        # identity supersedes it (see add_mosaic), and the identity comes back on close.
+        self._parked: dict[int, tuple[Any, MosaicKey]] = {}
+        # Told whenever a layer GAINS or LOSES an identity outside napari's own list events:
+        # adopt stamps after add_image's `inserted` already fired, surrender/restore change no
+        # list at all. The layer tree derives its rows from identities, so it listens here.
+        self._identity_cbs: list[Any] = []
         try:
             model.dims.events.ndisplay.connect(self._reslice_hidden_layers)
         except Exception:                        # noqa: BLE001 - a stub model with no dims events
@@ -465,10 +473,59 @@ class MosaicLayers:
         if not siblings and bool(getattr(layer, "visible", False)):
             # A FIRST surface arriving lit is the same gesture as one the user lights.
             self._darken_other_ops(key.channel, layer)
+        # AFTER the stamp: napari's `inserted` fired inside add_image, before this layer had
+        # an identity, so the tree that rebuilt on it never saw this brick's channel.
+        self._identity_changed()
         return layer
+
+    def on_identity_changed(self, callback) -> None:
+        """Subscribe to identities appearing or disappearing outside napari's list events."""
+        self._identity_cbs.append(callback)
+
+    def _identity_changed(self) -> None:
+        for cb in list(self._identity_cbs):
+            try:
+                cb()
+            except Exception as exc:             # noqa: BLE001 - one deaf subscriber, named
+                log.warning("identity-change subscriber failed: %s: %s",
+                            type(exc).__name__, exc)
+
+    def surrender(self, layer: Any) -> Optional[MosaicKey]:
+        """Take *layer*'s identity away while a volume renders it; ``restore`` gives it back.
+
+        The layer stays in napari's list, dark, and is PARKED here: it is not ``ours()`` (the
+        volume's bricks answer for the identity now), but it is not forgotten either, so a
+        result arriving for the same identity replaces it rather than landing beside it.
+        Returns the identity taken, or None for a layer that had none."""
+        key = key_of(layer)
+        if key is None:
+            return None
+        meta = dict(getattr(layer, "metadata", None) or {})
+        meta.pop(META_KEY, None)
+        layer.metadata = meta                    # assignment, never an in-place pop
+        self._parked[id(layer)] = (layer, key)
+        self._identity_changed()
+        return key
+
+    def restore(self, layer: Any) -> bool:
+        """Give a surrendered layer its identity back. False for a layer not parked here."""
+        entry = self._parked.pop(id(layer), None)
+        if entry is None:
+            return False
+        meta = dict(getattr(layer, "metadata", None) or {})
+        meta.update(entry[1].as_metadata())
+        layer.metadata = meta
+        self._identity_changed()
+        return True
+
+    def parked_layers(self, op: str, channel: str) -> list[Any]:
+        """The surrendered layers of one identity, oldest first."""
+        want = MosaicKey(str(op), str(channel))
+        return [ly for ly, k in self._parked.values() if k == want]
 
     def drop_layer(self, layer: Any) -> None:
         """Remove one layer while leaving its identity alive; unlinks before removing."""
+        self._parked.pop(id(layer), None)
         for channel, peers in self._by_channel.items():
             if layer not in peers:
                 continue
@@ -485,6 +542,7 @@ class MosaicLayers:
             self._model.layers.remove(layer)
         except Exception:                        # noqa: BLE001 - already removed
             pass
+        self._identity_changed()
 
     def _link_set(self, channel: str) -> list[Any]:
         """The layers of *channel* that ``link_layers`` connects: one per identity."""
@@ -819,6 +877,14 @@ class MosaicLayers:
         """
         key = MosaicKey(str(op), str(channel))
         existing = self.find(key.op, key.channel)
+        if existing is None:
+            # A PARKED layer of this identity (its identity surrendered to a volume of ANOTHER
+            # op) is superseded by the arriving pixels, never joined by them: left in place,
+            # the volume's close restored both and `find` answered the stale one, so a 3D
+            # tab's full-depth decon landed beside a replayed one-plane decon and 3D said the
+            # result "carries no z depth here" (measured, G7-shaped, 2026-08-26).
+            for parked in self.parked_layers(key.op, key.channel):
+                self.drop_layer(parked)
         # napari cannot change a layer's multiscale-ness after construction: reusing a
         # single-scale layer with a levels LIST leaves napari reading `list.shape`. A
         # mismatched layer is REPLACED, carrying its look into the new layer's kwargs.
