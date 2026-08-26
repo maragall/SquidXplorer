@@ -1261,6 +1261,43 @@ quality and simplicity." The rules now:
   refused rather than bricked from disk. Offscreen has no OpenGL, so the docked real column
   is unverified headless.
 
+## fstack: no horizontal banding (2026-08-26, branch fstack-artifacts)
+
+Julio, live on G7 (9 FOV, 15 z, 2050^2): "Artifacts for EDF. You're not running it well."
+The fstack preview showed horizontal streaks. Measured on FOV 0 488, whole field, no window:
+fused row/column discontinuity 199/163 (ratio 1.22) where the MIP, the sharpest plane and
+the argmax index map are all 1.00 to 1.01. Every path (whole field, ROI window, dispatch
+preview, accumulator) was bit-identical to `fuse_stack`, so the defect was inside the port,
+and it was two things:
+
+- **The selectivity window's taint mask was a float running sum compared with `> 0`**
+  (`uniform_filter(nan_mask) > 0.0`): after a NaN left the window the rounding residual
+  never returned to zero, so the line stayed tainted. 830,866 px of over-reach (19.8% of
+  the frame), in runs up to 2004 px along rows (`uniform_filter`'s last axis) against 517
+  along columns; each over-reached pixel fused as the plain mean beside neighbours that did
+  not. `_windowed_mean` is now a DIRECT separable convolution (`convolve1d`, imfilter's
+  own arithmetic): a NaN, an inf or a 1e300 error reaches exactly its own windows
+  (measured identical to an exact dilation; 23.5 ms vs 13.1 ms at 2050^2).
+- **The port took a real `sqrt` where the MATLAB goes complex.** Where the 3-point fit's
+  curvature is positive (an end-of-stack argmax over a non-monotone profile: 447,701 px,
+  10.6% of that field, all `c > 0`) MATLAB's `s` is imaginary and every later use is
+  `s.^2`, a real negative number: an inverted Gaussian with a finite, large error and a
+  pixel selectivity from -389 to +26.6 dB (26,748 of them above `sth`). The port made those
+  pixels NaN and handed them the WHOLE IMAGE's minimum selectivity (6.4 dB, phi 0.33: not
+  the mean, not the MATLAB's value), which coupled an ROI window to the field around it.
+  `gauss3P` now returns `s2` and carries it as the MATLAB does; on G7 the NaN branch is
+  empty (0 NaN, 0 -inf S).
+- **fstack declares `halo_px`** (`lateral_halo_px`: `3*(nhsize//2)+1`, 13 px at the
+  default), so an ROI preview equals the whole-field run inside the window: 0 of 250,000
+  px differ in every channel (was 105,738, max 20,750 counts, on 488).
+
+After: 488 row/column 215/210 (the MIP's own 1.005 ratio is the scene), BF 33.5/33.6, 561
+10.37/10.34, and the fusion of the transposed stack is the transposed fusion (0 px differ on
+488, 1 px by 1 count on 561). Pinned in `tests/test_fstack.py` (taint == exact dilation,
+transposition symmetry with a 5% row/column bound, inverted fit carried, windowed == whole
+field bit-exact). NOT done: no MATLAB run of `fstack.m` on G7 to compare against count for
+count; the s^2 carrying is the MATLAB's arithmetic by construction, not by a side-by-side.
+
 ## Agent skills
 
 ### Issue tracker

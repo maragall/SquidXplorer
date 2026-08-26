@@ -9,7 +9,14 @@ Faithful to the MATLAB math — the local-variance focus measure, the 3-point lo
 Gaussian interpolation across z (STEP=2, the end clamps AND the Index1/Index3 end-swaps,
 which make the third log sample equal the first at EVERY pixel, so the fitted Gaussian
 always peaks at the clamped argmax frame), the PSNR-based selectivity and the tanh
-weighting. Three deliberate divergences, decided with Julio (2026-08-25):
+weighting. The fit is carried in ``s^2`` (:func:`gauss3P` returns it), which is the only
+form the MATLAB ever uses ``s`` in: where the curvature is positive (an end-of-stack argmax
+over a non-monotone profile: 10.6% of a real G7 488 field, measured 2026-08-26) MATLAB's
+``sqrt`` goes complex and its arithmetic continues in a real, NEGATIVE ``s.^2``, giving an
+inverted Gaussian model whose error is finite and large. Taking ``sqrt`` for real made
+those pixels NaN and handed them the whole image's minimum selectivity (6.4 dB, phi 0.33,
+neither the MATLAB's value nor the mean), coupling every window to the field it sits in.
+Three deliberate divergences, decided with Julio (2026-08-25):
 
 - native dtype preserved: the MATLAB casts the fusion to uint8; here the blend runs in
   float64 and rounds+clips back to the input dtype (``cast_like``). The weighted fusion
@@ -30,8 +37,18 @@ Two interpretations where the MATLAB is degenerate rather than defined:
 Boundary handling: ``uniform_filter(mode="nearest")`` is imfilter 'replicate'; the 3x3
 median's mode="nearest" is value-identical to scipy's default reflect at size 3 (MATLAB's
 medfilt2 zero-pads instead, which zeroes selectivity in the outermost corner pixels — a
-boundary artifact deliberately not imported). NaN entering the selectivity filter taints
-its own window only (imfilter's behaviour), never scipy's whole running-sum line.
+boundary artifact deliberately not imported). The selectivity window is a DIRECT separable
+convolution (:func:`_windowed_mean`), imfilter's own arithmetic: a NaN, an inf or a huge
+error reaches exactly the windows containing it. ``uniform_filter`` is a running sum, and
+its rounding residual after a tainted value leaves the window never returns to zero, so a
+mask built from it (``> 0``) stayed set along the rest of the line. That was the
+horizontal banding Julio saw on G7 (2026-08-26): 830,866 px of over-reach in one 488
+field, in runs up to 2004 px along rows (``uniform_filter``'s last axis) against 517 along
+columns, every over-reached pixel fused as the plain mean of its planes beside neighbours
+that were not.
+
+The operator DECLARES its lateral support as ``halo_px`` (:func:`lateral_halo_px`, ruling
+z): an ROI window solved with that halo equals the whole-field result inside the window.
 """
 
 from __future__ import annotations
@@ -39,7 +56,7 @@ from __future__ import annotations
 from typing import Callable, Iterable
 
 import numpy as np
-from scipy.ndimage import median_filter, uniform_filter
+from scipy.ndimage import convolve1d, median_filter, uniform_filter
 
 from squidxplorer._engine import Param, add_operator
 from squidxplorer.projection import Z_REDUCER, cast_like
@@ -67,11 +84,14 @@ def _take_z(fm: np.ndarray, z: np.ndarray) -> np.ndarray:
 def gauss3P(focus: np.ndarray, fm: np.ndarray):
     """Per-pixel 3-point Gaussian interpolation across z; ``fm`` is (P, Y, X).
 
-    Returns ``(u, s, A, fmax)`` — the fitted mean, width, amplitude and the per-pixel
-    focus-measure maximum. The index clamps and the Index1/Index3 end-swaps are the
-    MATLAB's own, verbatim (0-based): after them the third log sample equals the first
-    at every pixel. NaN where the fit is undefined (a zero sample under the log, or a
-    flat pair making the curvature 0); the caller's selectivity path absorbs it.
+    Returns ``(u, s2, A, fmax)``: the fitted mean, the fitted width SQUARED, the amplitude
+    and the per-pixel focus-measure maximum. The index clamps and the Index1/Index3
+    end-swaps are the MATLAB's own, verbatim (0-based): after them the third log sample
+    equals the first at every pixel. ``s2`` is the MATLAB's ``s.^2``, the only form it
+    uses ``s`` in; it is NEGATIVE where the curvature is positive (the MATLAB's complex
+    ``s``), and the model there is an inverted Gaussian with a finite, large error, as the
+    MATLAB computes it. NaN only where the fit is undefined (a zero sample under the log,
+    or a flat pair making the curvature 0); the caller's selectivity path absorbs it.
     """
     focus = np.asarray(focus, dtype=np.float64)
     P = fm.shape[0]
@@ -99,25 +119,31 @@ def gauss3P(focus: np.ndarray, fm: np.ndarray):
         c = (((y1 - y2) * (x2 - x3) - (y2 - y3) * (x1 - x2))
              / ((x1 ** 2 - x2 ** 2) * (x2 - x3) - (x2 ** 2 - x3 ** 2) * (x1 - x2)))
         b = ((y2 - y3) - c * (x2 - x3) * (x2 + x3)) / (x2 - x3)
-        s = np.sqrt(-1.0 / (2.0 * c))
-        u = b * s ** 2
+        s2 = -1.0 / (2.0 * c)                   # MATLAB: s = sqrt(-1./(2*c)), used as s.^2
+        u = b * s2
         a = y1 - b * x1 - c * x1 ** 2
-        big_a = np.exp(a + u ** 2 / (2.0 * s ** 2))
-    return u, s, big_a, fmax
+        big_a = np.exp(a + u ** 2 / (2.0 * s2))
+    return u, s2, big_a, fmax
 
 
 def _windowed_mean(arr: np.ndarray, size: int) -> np.ndarray:
-    """``uniform_filter`` with imfilter's NaN behaviour: a NaN taints its own window only.
+    """imfilter(fspecial('average', size), 'replicate'): a DIRECT separable convolution.
 
-    scipy's running-sum implementation would carry one NaN down the whole axis line.
+    Never ``uniform_filter`` here: it is a running sum, and the inverted-fit pixels carry
+    errors up to 1e300 (or inf), which a running sum smears down the rest of the line as
+    rounding residue, and whose taint mask it cannot state exactly. Direct arithmetic
+    lets a NaN, an inf or a huge value reach exactly the windows containing it, the
+    MATLAB's own behaviour (measured against an exact dilation: identical).
     """
-    bad = ~np.isfinite(arr)
-    if not bad.any():
-        return uniform_filter(arr, size=size, mode="nearest")
-    out = uniform_filter(np.where(bad, 0.0, arr), size=size, mode="nearest")
-    tainted = uniform_filter(bad.astype(np.float64), size=size, mode="nearest") > 0.0
-    out[tainted] = np.nan
-    return out
+    kernel = np.full(int(size), 1.0 / int(size))
+    rows = convolve1d(np.asarray(arr, dtype=np.float64), kernel, axis=0, mode="nearest")
+    return convolve1d(rows, kernel, axis=1, mode="nearest")
+
+
+def lateral_halo_px(nhsize: int) -> int:
+    """The pixels a fused pixel depends on laterally: two focus-measure windows, the
+    selectivity window (``nhsize // 2`` each) and the 3x3 median (1)."""
+    return 3 * (int(nhsize) // 2) + 1
 
 
 def fuse_stack(planes, nhsize: int = DEFAULT_NHSIZE, alpha: float = DEFAULT_ALPHA,
@@ -150,11 +176,11 @@ def fuse_stack(planes, nhsize: int = DEFAULT_NHSIZE, alpha: float = DEFAULT_ALPH
     for p in range(P):
         fm[p] = gfocus(stack[p], nhsize)
 
-    u, s, big_a, fmax = gauss3P(focus, fm)
+    u, s2, big_a, fmax = gauss3P(focus, fm)
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         err = np.zeros_like(fmax)
         for p in range(P):
-            err += np.abs(fm[p] - big_a * np.exp(-((focus[p] - u) ** 2) / (2.0 * s ** 2)))
+            err += np.abs(fm[p] - big_a * np.exp(-((focus[p] - u) ** 2) / (2.0 * s2)))
         fm /= fmax                                       # normalise AFTER err, like the MATLAB
         inv_psnr = _windowed_mean(err / (P * fmax), nhsize)
         big_s = 20.0 * np.log10(1.0 / inv_psnr)
@@ -192,6 +218,7 @@ def fstack_op(nhsize: int = DEFAULT_NHSIZE, alpha: float = DEFAULT_ALPHA,
 
     _fstack.__name__ = f"fstack(nhsize={int(nhsize)},alpha={alpha},sth={sth})"
     _fstack.consumes = Z_REDUCER
+    _fstack.halo_px = lateral_halo_px(int(nhsize))     # ruling z: an ROI window's halo
     return _fstack
 
 

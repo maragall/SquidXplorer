@@ -39,11 +39,31 @@ def test_gauss3P_end_swaps_peak_the_fit_at_the_argmax_frame():
     focus = np.arange(P, dtype=np.float64)
     profile = np.exp(-((focus - 4.3) ** 2) / (2 * 1.7 ** 2))    # true peak between frames
     fm = np.tile(profile[:, None, None], (1, 4, 4))
-    u, sig, big_a, fmax = gauss3P(focus, fm)
+    u, s2, big_a, fmax = gauss3P(focus, fm)
     np.testing.assert_allclose(u, 4.0)               # the argmax frame, never 4.3
     np.testing.assert_allclose(fmax, profile.max())
-    assert np.all(np.isfinite(sig)) and np.all(sig > 0)
+    assert np.all(np.isfinite(s2)) and np.all(s2 > 0)
     assert np.all(np.isfinite(big_a))
+
+
+def test_gauss3P_carries_an_inverted_fit_the_way_the_matlab_does():
+    """argmax at frame 0 with fm[4] > fm[2]: the end-swaps sample y1 = y3 = log fm[4] above
+    y2 = log fm[2], a POSITIVE curvature. MATLAB's sqrt goes complex and every later use is
+    s.^2, a real negative number: the model is an inverted Gaussian with a finite error.
+    Taking the real sqrt made these pixels NaN (10.6% of a G7 488 field)."""
+    P = 9
+    focus = np.arange(P, dtype=np.float64)
+    profile = np.array([9.0, 1.0, 2.0, 1.0, 5.0, 1.0, 1.0, 1.0, 1.0])
+    fm = np.tile(profile[:, None, None], (1, 2, 2))
+    u, s2, big_a, fmax = gauss3P(focus, fm)
+    assert np.all(np.isfinite(s2)) and np.all(s2 < 0), s2
+    assert np.all(np.isfinite(u)) and np.all(np.isfinite(big_a))
+    np.testing.assert_allclose(fmax, 9.0)
+    with np.errstate(over="ignore"):
+        model = big_a * np.exp(-((focus[:, None, None] - u) ** 2) / (2.0 * s2))
+    np.testing.assert_allclose(model[2], fm[2])      # the fit passes through its samples
+    np.testing.assert_allclose(model[4], fm[4])
+    assert np.all(model[8] > fm[8]), "an inverted Gaussian grows away from its samples"
 
 
 def test_gauss3P_clamps_an_edge_peak_into_the_interior():
@@ -318,3 +338,96 @@ def test_the_save_routes_to_acquisition_format_and_round_trips(fstack_dataset, t
     meta = out.metadata
     assert meta["n_z"] == 1 and list(meta["z_levels"]) == [0]
     np.testing.assert_array_equal(out.read(_FS_REGION, 0, _FS_CH, 0), fuse_stack(planes))
+
+
+# ------------------------------------------------------------------ 7. no horizontal banding
+
+def _drifting_focus_stack(P=15, size=192, seed=5, noise=40.0):
+    """Noisy flat background plus a textured disc whose sharp plane drifts linearly with x.
+
+    The background's argmax lands on the end planes at random, where gauss3P's fit is
+    undefined (NaN), so the selectivity filter sees scattered NaN: the G7 shape (10.6% of
+    a real 488 field, measured 2026-08-26)."""
+    rng = np.random.default_rng(seed)
+    scene = np.full((size, size), 800.0)
+    yy, xx = np.mgrid[:size, :size]
+    disc = (yy - size / 2) ** 2 + (xx - size / 2) ** 2 < (size * 0.35) ** 2
+    scene[disc] = rng.integers(500, 6000, disc.sum())
+    z_of_x = (xx / (size - 1)) * (P - 1)
+    blurs = [ndi.gaussian_filter(scene, 0.8 * d) if d else scene for d in range(P)]
+    frames = []
+    for k in range(P):
+        d = np.clip(np.rint(np.abs(k - z_of_x)).astype(int), 0, P - 1)
+        f = np.choose(d, blurs) + rng.normal(0.0, noise, (size, size))
+        frames.append(np.clip(f, 0, 65535).astype(np.uint16))
+    return frames
+
+
+def test_a_nan_taints_its_own_window_only_never_the_rest_of_the_row():
+    """imfilter semantics: a NaN reaches exactly the windows containing it. A float running
+    sum compared with > 0 kept a line tainted after the NaN left the window (G7 488 FOV 0:
+    830,866 px over-reach in runs up to 2004 px along rows, 517 along columns)."""
+    from scipy.ndimage import maximum_filter
+
+    from squidxplorer._fstack import _windowed_mean
+
+    rng = np.random.default_rng(1)
+    a = rng.random((256, 256))
+    a[rng.random((256, 256)) < 0.02] = np.nan
+    got = np.isnan(_windowed_mean(a, 9))
+    want = maximum_filter(np.isnan(a), 9, mode="nearest")
+    over = got & ~want
+    assert not over.any(), (
+        f"{int(over.sum())} px tainted beyond the 9x9 window of any NaN, across "
+        f"{int(over.any(axis=1).sum())} rows")
+    np.testing.assert_array_equal(got, want)
+
+
+def test_fusing_the_transposed_stack_is_the_transposed_fusion():
+    """Every step of fstack is axis-symmetric, so the fusion of the transposed stack must be
+    the transposed fusion to within float rounding (1 count). Row-correlated taint broke
+    it: max 3,445 counts apart and a 342 vs 319 row/column jump on this stack."""
+    frames = _drifting_focus_stack()
+    fused = fuse_stack(frames).astype(np.int64)
+    fused_t = fuse_stack([f.T for f in frames]).T.astype(np.int64)
+    d = np.abs(fused - fused_t)
+    assert d.max() <= 1, (
+        f"transposing the input changed {int((d > 0).sum())} px by up to {int(d.max())} "
+        "counts: the fusion depends on the axis order")
+    row = np.abs(np.diff(fused, axis=0)).mean()
+    col = np.abs(np.diff(fused, axis=1)).mean()
+    assert 0.95 <= row / col <= 1.05, f"row/col discontinuity {row:.1f}/{col:.1f}: banded"
+
+
+class _DriftReader:
+    """One FOV, one channel, the drifting-focus stack, for the windowed-run parity pin."""
+
+    def __init__(self, frames):
+        size = frames[0].shape[0]
+        self.metadata = {
+            "regions": ["A1"], "channels": [{"name": "488"}],
+            "n_z": len(frames), "z_levels": list(range(len(frames))), "n_t": 1, "dz_um": 1.0,
+            "dtype": "uint16", "frame_shape": (size, size), "pixel_size_um": 1.0,
+            "fovs_per_region": {"A1": [0]},
+        }
+        self._frames = frames
+
+    def read(self, region, fov, channel, z_level, time_point=0):
+        return self._frames[int(z_level)]
+
+
+def test_a_windowed_run_equals_the_whole_field_run_inside_the_window():
+    """Ruling z's contract: the operator DECLARES the halo its window needs, so an ROI
+    preview's interior is the whole-field result. fstack's support is 3*(nhsize//2)+1 px
+    (two focus-measure windows, the selectivity window, the 3x3 median)."""
+    from squidxplorer.projection import operator_halo_px
+
+    frames = _drifting_focus_stack()
+    reader = _DriftReader(frames)
+    op = s.bind_operator("fstack")
+    assert operator_halo_px(op, len(frames)) == 13
+    whole = project_well(reader, "A1", 0, reduce=op)[0, 0, 0]
+    window = (40, 150, 30, 160)
+    win = project_well(reader, "A1", 0, reduce=op, window=window)[0, 0, 0]
+    r0, r1, c0, c1 = window
+    np.testing.assert_array_equal(win, whole[r0:r1, c0:c1])
