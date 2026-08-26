@@ -96,6 +96,13 @@ class MosaicTreeModel(QAbstractItemModel):
         layers = mosaic.model.layers
         layers.events.inserted.connect(self._on_layers_changed)
         layers.events.removed.connect(self._on_layers_changed)
+        # ...and IDENTITIES move without a list event: a brick is stamped by `adopt` AFTER its
+        # `inserted` fired, and a volume's surrender/restore changes no list at all. Rebuilt
+        # on `inserted` alone, the tree never saw the LAST brick's channel (Julio, G7: "the
+        # 561_nm cannot be toggled on and off, even though it's visible").
+        subscribe = getattr(mosaic, "on_identity_changed", None)
+        if callable(subscribe):
+            subscribe(self._on_layers_changed)
 
     # -- structure ----------------------------------------------------------------------
     def refresh(self) -> None:

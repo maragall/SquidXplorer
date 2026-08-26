@@ -490,6 +490,26 @@ Pinned by tests parametrized over the two scenes (`tests/conftest.py::build_flat
 `ViewerModel` with several bricks — a rule that only holds for a one-brick volume is the bug
 wearing a disguise.
 
+**An identity MOVES through the model, and the model says so** (2026-08-26, branch
+channel-toggle, Julio on G7: "when I 3D render and ROI, the 561_nm cannot be toggled on and
+off, even though it's visible"). napari's `inserted` fires inside `add_image`, BEFORE `adopt`
+stamps a brick's identity, so a tree rebuilt on list events alone saw every brick but the
+LAST one adopted: the third channel had no row. And a volume's surrender/restore of the 2D
+layers' identity changed no list at all. The rules now: `MosaicLayers.on_identity_changed`
+is the one notification (fired by `adopt`, `drop_layer`, `surrender`, `restore`) and
+`MosaicTreeModel` rebuilds on it beside `inserted`/`removed`; `surrender(layer)` /
+`restore(layer)` are the model's own (`BrickedVolume` no longer pops `META_KEY` in place),
+and a surrendered layer is PARKED, not forgotten: `add_mosaic` for an identity with no
+current holder drops its parked layers first. Measured before that: a parent's unscoped
+2D decon preview is cached one plane deep and replayed into every later tab; in the 3D ROI
+tab the volume parked those, the tab's own full-depth decon landed beside them, and after
+`close_native3d` restored both, `find` answered the older flat one and 3D said "'decon' is
+on screen but carries no z depth here". `tests/test_channel_toggle.py` drives all of it
+through the real chain (PlateWindow, ViewerManager, ViewDeck, ROI child, `_open_3d`, a real
+decon run) over a G7-shaped fixture. NOT reproduced there: "when I turn off layer 561 for
+decon, the whole layer turns off" in a 2D view, parent or ROI child; the pin stays as a
+guard.
+
 ## The plate window owns no viewer, and contrast is not implemented twice
 
 **The plate has no napari surface of its own.** `PlateWindow._mosaic_pane` was pinned to `None` on
