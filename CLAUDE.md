@@ -1156,9 +1156,41 @@ quality and simplicity." The rules now:
 - **Measured, 2026-08-25**: ruling i's strip took the view column from 431 to 207 words at
   rest (33 elements both) and from 1265 to 454 words with every operator panel inserted;
   G7 488/FOV 1/z 7 windows: napari min/max (6416, 65520), auto full-res (18296, 65520).
-- **NOT done**: z (sub-FOV decon with a PSF halo) and aa (a 3D-tab preview delivered as a
-  full-depth volume) are unimplemented; a 3D-tab preview still delivers one plane and says
-  so. Offscreen has no OpenGL, so the docked real column is unverified headless.
+- **Ruling z, sub-FOV decon** (Julio: "so that we can try it and get results really fast"):
+  an ROI preview reads and solves the box PLUS A HALO and trims it. `RegionViewer._run_scope`
+  returns `(regions, windows)`, `windows={(region, fov): (r0, r1, c0, c1)}` in each touched
+  frame's own pixels (`_mosaic_source.fov_windows_px`, top-left convention), riding
+  `run_operator -> _OperatorWorker -> run_operator_once -> run_plate -> project_well(window=)`.
+  The halo is DECLARED on the operator callable (`halo_px`, read by
+  `projection.operator_halo_px`; decon's is `_decon.lateral_halo_px`: the radius holding
+  99.9% of the modelled PSF's z-integrated energy, floor `HALO_MIN_PX` 8, so 10 to 12 px on
+  G7's optics), per channel, clamped at the frame edge; z stays whole; `read_window` prefers
+  a reader's own `read_window` (the Zarr reader slices its array; the TIFF readers decode
+  the page and slice). The accumulator places each window at its FOV offset plus its corner
+  (`_fuse_windows`, the same `fov_offsets_px`) and the result's bbox is the windows' union.
+  A save and the region arm REFUSE windows by name. One INFO line per windowed run: "ROI
+  decon: 529x724 px window + 12 px halo, 15 plane(s)". Measured on G7 FOV 1 (2050^2, 3 ch,
+  15 z, 3 iterations, MPS): sub-FOV 1.69 s / 0.87 GB peak vs whole-field 10.07 s / 3.37 GB
+  (one plane: 0.56 s vs 0.67 s). Parity: within 1 count at 2 iterations (synthetic AND G7);
+  at 3 the interior differs (G7 488: max 7 at one plane, 216 over the stack, mean 0.72)
+  because the Biggs-Andrews acceleration's lambda is ONE scalar over the solved volume. That
+  is the solver's global step, not the halo, and it is stated here rather than hidden.
+- **Ruling aa, a 3D tab's preview is a VOLUME**: `RegionViewer._launch_operator` passes
+  `deliver_depth=True` from a view in 3D mode; `_OperatorWorker._result_pixels` then emits
+  `(C, Nz, Y, X)`, the accumulator fuses per z (`_fuse` stacks `(Nz, H, W)`), and
+  `deliver_result` hands a depth result in a 3D view to `_show_result_volume`: close the
+  volume up, `show_op(op)`, `_volume_view.open_3d` again, so the bricks are read off the
+  RESULT layers under their own LUTs. A 2D tab still gets one plane. BEFORE any read,
+  `_volume_preview_refusal` sizes the full-depth result (fields or windows x nz x channels x
+  itemsize) against `_brick_budget_bytes()` and refuses by name: "3D preview over 4 FOV(s) x
+  46 planes x 3 channel(s) needs ~X GB ... draw an ROI". Pinned in tests/test_volume_preview.py.
+- **Ruling u diagnostic**: `MosaicTreeModel.setData` logs ONE DEBUG line per checkbox write,
+  "layer checkbox: decon/561 -> off; changed N layer(s): ...", naming every layer whose
+  `visible` changed as a consequence. No behaviour change; headless the identity toggles alone.
+- **NOT done**: the TIFF readers decode a whole page for a window (the solve, not the read,
+  is the cost: a G7 page decodes in 4.6 ms median, measured); a 3D-tab preview over a region above the budget is
+  refused rather than bricked from disk. Offscreen has no OpenGL, so the docked real column
+  is unverified headless.
 
 ## Agent skills
 
