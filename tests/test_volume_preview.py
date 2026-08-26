@@ -183,11 +183,11 @@ def test_an_over_budget_3d_preview_is_refused_by_name_before_any_read(qapp, napa
         said = " ".join(win._pane.said)
         assert "3D preview over 4 FOV(s) x 46 planes" in said and "draw an ROI" in said, said
         assert "GB" in said
-        # the same scope from a 2D tab is not refused: it solves one plane
+        # the same scope from a 2D tab is not refused: the full solve runs, ONE plane lands
         win.set_render_mode("2d")
         win._preview_view_operator()
         assert calls and calls[-1][1]["deliver_depth"] is False
-        assert calls[-1][1]["preview_z_level"] is not None
+        assert "preview_z_level" not in calls[-1][1]
     finally:
         win.dispose()
 
@@ -201,6 +201,6 @@ def test_a_small_3d_preview_launches_asking_for_depth(qapp, napari_pane_stub):
         win._preview_view_operator()
         assert calls, win._pane.said
         kw = calls[-1][1]
-        assert kw["deliver_depth"] is True and kw["preview_z_level"] is None
+        assert kw["deliver_depth"] is True and "preview_z_level" not in kw
     finally:
         win.dispose()

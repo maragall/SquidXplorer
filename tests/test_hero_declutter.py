@@ -185,60 +185,32 @@ def _z_reader(n_z=3):
     return FakeReader(meta, planes)
 
 
-def test_a_2d_preview_solves_exactly_the_plane_in_view():
+def test_a_preview_and_a_save_both_read_the_full_stack(tmp_path):
+    """Every preview is the full solve (Julio, 2026-08-26): a depth-keeping preview, a
+    reducer's preview and a save read every plane; the dispatch carries no plane knob."""
+    import inspect
+
     from squidxplorer._dispatch import run_operator_once
 
+    assert "preview_z_level" not in inspect.signature(run_operator_once).parameters
     op = _depthkeep_operator()
     reader = _z_reader()
     got = []
-    result = run_operator_once(reader, operator=op, save=False, owed=1,
-                               regions=["A1"], n_fovs=None,
-                               on_well=lambda r, f, img: got.append(img),
-                               preview_z_level=1)
+    result = run_operator_once(reader, operator=op, save=False, owed=1, regions=["A1"],
+                               n_fovs=None, on_well=lambda r, f, img: got.append(img))
     assert result.landed == 1
-    assert sorted({z for (_r, _f, _c, z, _t) in reader.reads}) == [1], (
-        f"a 2D preview must read ONLY the in-view plane; read z {sorted({k[3] for k in reader.reads})}")
-    assert got[0].shape[2] == 1, "the restricted preview must yield a 1-plane result"
-
-
-def test_a_3d_preview_and_a_reducer_preview_keep_the_full_stack():
-    from squidxplorer._dispatch import run_operator_once
-
-    op = _depthkeep_operator()
-    reader = _z_reader()
-    got = []
-    run_operator_once(reader, operator=op, save=False, owed=1, regions=["A1"], n_fovs=None,
-                      on_well=lambda r, f, img: got.append(img), preview_z_level=None)
     assert sorted({k[3] for k in reader.reads}) == [0, 1, 2]
-    assert got[0].shape[2] == 3, "an unrestricted preview keeps every plane"
+    assert got[0].shape[2] == 3, "a preview keeps every plane"
 
     reducer_reader = _z_reader()
     run_operator_once(reducer_reader, operator="mip", save=False, owed=1, regions=["A1"],
-                      n_fovs=None, on_well=lambda r, f, img: None, preview_z_level=1)
-    assert sorted({k[3] for k in reducer_reader.reads}) == [0, 1, 2], (
-        "a reducer's preview must still consume every plane")
+                      n_fovs=None, on_well=lambda r, f, img: None)
+    assert sorted({k[3] for k in reducer_reader.reads}) == [0, 1, 2]
 
-
-def test_a_save_always_runs_the_full_stack(tmp_path):
-    from squidxplorer._dispatch import run_operator_once
-
-    op = _depthkeep_operator()
-    reader = _z_reader()
-    run_operator_once(reader, operator=op, save=True, owed=1, regions=["A1"], n_fovs=None,
-                      out_dir=str(tmp_path), on_well=lambda r, f, img: None,
-                      preview_z_level=1)
-    assert sorted({k[3] for k in reader.reads}) == [0, 1, 2], (
-        "Run on plate must deconvolve the full stack whatever tab asked")
-
-
-def test_the_region_arm_refuses_a_z_restriction_by_name():
-    import pytest as _pytest
-
-    import squidxplorer
-
-    reader = _z_reader()
-    with _pytest.raises(ValueError, match="z_operator"):
-        list(squidxplorer.run_plate(reader, operator="stitch", z_level=1))
+    save_reader = _z_reader()
+    run_operator_once(save_reader, operator=op, save=True, owed=1, regions=["A1"],
+                      n_fovs=None, out_dir=str(tmp_path), on_well=lambda r, f, img: None)
+    assert sorted({k[3] for k in save_reader.reads}) == [0, 1, 2]
 
 
 def test_no_gui_string_says_2d_or_3d_decon():

@@ -444,7 +444,6 @@ def run_plate(
     workers: int | None = None,
     on_error=None,
     operator_kwargs: Optional[dict] = None,
-    z_level: Optional[int] = None,
     windows: Optional[dict] = None,
 ) -> Iterator[tuple[str, int, np.ndarray]]:
     """Run *operator* over every selected well, streaming ``(region, fov, image)`` results.
@@ -454,17 +453,13 @@ def run_plate(
     else the per-FOV loop. ``n_fovs`` defaults to the LOOP's own default (1 per-FOV; every FOV
     for a region operator); an explicit int is the per-FOV loop's knob and is REFUSED on the
     region arm — a FOV subset of a region is spelled ``regions={region: [fov, ...]}``.
-    ``z_level=`` restricts the per-FOV loop to one acquisition plane (``project_well``'s own
-    knob: plane-ops and depth-keeping z-consumers only) and is refused on the region arm.
-    ``windows={(region, fov): (r0, r1, c0, c1)}`` runs each named field on that frame-pixel
+    Every run reads every plane: the per-FOV loop has no plane restriction (a depth-keeping
+    preview is the full solve, Julio 2026-08-26; ``project_well``'s own ``z_level=`` stays
+    for stitch's plane-op z loop). ``windows={(region, fov): (r0, r1, c0, c1)}`` runs each named field on that frame-pixel
     window plus the operator's declared halo (ruling z, sub-FOV decon); refused on the
     region arm, whose fusion needs whole frames.
     """
     if is_region_operator(operator):
-        if z_level is not None:
-            raise ValueError(
-                f"a region operator's z handling is its z_operator: z_level={z_level!r} would "
-                "silently crop the fusion. Pass z_operator= in operator_kwargs instead.")
         if windows:
             raise ValueError(
                 f"a region operator fuses whole frames: a window on {len(windows)} field(s) "
@@ -485,7 +480,7 @@ def run_plate(
                           n_fovs=1 if n_fovs is N_FOVS_LOOP_DEFAULT else n_fovs,
                           workers=workers, operator=operator,
                           on_error=on_error, regions=regions, operator_kwargs=operator_kwargs,
-                          z_level=z_level, windows=windows)
+                          windows=windows)
 
 
 def _project_plate(
@@ -497,7 +492,6 @@ def _project_plate(
     on_error=None,
     regions=None,
     operator_kwargs: Optional[dict] = None,
-    z_level: Optional[int] = None,
     windows: Optional[dict] = None,
 ) -> Iterator[tuple[str, int, np.ndarray]]:
     """Project every selected well in parallel, streaming ``(region, fov, image)`` results.
@@ -536,7 +530,7 @@ def _project_plate(
             except StopIteration:
                 return False
             future = pool.submit(project_well, reader, region, fov,
-                                 reduce=fn, consumes=op.consumes, z_level=z_level,
+                                 reduce=fn, consumes=op.consumes,
                                  window=by_field.get((str(region), int(fov))))
             in_flight[future] = (region, fov)
             return True
