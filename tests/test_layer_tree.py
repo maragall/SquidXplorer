@@ -273,6 +273,28 @@ def test_toggling_one_channel_writes_that_layer_only(tree, mosaic):
     assert [ly.visible for ly in mosaic.group("stitched")] == [True, True, False, True]
 
 
+def test_a_checkbox_write_logs_the_identity_and_every_layer_it_changed(tree, mosaic, caplog):
+    """Ruling u diagnostic (Julio: "when I turn off layer 561 for decon, the whole decon layer
+    turns off"; headless pins say each identity toggles alone). ONE DEBUG line per checkbox
+    write: the identity written and every layer whose `visible` changed as a consequence."""
+    import logging
+
+    m = tree.model()
+    with caplog.at_level(logging.DEBUG, logger="squid.xplorer"):
+        m.setData(_ch_index_of(tree, "stitched", "561"), Qt.Unchecked, Qt.CheckStateRole)
+    lines = [r.getMessage() for r in caplog.records
+             if r.levelno == logging.DEBUG and r.getMessage().startswith("layer checkbox")]
+    assert len(lines) == 1, caplog.text
+    assert "stitched/561 -> off" in lines[0] and "changed 1 layer" in lines[0], lines[0]
+    assert "stitched/561" in lines[0].split("changed", 1)[1]
+    assert "stitched/488" not in lines[0].split("changed", 1)[1]
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="squid.xplorer"):
+        m.setData(_op_index_of(tree, "stitched"), Qt.Unchecked, Qt.CheckStateRole)
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("layer checkbox")]
+    assert len(lines) == 1 and "stitched (group) -> off" in lines[0] and "changed 3 layer" in lines[0], lines
+
+
 # The same tree over a flat mosaic and over a bricked volume; scene builders are shared with
 # test_viewer_3d.py so there is one definition of what a 3D scene is.
 
