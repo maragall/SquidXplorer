@@ -161,6 +161,24 @@ prompt on a real tty, so a piped or CI run never blocks. What is NOT done: the b
 unsigned — macOS first launch is right-click → Open, and Linux needs one `chmod +x`
 (`scripts/installer/README.md` is the user-facing story).
 
+**decon installs EVERYWHERE, and the GPU probe is a fact, not a shade** (2026-08-25, branch
+gpu-setup; Julio: "It looks like it couldn't detect my GPU for Mac. What about
+Linux/Windows?"). Measured: `torch` was declared nowhere (the MPS backend worked in the dev env
+by accident, a customer Mac always ran CPU) and the installer shaded decon on every Mac and
+every non-NVIDIA box because its probe was `nvidia-smi` alone. Now `bootstrap.gpu_backend()`
+answers one of three, shown as the decon row's note and printed by the install: `GPU: CUDA
+(petakit)` (an NVIDIA driver speaking CUDA 12; the installer adds the `decon-cuda` extra,
+cupy-cuda12x, petakit's own path), `GPU: Apple (torch MPS)` (Apple Silicon; `torch` rides the
+`decon` extra by `sys_platform == 'darwin' and platform_machine == 'arm64'` marker), or `CPU
+only: <why>` (everything else, Intel Macs included; petakit's numpy path). decon defaults
+checked on every machine. torch is Apple-only ON PURPOSE: `_decon_gpu` never runs on a CPU
+torch device, the PyPI Linux wheel drags the CUDA runtime (gigabytes) and the Windows one is
+CPU-only, so elsewhere it would be weight that changes no pixel. What is NOT done: CUDA torch
+wheels (index-specific, download.pytorch.org) are installed by nothing here, NVIDIA is CuPy's.
+The petakit pin is main 97b06b0 (cupy is `petakit[cuda12]`, optional), verified as a 200
+tarball and a `pip download`; `build-installer.yml` proves the decon install on all three
+runners, macOS included.
+
 **ONE table** (`_engine._OPERATORS`, 2026-08-05). `add_operator` and `add_region_operator` are two
 registrars over one record, sharing one validator (`_engine._declare`); `add_region_operator`
 stamps `consumes=REGION_OP` (`{"fov"}`) and that declaration is what the region loop selects on
@@ -805,7 +823,10 @@ measured 2.33 GiB peak per FOV on this Mac, 15z x 3ch x 2050^2, one FOV in fligh
   `deconvolve_plane`, `make_psf_2d`, `deconvolve`, `decon3d_op` are gone; `decon_op` builds the
   volume solve; `"decon3d"` is refused BY NAME with a pointer to `decon`
   (`_engine._resolve_operator`). The decon card (QC panel) is unchanged — it always ran the
-  3-D solve.
+  3-D solve. Backends (2026-08-25): petakit CuPy on NVIDIA, `_decon_gpu` torch/MPS on Apple
+  Silicon (z-tiled over `min(recommended_max_memory, free RAM)` with petakit's own tile plan;
+  the tiled solve equals petakit's tiled solve to 1 count and is NOT the whole solve, up to
+  25% of peak at seams with a 95-plane PSF, the log line says so), petakit numpy elsewhere.
 - **A channel with NO emission line is COPIED THROUGH unchanged, named once** (Julio,
   2026-08-25: "copy BF through unchanged with a named log line"). Measured on
   G7_2026-08-20 (BF_LED_matrix_full + 488 + 561, nz 15): `project_well` binds every channel

@@ -187,22 +187,32 @@ decon = [
     # petakit's dependency to declare, and adding it here would be this file guessing at another
     # package's requirements.
     #
-    # KNOWN BROKEN ON macOS AND ON ANY MACHINE WITHOUT CUDA 12, and the fix is not ours to make.
-    # petakit's own pyproject lists `cupy-cuda12x` as a CORE dependency, and that wheel exists for
-    # no other platform, so `pip install ".[decon]"` on this laptop ends at
+    # PINNED TO petakit main 97b06b0 (2026-08-25): cupy-cuda12x is petakit's OPTIONAL `cuda12`
+    # extra there, not a core dependency, so this resolves on macOS and on any machine without
+    # CUDA 12. Until that commit `pip install ".[decon]"` failed everywhere but a CUDA rig
+    # (measured 2026-08-05: "Could not find a version that satisfies the requirement
+    # cupy-cuda12x (from petakit)", and pip resolves a whole command atomically, so
+    # `.[stitch,decon]` lost tilefusion too). The CUDA payload rides `decon-cuda` below.
+    "petakit @ https://github.com/maragall/deconvolution/archive/97b06b025d556c35c0414acfe4870832a8948917.tar.gz",
+    # torch is the Apple GPU backend (squidxplorer/_decon_gpu.py runs the RL update on MPS). It
+    # was declared NOWHERE until 2026-08-25 and worked in the dev env by accident, so a customer
+    # Mac always ran petakit's CPU path (measured: 3 min 05 s for 3 iterations on a
+    # (46, 2304, 2304) volume whose planes ran torch/mps in 0.3 to 1.5 s).
     #
-    #     ERROR: Could not find a version that satisfies the requirement cupy-cuda12x (from petakit)
-    #
-    # -- measured 2026-08-05 in a clean venv. pip resolves a whole command atomically, so asking for
-    # `.[stitch,decon]` loses tilefusion too; `.[stitch]` alone installs fine. petakit does NOT need
-    # cupy at runtime for the path this package uses: the working install on this machine is
-    # editable with no cupy present at all, and every decon test passes. The declaration is simply
-    # wrong, and it belongs in petakit (`~/CEPHLA/projects/deconvolution`) as a one-line move of
-    # `cupy-cuda12x` into an optional `gpu` extra. Deliberately NOT worked around here -- pinning or
-    # patching another package's requirements from this file is how a dependency graph becomes two
-    # sources of truth. Raised as an action item; see AI-docs SquidXplorer/action-items.
-    "petakit @ https://github.com/maragall/deconvolution/archive/64de19bca7133e9107d182ba4aff10e2ca856888.tar.gz",
+    # APPLE SILICON ONLY, by marker, on purpose: _decon_gpu never runs on a CPU torch device,
+    # NVIDIA machines are petakit's CuPy path (the `decon-cuda` extra below, and _decon_gpu
+    # stands down when CuPy sees a device), the PyPI Linux wheel drags the whole CUDA runtime
+    # (nvidia-* wheels, gigabytes) and the PyPI Windows wheel is CPU-only, so on those platforms
+    # torch would be weight that changes no pixel. CUDA torch wheels are index-specific
+    # (download.pytorch.org) and are NOT what any extra here installs. Verified with torch 2.13;
+    # the floor is where torch.mps.recommended_max_memory exists (the budget falls back to
+    # system RAM without it).
+    "torch>=2.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
+# The CUDA payload for the decon pack, added by the installer ONLY when its probe sees an NVIDIA
+# driver speaking CUDA 12 (scripts/installer/bootstrap.py::gpu_backend). cupy-cuda12x is what
+# petakit's own `cuda12` extra names; spelled here directly so the petakit SHA lives on ONE line.
+decon-cuda = ["squidxplorer[decon]", "cupy-cuda12x"]
 # (The `segment` extra — cellpose, for the shelved spot/cellpose operators — was deleted
 # 2026-08-24. The declaration test enforces extra <-> group both ways, so the group and the
 # operators leave together. Git history reinstates.)
