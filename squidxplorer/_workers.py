@@ -50,8 +50,7 @@ class _OperatorWorker(QThread):
 
     def __init__(self, operator: str, reader, meta, fov_index: dict, out_dir: str,
                  regions=None, save: bool = True, n_fovs=1, operator_kwargs=None,
-                 z_level: int = 0, preview_z_level=None, windows=None,
-                 deliver_depth: bool = False):
+                 z_level: int = 0, windows=None, deliver_depth: bool = False):
         super().__init__()
         self._operator = operator
         # Ruling aa: a preview asked from a 3D tab gets EVERY plane of a depth-keeping result
@@ -62,11 +61,9 @@ class _OperatorWorker(QThread):
                          for (r, f), w in (windows or {}).items()}
         # The z plane the DISPLAY gets from a depth-keeping result: the requesting view's own
         # in-view z (Julio, 2026-08-25: "decon runs on a z-level that's not in view"). Clamped
-        # per result in _result_pixels; 0 for a run no view asked for.
+        # per result in _result_pixels; 0 for a run no view asked for. The SOLVE is always the
+        # full stack (Julio, 2026-08-26: "Make the 2D preview show plane of the 3D solve").
         self._z_level = max(0, int(z_level or 0))
-        # A 2D tab's preview COMPUTES only that plane too (None = full depth; dispatch
-        # applies it only to a depth-keeping per-FOV preview, by declaration).
-        self._preview_z = None if preview_z_level is None else int(preview_z_level)
         self._reader, self._meta = reader, meta
         self._fov_index = fov_index
         self._out_dir = out_dir
@@ -208,11 +205,9 @@ class _OperatorWorker(QThread):
         from squidxplorer._engine import operator_reduces_depth, run_halo_px
 
         nz = len(self._meta.get("z_levels") or [0])
-        reduces = operator_reduces_depth(self._operator)
-        solved_z = 1 if (self._preview_z is not None and not reduces) else nz
-        planes = 1 if reduces else solved_z
+        planes = 1 if operator_reduces_depth(self._operator) else nz
         try:
-            halo = run_halo_px(self._reader, self._operator, self._operator_kwargs, solved_z)
+            halo = run_halo_px(self._reader, self._operator, self._operator_kwargs, nz)
         except Exception as exc:                  # noqa: BLE001 - the run will name it itself
             halo = f"? ({type(exc).__name__})"
         if len(self._windows) == 1:
@@ -223,11 +218,29 @@ class _OperatorWorker(QThread):
             what = f"{len(self._windows)} windows, {total} px"
         log.info("ROI %s: %s + %s px halo, %d plane(s)", self._operator, what, halo, planes)
 
+    def _whole_field_line(self) -> None:
+        """ONE INFO line per UNSCOPED depth-keeping preview (Julio, 2026-08-26: "Decon is
+        expensive. If they want to preview fast, then have them trace the ROI"): the cost
+        it is about to pay, and the faster way. Declaration-driven; a reducer, a region
+        operator and a save say nothing here."""
+        from squidxplorer._engine import operator_reduces_depth
+        from squidxplorer.projection import scope_wells
+
+        if self._save or self._region_op or operator_reduces_depth(self._operator):
+            return
+        n_fields = sum(len(f) for f in
+                       scope_wells(self._meta, self._n_fovs, self._regions).values())
+        log.info("%s preview over %d whole field(s): %d planes x %d channel(s); draw an ROI "
+                 "for a faster preview", self._operator, n_fields,
+                 len(self._meta.get("z_levels") or [0]), len(self._channels))
+
     def _run_body(self, _run_metrics):
         # say 0 of N before any work, so the bar is determinate from its first frame
         self.runProgress.emit(self._progress.report())
         if self._windows:
             self._roi_line()
+        else:
+            self._whole_field_line()
         try:
             # the ONE save-vs-preview dispatch; this worker only adds Qt signals around it
             result = run_operator_once(
@@ -237,7 +250,7 @@ class _OperatorWorker(QThread):
                 workers=1 if self._region_op else _VIEWER_WORKERS,
                 parameters=self._operator_kwargs, tiff=False,
                 on_well=self._on_well, on_error=self._on_error, stop=self._stop.is_set,
-                preview_z_level=self._preview_z, windows=self._windows or None)
+                windows=self._windows or None)
             if result.stopped:
                 _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
                 return  # window closing / re-opening; drop out cleanly (no final/written emit)

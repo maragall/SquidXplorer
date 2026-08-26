@@ -327,17 +327,16 @@ def project_well(
     # the output depth is the input's while the operator still sees all z in one call.
     keeps_depth = bool(getattr(reduce, "keeps_depth", False)) and "z" in consumes
 
-    # One acquisition plane; refused for a z-REDUCER ("the MIP of one plane" is a different
-    # result). A keeps_depth z-consumer ACCEPTS it: the run is the same solve over a 1-plane
-    # stack, the pinned degenerate case (a 2D tab's preview, Julio 2026-08-25).
+    # One acquisition plane; refused for EVERY z-consumer: "the MIP of one plane" is a
+    # different result, and a depth-keeping solve over one plane treats out-of-focus light
+    # as in-plane blur (Julio, 2026-08-26: a preview shows plane z of the FULL solve).
     if z_level is not None:
-        if "z" in consumes and not keeps_depth:
+        if "z" in consumes:
             raise ValueError(
                 f"z_level={z_level} selects ONE acquisition plane, which is only meaningful for a "
-                f"plane-op or a depth-keeping z-consumer. {getattr(reduce, '__name__', reduce)!r} "
-                f"declares consumes={sorted(consumes)} - it REDUCES over z, so restricting it to "
-                "one plane would silently change what it computes. Drop z_level=, or use a "
-                "plane-op."
+                f"plane-op. {getattr(reduce, '__name__', reduce)!r} declares "
+                f"consumes={sorted(consumes)} - it CONSUMES z, so restricting it to one plane "
+                "would silently change what it computes. Drop z_level=, or use a plane-op."
             )
         if z_level not in z_levels:
             raise ValueError(

@@ -55,7 +55,6 @@ def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=N
                       tiff: bool = False, on_well: Optional[Callable] = None,
                       on_error: Optional[Callable] = None,
                       stop: Optional[Callable[[], bool]] = None,
-                      preview_z_level: Optional[int] = None,
                       windows: Optional[dict] = None) -> DispatchResult:
     """Run ``operator`` once — persisted when ``save``, streamed-and-dropped when not.
 
@@ -82,19 +81,6 @@ def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=N
         raise ValueError(
             f"a save writes whole fields: windows on {len(windows)} field(s) would write a "
             "cropped acquisition. Preview the ROI, or save without windows.")
-
-    # A 2D tab's PREVIEW of a depth-keeping per-FOV operator runs on ONE plane, the one in
-    # view (Julio, 2026-08-25: "if it's on 2d mode it runs it only on that one") - the same
-    # solve over a 1-plane stack, sub-second where the full stack is minutes. Declaration-
-    # driven, never a name match; a save always runs full depth (computed BEFORE the copy
-    # arm below flips `save`, so a copy-writing save can never be z-cropped).
-    z_restrict: Optional[int] = None
-    if preview_z_level is not None and not save:
-        from squidxplorer import is_region_operator
-        from squidxplorer._engine import operator_reduces_depth
-
-        if not is_region_operator(operator) and not operator_reduces_depth(operator):
-            z_restrict = int(preview_z_level)
 
     # An operator whose save artifact is a registered COPY of the acquisition (declared via
     # operator_saves_copy) saves by running the engine with copy=True — the operator writes
@@ -134,7 +120,7 @@ def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=N
     else:
         landed, stopped = _RUNNER.run_preview(reader, spec, workers=workers, on_well=on_well,
                                               on_error=_on_error, stop=stop,
-                                              z_level=z_restrict, windows=windows or None)
+                                              windows=windows or None)
     if not stopped and stop is not None and stop():
         stopped = True                  # requested between the last field and here
     outcome, detail = verdict(landed, owed, len(skipped_regions), stopped)

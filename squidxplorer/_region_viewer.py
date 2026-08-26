@@ -738,9 +738,9 @@ class RegionViewer(QMainWindow):
         # nothing; Run on plate is THE save path (and the bulk path - the cards died with
         # the right-edge dock). The save checkbox is gone.
         self._btn_preview = self._chip(
-            "Preview", "Previews this view, writing nothing; in a 2D tab a depth keeping "
-            "operator solves just the z in view, while Run on plate processes the full "
-            "stack.", self._preview_view_operator)
+            "Preview", "Previews this view, writing nothing: the same computation Run on "
+            "plate saves, shown at the z in view (a 3D tab shows the volume). Draw an ROI "
+            "for a faster preview.", self._preview_view_operator)
         opr.addWidget(self._btn_preview)
         self._btn_run_plate = self._chip(
             "Run on plate", self._RUN_PLATE_TIP, self._run_plate_operator)
@@ -1325,18 +1325,12 @@ class RegionViewer(QMainWindow):
             log.info("view %s running %s on %s with %s", self.window_id, key,
                      ("the plate scope" if regions is None else
                       (regions if isinstance(regions, dict) else list(regions))), kwargs)
-            # A 2D tab's preview COMPUTES only the plane in view; a 3D tab's preview keeps
-            # the whole stack (Julio, 2026-08-25: "if it's on 3D mode it runs it on all
-            # panes, if it's on 2d mode it runs it only on that one"). A save always runs
-            # full depth; the dispatch applies the restriction by declaration only.
-            preview_z = (self._z_slider_index()
-                         if not save and self._render_mode != "3d" else None)
+            # EVERY preview is the full solve, the same computation a save writes (Julio,
+            # 2026-08-26: "Make the 2D preview show plane of the 3D solve"); the tab decides
+            # what is DISPLAYED: a 2D tab the plane it is on (z_level, clamped by the
+            # worker), a 3D tab the volume (deliver_depth).
             self._run_operator(key, regions=regions, save=save, requester=requester,
-                               operator_kwargs=kwargs,
-                               # A depth-keeping preview must show THE PLANE THIS VIEW IS ON
-                               # (Julio, 2026-08-25), so the run carries the view's own z.
-                               z_level=self._z_slider_index(),
-                               preview_z_level=preview_z,
+                               operator_kwargs=kwargs, z_level=self._z_slider_index(),
                                windows=windows, deliver_depth=deliver_depth)
             # No echo: the log.info line above is the structured twin, and the banner
             # strip that showed the echo is retired (2026-08-25).

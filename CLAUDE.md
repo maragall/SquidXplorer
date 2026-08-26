@@ -832,6 +832,25 @@ measured 2.33 GiB peak per FOV on this Mac, 15z x 3ch x 2050^2, one FOV in fligh
   Silicon (z-tiled over `min(recommended_max_memory, free RAM)` with petakit's own tile plan;
   the tiled solve equals petakit's tiled solve to 1 count and is NOT the whole solve, up to
   25% of peak at seams with a 95-plane PSF, the log line says so), petakit numpy elsewhere.
+- **Every decon preview is the FULL solve; the tab decides what is DISPLAYED** (Julio,
+  2026-08-26: "Make the 2D preview show plane of the 3D solve. That's what a researcher
+  should expect."; and "Decon is expensive. If they want to preview fast, then have them
+  trace the ROI now that we have sub-fov."). A 2D tab's Preview used to solve ONE plane
+  (the in-view z over a 1-plane stack, out-of-focus light treated as in-plane blur: axial
+  ratio 1.10 against 5.19 for the volume solve), so it was NOT plane z of what Run on plate
+  writes. Now every preview runs the same computation a save writes (the sub-FOV window +
+  halo when ROI-scoped, ruling z); a 2D tab DISPLAYS the plane it is on (the worker's
+  `z_level` pick, clamped to the result's depth, dims untouched), a 3D tab the volume
+  (ruling aa). Deleted whole, absences pinned in `tests/test_decon_z_in_view.py`: the
+  `preview_z_level` knob (view launch, `PlateWindow.run_operator`, `_OperatorWorker`,
+  `run_operator_once`), `Runner.run_preview`'s and `run_plate`'s `z_level=`, and
+  `project_well`'s keeps_depth acceptance of `z_level=` (every z-consumer is refused a
+  single plane by name now; `z_level=` stays for plane-ops, stitch's z-outer loop is its
+  consumer). An UNSCOPED depth-keeping preview logs ONE INFO line at launch ("decon preview
+  over 1 whole field(s): 15 planes x 3 channel(s); draw an ROI for a faster preview"); an
+  ROI preview keeps its "ROI decon: ..." line and gets no hint. Measured on G7 FOV 1 (15 z,
+  3 ch, 3 iterations, MPS) from a 2D tab: 529x724 ROI 2.60 s / 0.83 GB peak, whole FOV
+  11.85 s / 1.35 GB, against the one-plane preview's 0.56 s / 0.67 s.
 - **A channel with NO emission line is COPIED THROUGH unchanged, named once** (Julio,
   2026-08-25: "copy BF through unchanged with a named log line"). Measured on
   G7_2026-08-20 (BF_LED_matrix_full + 488 + 561, nz 15): `project_well` binds every channel
