@@ -81,7 +81,8 @@ def test_a_band_tab_is_really_inside_the_window_and_really_visible(qapp, squid_d
 
     view = QLabel("band probe")
     win._open_op_tab("probe", "Band probe", lambda w=view: w)
-    qapp.processEvents()
+    for _ in range(5):                      # let the band's splitter finish laying out
+        qapp.processEvents()
 
     ancestors = []
     w = view

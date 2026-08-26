@@ -32,6 +32,17 @@ from squidxplorer._measure import human_bytes
 MEMORY_POLL_MS = 1000
 
 _MONO = "Menlo, Consolas, 'DejaVu Sans Mono', monospace"
+#: The panel's one font, in PIXELS and set as a QFont (never a stylesheet font): a stylesheet
+#: font resolves at polish, after the slot height was fixed from the wrong metrics (measured:
+#: 66 px at construction, 94 px once polished, two lines shown of the three promised).
+_FONT_PX = 11
+
+
+def _mono_font():
+    f = QFont()
+    f.setFamilies([n.strip().strip("'") for n in _MONO.split(",")])
+    f.setPixelSize(_FONT_PX)
+    return f
 _BG = "#0d1117"
 _HEADER_BG = "#161b22"
 _MUTED = "#8b949e"
@@ -88,22 +99,26 @@ class LogPanel(QWidget):
         hl.setSpacing(12)
 
         self._title = QLabel("Log")
+        self._title.setFont(_mono_font())
         self._title.setStyleSheet(
-            f"color:#c3ccd9;font-family:{_MONO};font-size:11px;background:transparent;")
+            f"color:#c3ccd9;background:transparent;")
         hl.addWidget(self._title)
         self._activity_lbl = QLabel("idle")
+        self._activity_lbl.setFont(_mono_font())
         self._activity_lbl.setStyleSheet(
-            f"color:#c3ccd9;font-family:{_MONO};font-size:11px;background:transparent;")
+            f"color:#c3ccd9;background:transparent;")
         hl.addWidget(_shrinkable(self._activity_lbl), 1)
 
         self._tally_lbl = QLabel("")
+        self._tally_lbl.setFont(_mono_font())
         self._tally_lbl.setStyleSheet(
-            f"font-family:{_MONO};font-size:11px;background:transparent;")
+            f"background:transparent;")
         hl.addWidget(_shrinkable(self._tally_lbl))
 
         self._mem_lbl = QLabel(memory_line())
+        self._mem_lbl.setFont(_mono_font())
         self._mem_lbl.setStyleSheet(
-            f"color:{_MUTED};font-family:{_MONO};font-size:11px;background:transparent;")
+            f"color:{_MUTED};background:transparent;")
         hl.addWidget(_shrinkable(self._mem_lbl))
 
         self.setMinimumWidth(0)
@@ -125,10 +140,10 @@ class LogPanel(QWidget):
         self._view = QPlainTextEdit()
         self._view.setReadOnly(True)
         self._view.setMaximumBlockCount(int(max_lines))   # Qt drops the oldest block: bounded, free
-        self._view.setFont(QFont("Menlo", 10))
+        self._view.setFont(_mono_font())
         self._view.setStyleSheet(
             f"QPlainTextEdit{{background:{_BG};color:#c3ccd9;border:none;"
-            f"font-family:{_MONO};font-size:11px;}}")
+            "}")
         self._view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._view.setMinimumHeight(0)
         self._view.setMinimumWidth(0)
@@ -158,7 +173,6 @@ class LogPanel(QWidget):
 
     def slot_px(self) -> int:
         """The slot's height: the header plus LINES lines of the view's polished font."""
-        self._view.ensurePolished()               # the stylesheet's font, not the seed QFont
         fm = self._view.fontMetrics()
         return int(self._header.sizeHint().height() + self.LINES * fm.lineSpacing()
                    + 2 * int(self._view.document().documentMargin())
