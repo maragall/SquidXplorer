@@ -2434,7 +2434,7 @@ class PlateWindow(QMainWindow):
                      operator_kwargs: Optional[dict] = None,
                      requester: Optional[Any] = None,
                      z_level: int = 0, preview_z_level: Optional[int] = None,
-                     windows: Optional[dict] = None):
+                     windows: Optional[dict] = None, deliver_depth: bool = False):
         """Run a plane operator (MIP / reference) over the plate, or over a subset of it.
 
         ``requester`` IS THE COMPLETION CALLBACK, and its absence was the root fault Julio
@@ -2647,7 +2647,7 @@ class PlateWindow(QMainWindow):
                                  str(out_dir) if out_dir else "", regions=regions, save=save,
                                  n_fovs=None, operator_kwargs=operator_kwargs,
                                  z_level=z_level, preview_z_level=preview_z_level,
-                                 windows=windows)
+                                 windows=windows, deliver_depth=bool(deliver_depth and not save))
         self._overview.set_mosaic_boxes(worker.mosaic_boxes)
         # A re-run must not composite on top of the LAST run's pixels: with a mosaic, a run that
         # lands fewer FOVs would otherwise leave the previous run's fields standing in the same

@@ -1250,6 +1250,47 @@ class RegionViewer(QMainWindow):
             getattr(getattr(plate, "_bulk_all_box", None), "isChecked", lambda: False)())
         self._launch_operator(save=True, regions=None, requester=None if bulk else self)
 
+    def _volume_preview_refusal(self, key: str, regions, windows) -> Optional[str]:
+        """Ruling aa: the sentence refusing a 3D tab's preview whose FULL-DEPTH result would
+        not fit this machine's display budget, decided from the geometry alone BEFORE a
+        plane is read; None when it fits, reduces z, or is a region operator's own fusion."""
+        from squidxplorer import is_region_operator
+        from squidxplorer._engine import operator_reduces_depth
+        from squidxplorer._operations import operator_name
+
+        name = operator_name(str(key))
+        try:
+            if is_region_operator(name) or operator_reduces_depth(name):
+                return None
+        except Exception:                        # noqa: BLE001 - an unknown key: the run says it
+            return None
+        meta = self._meta or {}
+        nz = int(meta.get("n_z") or 1)
+        if nz <= 1:
+            return None
+        fh, fw = (int(v) for v in meta.get("frame_shape") or (0, 0))
+        n_ch = len(meta.get("channels") or [])
+        itemsize = int(np.dtype(meta.get("dtype") or "uint16").itemsize)
+        per_region = meta.get("fovs_per_region") or {}
+        if isinstance(regions, dict):
+            scope = {str(r): list(f) for r, f in regions.items()}
+        else:
+            here = self.current_region()
+            scope = {str(here): list(per_region.get(here) or [])} if here else {}
+        n_fovs, px_total = 0, 0
+        for r, fovs in scope.items():
+            for f in fovs:
+                n_fovs += 1
+                w = (windows or {}).get((r, f))
+                px_total += (w[1] - w[0]) * (w[3] - w[2]) if w else fh * fw
+        need = px_total * nz * n_ch * itemsize
+        budget = _volume_view._brick_budget_bytes()
+        if need <= budget:
+            return None
+        return (f"3D preview over {n_fovs} FOV(s) x {nz} planes x {n_ch} channel(s) needs "
+                f"~{need / 1e9:.1f} GB, over this machine's {budget / 1e9:.1f} GB display "
+                "budget; draw an ROI (the box plus a halo is what gets solved).")
+
     def _launch_operator(self, *, save: bool, regions, requester="self", windows=None) -> None:
         """The one launch: Preview and Run on plate differ only in scope and `save`."""
         if self._run_operator is None:
@@ -1259,6 +1300,14 @@ class RegionViewer(QMainWindow):
         if not key:
             self._say("no operator selected.")
             return
+        # A VOLUME view's preview delivers the whole depth (ruling aa), refused by name when
+        # the result would not fit the display budget, BEFORE a plane is read.
+        deliver_depth = bool(not save and self._render_mode == "3d")
+        if deliver_depth:
+            refusal = self._volume_preview_refusal(key, regions, windows)
+            if refusal:
+                self._say(refusal)
+                return
         try:
             kwargs = dict(self._plate_operator_kwargs(key))
         except ValueError as exc:                # a refused panel setting: SAY it, run nothing
@@ -1288,7 +1337,7 @@ class RegionViewer(QMainWindow):
                                # (Julio, 2026-08-25), so the run carries the view's own z.
                                z_level=self._z_slider_index(),
                                preview_z_level=preview_z,
-                               windows=windows)
+                               windows=windows, deliver_depth=deliver_depth)
             # No echo: the log.info line above is the structured twin, and the banner
             # strip that showed the echo is retired (2026-08-25).
         except Exception as exc:                          # noqa: BLE001 - named to the window
@@ -1452,7 +1501,24 @@ class RegionViewer(QMainWindow):
                 fit = getattr(mosaic, "reset_view", None)
                 if callable(fit):
                     fit()
+            if bool(visible) and int(result.z_depth) > 1 and self._render_mode == "3d":
+                self._show_result_volume(str(op))
         return added
+
+    def _show_result_volume(self, op: str) -> None:
+        """Ruling aa: a full-depth result that landed in a VOLUME view is rendered as this
+        view's bricked volume, in place of whatever volume was up, under the result layers'
+        own LUTs (`_volume_view.volume_source` reads the bricks off the *op* layers)."""
+        mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
+        if mosaic is None:
+            return
+        try:
+            _volume_view.close_native3d(self)        # give the layers their identities back
+            mosaic.show_op(op)                       # so the volume source is THIS result
+            _volume_view.open_3d(self)
+        except Exception as exc:                     # noqa: BLE001 - named, never a flat layer
+            self._say(f"{op}: the result landed as layers but could not be rendered as a "
+                      f"volume: {exc}")
 
     def _registered_pyramid(self, op: str, placement, region, channel):
         """Fine-to-native pyramid at *placement*'s solved positions, or None to keep the paste.

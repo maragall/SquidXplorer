@@ -50,9 +50,13 @@ class _OperatorWorker(QThread):
 
     def __init__(self, operator: str, reader, meta, fov_index: dict, out_dir: str,
                  regions=None, save: bool = True, n_fovs=1, operator_kwargs=None,
-                 z_level: int = 0, preview_z_level=None, windows=None):
+                 z_level: int = 0, preview_z_level=None, windows=None,
+                 deliver_depth: bool = False):
         super().__init__()
         self._operator = operator
+        # Ruling aa: a preview asked from a 3D tab gets EVERY plane of a depth-keeping result
+        # (a volume to look at); a 2D tab keeps the plane it is on.
+        self._deliver_depth = bool(deliver_depth)
         #: ``{(region, fov): (r0, r1, c0, c1)}``, an ROI preview's own windows (ruling z).
         self._windows = {(str(r), int(f)): tuple(int(v) for v in w)
                          for (r, f), w in (windows or {}).items()}
@@ -143,8 +147,9 @@ class _OperatorWorker(QThread):
         self.resultReady.emit(region, fov, self._result_pixels(image, well))
 
     def _result_pixels(self, image, well):
-        """What goes to the layer: a region operator's ``(C, Nz, Y, X)`` volume, else one plane."""
-        if self._region_op:
+        """What goes to the layer: a region operator's ``(C, Nz, Y, X)`` volume, a volume
+        view's full-depth stack (ruling aa), else one plane."""
+        if self._region_op or self._deliver_depth:
             return image[0]                       # (C, Nz, Y, X)
         self._z_dropped_note(int(image.shape[2]))
         return well                               # (C, Y, X), cut at the in-view z in _on_well
@@ -157,8 +162,8 @@ class _OperatorWorker(QThread):
         z_shown = min(self._z_level, depth - 1)
         log.info("%s: the layer shows z plane %d of %d - the plane the asking view is on. A "
                  "per-FOV operator's mosaic is re-fused for display one plane at a time, and "
-                 "only that plane is kept; the WRITTEN plate carries all %d. Stitch the region "
-                 "to see the whole volume in 3D.",
+                 "only that plane is kept; the WRITTEN plate carries all %d. Preview from a 3D "
+                 "tab to see the whole volume.",
                  self._operator, z_shown, depth, depth)
 
     def _on_error(self, region, fov, exc):
