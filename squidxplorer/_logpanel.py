@@ -62,10 +62,11 @@ class LogPanel(QWidget):
     it a :class:`~squidxplorer._logpane.LogBus` and :class:`~squidxplorer._activity.ActivityLog` and
     it becomes a sink of both, or stays an inert valid widget with neither."""
 
-    #: A FIXED slot, a few lines tall, scrollable; never collapsed, never floated (Julio,
-    #: 2026-08-25: "Re-docking the logger doesn't work... the logger fullscreen idea will
-    #: cause complications downstream").
-    SLOT_PX = 132
+    #: A FIXED slot: the header plus exactly LINES lines of the log's own font, scrollable;
+    #: never collapsed, never floated (Julio, 2026-08-25: "Re-docking the logger doesn't
+    #: work... the logger fullscreen idea will cause complications downstream"). Three lines,
+    #: measured on an 862 px screen where 132 px of log left the layer list one channel tall.
+    LINES = 3
 
     def __init__(self, bus: Optional[LogBus] = None, activity: Optional[ActivityLog] = None,
                  *, level: int = DEFAULT_LEVEL, max_lines: int = MAX_LINES,
@@ -107,6 +108,7 @@ class LogPanel(QWidget):
 
         self.setMinimumWidth(0)
         header.setMinimumWidth(0)
+        self._header = header
         outer.addWidget(header)
 
         # Memory + run-progress bars adopted from OpenViewList (not rebuilt): they keep their
@@ -138,7 +140,7 @@ class LogPanel(QWidget):
         self._mem_timer.setInterval(MEMORY_POLL_MS)
         self._mem_timer.timeout.connect(self._refresh_memory)
 
-        self.setFixedHeight(self.SLOT_PX)
+        self.setFixedHeight(self.slot_px())
         if bus is not None:
             self.attach_bus(bus, level=level)
         if activity is not None:
@@ -153,6 +155,14 @@ class LogPanel(QWidget):
         # The panel just grew; a collapsed cap frozen at the pre-adoption size CLIPS the
         # band (Julio, live 2026-08-25: the "2%" run bar cut mid-label, no reachable
         # summon toggle). Re-derive the cap from what the band now holds.
+
+    def slot_px(self) -> int:
+        """The slot's height: the header plus LINES lines of the view's polished font."""
+        self._view.ensurePolished()               # the stylesheet's font, not the seed QFont
+        fm = self._view.fontMetrics()
+        return int(self._header.sizeHint().height() + self.LINES * fm.lineSpacing()
+                   + 2 * int(self._view.document().documentMargin())
+                   + 2 * self._view.frameWidth())
 
     def attach_bus(self, bus: LogBus, *, level: int = DEFAULT_LEVEL) -> None:
         bus.subscribe(self._on_record)      # called on the LOGGING thread — hop via the bridge

@@ -17,12 +17,12 @@ from typing import Optional
 
 import numpy as np
 from qtpy.QtCore import (  # QThread/Signal: kept for tests that build a stub worker as V.QThread
-    QEvent, QObject, Qt, QThread, QTimer, Signal,  # noqa: F401 (tests/test_viewer.py::_BlockingWorker)
+    QEvent, QObject, QSize, Qt, QThread, QTimer, Signal,  # noqa: F401 (tests/test_viewer.py::_BlockingWorker)
 )
 from qtpy.QtGui import QColor, QKeySequence, QPalette
 from qtpy.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QMainWindow, QPushButton, QScrollArea, QShortcut, QSpinBox,
+    QMainWindow, QPushButton, QScrollArea, QShortcut, QSizePolicy, QSpinBox,
     QSplitter, QStyleFactory, QVBoxLayout, QWidget,
 )
 
@@ -175,13 +175,21 @@ class _PlateSlotBox(QWidget):
     be collapsible")."""
 
     PLATE_SLOT_PX = 240
+    #: The floor a short screen shrinks the slot to: the plate is a NAVIGATOR and the layer
+    #: list is a control, so when the column cannot hold both it is the plate that gives.
+    PLATE_SLOT_MIN_PX = 160
 
     def __init__(self) -> None:
         super().__init__()
         self._bv = QVBoxLayout(self)
         self._bv.setContentsMargins(0, 0, 0, 0)
         self._bv.setSpacing(0)
-        self.setFixedHeight(self.PLATE_SLOT_PX)
+        self.setMinimumHeight(self.PLATE_SLOT_MIN_PX)
+        self.setMaximumHeight(self.PLATE_SLOT_PX)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+
+    def sizeHint(self):
+        return QSize(super().sizeHint().width(), self.PLATE_SLOT_PX)
 
     def set_view(self, widget: QWidget) -> None:
         """Mount the plate view (rebuilt per ingest) as the slot's content."""

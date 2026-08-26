@@ -1113,9 +1113,15 @@ quality and simplicity." The rules now:
   silicone, glycerol, oil, custom). A parameter-less operator shows nothing under the row;
   an all-advanced one (fstack) shows only the "advanced parameters" disclosure, the ONE
   declaration-driven fold that survives.
-- **The log is a FIXED slot** (v2: "Re-docking the logger doesn't work"): `LogPanel.SLOT_PX`
-  tall, scrollable, always visible under the plate slot; no float, no collapse, no
-  View > Log. **The one bar is the run bar** (y: "The memory usage bar is confusing"): the
+- **The log is a FIXED slot** (v2: "Re-docking the logger doesn't work"): the header plus
+  `LogPanel.LINES` (3) lines of its own font (`slot_px()`), scrollable, always visible under
+  the plate slot; no float, no collapse, no View > Log. Measured on Julio's 862 px screen:
+  132 px of log left the layer list ~80 px, one of three raw channels behind a scrollbar.
+  So the LIST has a minimum (`MosaicTree.rows_wanted`: a group header plus the largest
+  group's channel rows, refit on every model reset) and a screen too short for both
+  shrinks the PLATE slot (a navigator; `_PlateSlotBox` prefers 240 px, floor
+  `PLATE_SLOT_MIN_PX` 160), never the list. The headless `ModelPane` carries the same
+  tree in the window-body column so the rule is pinned offscreen. **The one bar is the run bar** (y: "The memory usage bar is confusing"): the
   memory bar and the manager's memory poll are deleted; `StatusRow` is the run bar alone,
   shown while a run is live, hidden after its drain.
 - **The LUT clipboard is shelved whole** (v4: "this will save us code lines"): the two chips,

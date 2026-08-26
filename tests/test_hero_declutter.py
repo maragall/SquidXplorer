@@ -1110,7 +1110,7 @@ def test_the_log_is_a_fixed_slot_with_no_bar_at_rest_and_one_bar_during_a_run(
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
     try:
         log = win._log_panel
-        assert log.height() == LogPanel.SLOT_PX
+        assert log.height() == log.slot_px()
         assert not hasattr(log, "_float_btn") and not hasattr(log, "_toggle")
         v = deck.current_page()
         assert v._hosts_plate_slots and log.isVisibleTo(v), "the log slot is not in the view"
@@ -1125,7 +1125,9 @@ def test_the_log_is_a_fixed_slot_with_no_bar_at_rest_and_one_bar_during_a_run(
         mgr.set_run_progress(None)
         _settle(qapp)
         assert not bars(), "the bar survived the run's end"
-        # The addendum: switching tabs re-homes the plate slot at its fixed height, visible.
+        # The addendum: switching tabs re-homes the plate slot at its full height, visible
+        # (on a deck tall enough to hold the column; a short one shrinks the plate slot).
+        deck.resize(900, 1100)
         for page in (views[1], views[0]):
             deck._tabs.setCurrentWidget(page)
             _settle(qapp)
@@ -1134,6 +1136,59 @@ def test_the_log_is_a_fixed_slot_with_no_bar_at_rest_and_one_bar_during_a_run(
         assert box.height() == V._PlateSlotBox.PLATE_SLOT_PX
         assert cur._plate_log_host.isAncestorOf(box), "the plate slot is not in the current view"
         assert win._overview.isVisibleTo(cur), "the overview is not showing after a tab switch"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_the_log_is_three_lines_and_the_layer_list_shows_every_channel_of_raw(
+        qapp, napari_pane_stub, squid_dataset):
+    """Measured on Julio's 862 px screen (2026-08-25): the layer list, the stretch consumer,
+    ended with ~80 px and ONE of three raw channels behind a scrollbar while the log slot held
+    135 px of a three-line message. The log slot is the header plus THREE lines of its own
+    font; the list's minimum is a group header plus the largest group's channel rows; and a
+    screen too short for both shrinks the PLATE slot (a navigator; the list is a control),
+    never below its floor."""
+    from squidxplorer._logpanel import LogPanel
+    from tests.test_view_deck import _tabbed_plate
+
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    try:
+        v = deck.current_page()
+        log = win._log_panel
+        view = log._view
+        fm = view.fontMetrics()
+        want = (log._header.sizeHint().height() + LogPanel.LINES * fm.lineSpacing()
+                + 2 * int(view.document().documentMargin()) + 2 * view.frameWidth())
+        assert LogPanel.LINES == 3
+        assert log.height() == log.slot_px() == want, (log.height(), log.slot_px(), want)
+
+        tree = v._pane.layer_tree
+        assert tree is not None and v._left_col.isAncestorOf(tree), "no layer list in the column"
+        # The view's own raw preview lands on its worker's schedule; let it land first, then
+        # add a third channel so the raw group is three channels (the fixture has two).
+        assert _drain_until(qapp, lambda: len(v._pane.mosaic.channels("raw")) >= 2, timeout=20)
+        v._pane.mosaic.add_mosaic("raw", "third", np.full((16, 16), 300, np.uint16),
+                                  bbox_um=(0.0, 0.0, 16.0, 16.0))
+        _settle(qapp)
+        assert len(v._pane.mosaic.channels("raw")) == 3
+        row = tree.sizeHintForRow(0)
+        assert row > 0
+        assert tree.minimumHeight() >= 4 * row, (tree.minimumHeight(), row)
+        deck.resize(900, 1100)
+        deck.show()
+        _settle(qapp)
+        assert tree.height() >= 4 * row, f"list {tree.height()} px shows less than 4 rows of {row}"
+        box = win._plate_slot_box
+        assert box.height() == V._PlateSlotBox.PLATE_SLOT_PX, "a tall screen keeps the full plate"
+
+        deck.resize(900, 300)                    # far too short: something has to give
+        _settle(qapp)
+        assert tree.height() >= tree.minimumHeight(), "the list gave up rows"
+        assert log.height() == want, "the log slot moved"
+        assert V._PlateSlotBox.PLATE_SLOT_MIN_PX <= box.height() < V._PlateSlotBox.PLATE_SLOT_PX, (
+            f"the plate slot is {box.height()} px; it is what shrinks, down to "
+            f"{V._PlateSlotBox.PLATE_SLOT_MIN_PX}")
     finally:
         shutdown_plate_window(qapp, win)
 

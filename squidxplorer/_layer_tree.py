@@ -338,6 +338,24 @@ class MosaicTree(QTreeView):
         self.setStyleSheet(_napari_stylesheet())
         _install_napari_delegate(self)
         self.selectionModel().currentChanged.connect(self._select_in_napari)
+        # The column's list must show a whole group without scrolling (measured on an 862 px
+        # screen: ~80 px, one of three raw channels behind a scrollbar). The minimum follows
+        # the layers: one group header plus the largest group's channel rows.
+        self.model().modelReset.connect(self._refit_minimum)
+        self._refit_minimum()
+
+    def rows_wanted(self) -> int:
+        """One group header plus the largest group's channel rows (at least two rows)."""
+        model = self.model()
+        largest = max((model.rowCount(model.index(r, 0)) for r in range(model.rowCount())),
+                      default=1)
+        return 1 + max(1, int(largest))
+
+    def _refit_minimum(self) -> None:
+        row = self.sizeHintForRow(0) if self.model().rowCount() else 0
+        if row <= 0:
+            row = self.fontMetrics().height() + 8
+        self.setMinimumHeight(self.rows_wanted() * int(row) + 2 * self.frameWidth())
 
     def _select_in_napari(self, current, _previous=None) -> None:
         """Selecting a row here selects the layer(s) in napari, so its controls follow."""

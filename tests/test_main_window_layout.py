@@ -106,7 +106,7 @@ def test_the_log_owns_the_band_and_the_navigator_is_gone(shown):
     # Ruling v2 (2026-08-25): the log is a FIXED slot, a few lines tall, never collapsed.
     from squidxplorer._logpanel import LogPanel
 
-    assert _h(win._log_panel) == LogPanel.SLOT_PX, f"the log slot is {_h(win._log_panel)} px"
+    assert _h(win._log_panel) == win._log_panel.slot_px(), f"the log slot is {_h(win._log_panel)} px"
     # The operator-tab bar exists but costs no pixels until an operator panel opens.
     assert win._left_tabs.count() == 0
     assert not win._left_tabs.isVisible(), "an empty operator-tab bar is taking the log's space"

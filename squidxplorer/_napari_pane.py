@@ -753,12 +753,21 @@ def model_pane_class():
             # The QtViewer half: without it, async slices compute and never land.
             self._async_apply = attach_async_slice_apply(self._viewer)
             self.mosaic = MosaicLayers(self._viewer)
+            # The column's layer list, so the headless window-body column carries the same
+            # tree the docked one does (its minimum height is a pinned layout rule).
+            from squidxplorer._layer_tree import MosaicTree
+
+            self.layer_tree = MosaicTree(self.mosaic)
             self.said = []
             # The same seam the real pane has: say() IS a log line (banner retired
             # 2026-08-25), and .readout.text() is what harnesses assert on.
             self.readout = StatusReadout(get_logger("view"))
             self.shutdowns = 0
             self._on_settle = None
+
+        def native_column_widgets(self):
+            """No napari layer controls headless; the tree joins the window-body column."""
+            return None, self.layer_tree
 
         def on_camera_settled(self, callback):
             # The real pane debounces camera events into this; headless harnesses (conftest,
