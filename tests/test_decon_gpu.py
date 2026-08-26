@@ -13,6 +13,7 @@ from squidxplorer._decon import (
     deconvolve_stack,
     make_psf,
 )
+from squidxplorer.projection import cast_like
 
 
 def _psf_1z(optics):
