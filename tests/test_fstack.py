@@ -33,6 +33,35 @@ def test_gfocus_is_zero_on_a_constant_and_scales_as_variance():
     np.testing.assert_allclose(gfocus(2.0 * im, 3), 4.0 * gfocus(im, 3), rtol=1e-12)
 
 
+def test_an_unbracketed_focus_is_said_once_with_its_share_of_pixels(caplog):
+    """23% of G7 FOV 6's pixels are sharpest at plane 1 or 2: the .m's index-swap lines invert
+    their fit and they fuse as the mean whatever ``sth`` says (arbitrated 2026-08-27). No knob
+    fixes an acquisition that did not bracket its focus; the run says so, ONE INFO line."""
+    import logging
+
+    from squidxplorer import _fstack
+
+    rng = np.random.default_rng(1)
+    sharp = rng.integers(0, 4000, (48, 48)).astype(np.uint16)
+    blurred = ndi.gaussian_filter(sharp.astype(float), 3.0).astype(np.uint16)
+    planes = [sharp] + [blurred] * 5                      # sharpest at the FIRST plane everywhere
+    _fstack._said_unbracketed = False
+    log_name = _fstack.log.name
+    with caplog.at_level(logging.DEBUG, logger=log_name):
+        fuse_stack(planes)
+        fuse_stack(planes)
+    said = [r for r in caplog.records if r.name == log_name and "focus not bracketed" in r.getMessage()]
+    assert [r.levelno for r in said] == [logging.INFO, logging.DEBUG], [r.levelname for r in said]
+    assert "100% of pixels are sharpest at the first 2 plane(s)" in said[0].getMessage()
+
+    _fstack._said_unbracketed = False
+    caplog.clear()
+    bracketed = [blurred, blurred] + [sharp] + [blurred] * 3  # sharpest in the interior
+    with caplog.at_level(logging.DEBUG, logger=log_name):
+        fuse_stack(bracketed)
+    assert not [r for r in caplog.records if "focus not bracketed" in r.getMessage()]
+
+
 def test_a_saturated_block_has_an_EXACTLY_zero_variance_never_a_negative_one():
     """Three blind ports of fstack.m against ours (2026-08-27): a running-sum mean turned the
     MATLAB's exact zeros over a flat 17x17 support into +-2e-18 residue, 295 of them negative in
