@@ -34,7 +34,8 @@ Two interpretations where the MATLAB is degenerate rather than defined:
 - a pixel with zero focus measure in every frame (or a selectivity with no finite value)
   fuses as the plain mean of its planes, where the MATLAB casts NaN to uint8 0.
 
-Boundary handling: ``uniform_filter(mode="nearest")`` is imfilter 'replicate'; the 3x3
+Boundary handling: ``_windowed_mean`` (``convolve1d(mode="nearest")``) is imfilter 'replicate'
+for every average, the focus measure's included; the 3x3
 median's mode="nearest" is value-identical to scipy's default reflect at size 3 (MATLAB's
 medfilt2 zero-pads instead, which zeroes selectivity in the outermost corner pixels — a
 boundary artifact deliberately not imported). The selectivity window is a DIRECT separable
@@ -56,7 +57,7 @@ from __future__ import annotations
 from typing import Callable, Iterable
 
 import numpy as np
-from scipy.ndimage import convolve1d, median_filter, uniform_filter
+from scipy.ndimage import convolve1d, median_filter
 
 from squidxplorer._engine import Param, add_operator
 from squidxplorer.projection import Z_REDUCER, cast_like
@@ -70,10 +71,17 @@ MIN_PLANES = 2 * _STEP + 1
 
 
 def gfocus(im: np.ndarray, nhsize: int) -> np.ndarray:
-    """Gray-level local variance focus measure, float64, replicate borders."""
+    """Gray-level local variance focus measure, float64, replicate borders.
+
+    ``_windowed_mean``, not ``uniform_filter``: the running sum turns a flat (saturated)
+    support's exact-zero variance into +-2e-18 residue, 295 of them NEGATIVE in one 512 px
+    crop of G7, and ``log`` of a negative variance is NaN where the MATLAB has an exact zero
+    (measured against three blind ports of fstack.m, 2026-08-27: 100 interior pixels of the
+    full frame off by up to 1690 counts; bit-identical with the direct convolution).
+    """
     im = np.asarray(im, dtype=np.float64)
-    mean = uniform_filter(im, size=nhsize, mode="nearest")
-    return uniform_filter((im - mean) ** 2, size=nhsize, mode="nearest")
+    mean = _windowed_mean(im, nhsize)
+    return _windowed_mean((im - mean) ** 2, nhsize)
 
 
 def _take_z(fm: np.ndarray, z: np.ndarray) -> np.ndarray:

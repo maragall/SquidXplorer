@@ -33,6 +33,21 @@ def test_gfocus_is_zero_on_a_constant_and_scales_as_variance():
     np.testing.assert_allclose(gfocus(2.0 * im, 3), 4.0 * gfocus(im, 3), rtol=1e-12)
 
 
+def test_a_saturated_block_has_an_EXACTLY_zero_variance_never_a_negative_one():
+    """Three blind ports of fstack.m against ours (2026-08-27): a running-sum mean turned the
+    MATLAB's exact zeros over a flat 17x17 support into +-2e-18 residue, 295 of them negative in
+    one G7 crop; ``log`` of a negative variance is NaN where the MATLAB has zero, and 100
+    interior pixels of the full frame came out up to 1690 counts off. Exact arithmetic, or the
+    residue is a pixel's focus profile."""
+    rng = np.random.default_rng(0)
+    im = rng.integers(200, 4000, (96, 96)).astype(np.float64)
+    im[30:70, 30:70] = 65520.0                           # a saturated block, 40 x 40
+    fm = gfocus(im, 9)
+    assert fm.min() >= 0.0, f"a negative variance: {fm.min()!r}"
+    inner = fm[38:62, 38:62]                              # supports lying wholly in the block
+    assert np.count_nonzero(inner) == 0, f"{np.count_nonzero(inner)} residue pixels, max {inner.max()!r}"
+
+
 def test_gauss3P_end_swaps_peak_the_fit_at_the_argmax_frame():
     """The MATLAB's Index1/Index3 end-swaps make y3 == y1 at EVERY pixel, so the fitted Gaussian's mean is the (clamped) argmax frame index — ported"""
     P = 9
