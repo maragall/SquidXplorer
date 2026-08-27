@@ -27,6 +27,12 @@ def layers():
 
     from squidxplorer._napari_pane import attach_async_slice_apply
 
+    from qtpy.QtWidgets import QApplication
+
+    # BEFORE the first slice: superqt's main-thread marshalling posts to the app's thread,
+    # and a response emitted with no QApplication alive is silently never applied (measured:
+    # every request before the first _settle stayed unloaded, 2026-08-27).
+    QApplication.instance() or QApplication([])
     viewer = ViewerModel()
     # The apply half production panes get from QtViewer/ModelPane (main-thread marshalled;
     # _settle pumps the queue). See _napari_pane.attach_async_slice_apply.

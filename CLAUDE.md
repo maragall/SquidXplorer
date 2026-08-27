@@ -826,9 +826,15 @@ fine one computes on the slicer's pool. The rules:
   swap so the swap's own request is not built on the old data's window (that request died
   with an IndexError inside the slicing pool, swallowed by the Future, no log line). Pinned
   in `tests/test_napari_view.py::test_relighting_raw_zoomed_in_under_a_z_reducer_...`, which
-  drives napari's `_update_draw` between the gestures. Unfixed, same shape, not reported:
-  `_swap_layer_scale` (3D) keeps ndim, so a stale pyramid response can still land on the
-  single-scale volume.
+  drives napari's `_update_draw` between the gestures. The 3D swap (`_swap_layer_scale`,
+  same ndim both ways) was checked with a slice in flight, both directions, and HOLDS: the
+  slicer is a one-worker pool, responses land in submission order, and the swap's own request
+  lands last, so a stale one is at worst a transient (long on a huge set) never a stuck
+  state. The z case broke only because the swap's request itself died. If napari ever grows
+  the pool past one worker, the general guard is a request-id watermark at each swap. The
+  `layers` fixture creates the `QApplication` BEFORE `attach_async_slice_apply`: a response
+  emitted with no app alive is never applied (superqt posts to the app's thread), so every
+  request before the first `_settle` used to stay unloaded, silently.
 
 ## Operator shelf (Julio, 2026-08-21 + 2026-08-24, branch shelf-operators)
 

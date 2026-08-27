@@ -60,7 +60,10 @@ import numpy as np
 from scipy.ndimage import convolve1d, median_filter
 
 from squidxplorer._engine import Param, add_operator
+from squidxplorer._logpane import get_logger
 from squidxplorer.projection import Z_REDUCER, cast_like
+
+log = get_logger("fstack")
 
 DEFAULT_NHSIZE = 9      #: focus-measure window, px (the MATLAB's 'nhsize')
 DEFAULT_ALPHA = 0.2     #: selectivity sharpness, (0, 1] (the MATLAB's 'alpha')
@@ -154,6 +157,33 @@ def lateral_halo_px(nhsize: int) -> int:
     return 3 * (int(nhsize) // 2) + 1
 
 
+UNBRACKETED_FRACTION = 0.05   #: share of pixels sharpest at a stack end that earns the line
+_said_unbracketed = False
+
+
+def _say_unbracketed(argmax: np.ndarray, n_planes: int) -> None:
+    """ONE INFO line per process when the focus is not bracketed; DEBUG after.
+
+    The MATLAB's index-swap lines (``Index1(I<=STEP) = Index3(I<=STEP)``) give a pixel whose
+    sharpest plane is the first or second an INVERTED 3-point fit, and its selectivity goes
+    far below any ``sth``: it fuses as the plain mean whatever the knobs say. Measured on G7
+    FOV 6 (2026-08-27, three blind ports of fstack.m): 23% of pixels, and they are signal.
+    A pixel sharpest at the last plane has its vertex forced two planes in. Neither is a
+    knob's fault; the acquisition must bracket the focus by ``_STEP`` planes on both sides,
+    and a researcher should learn that from the run, not from the picture.
+    """
+    global _said_unbracketed
+    low = float(np.mean(argmax <= _STEP - 1))
+    high = float(np.mean(argmax >= n_planes - 1))
+    if low + high < UNBRACKETED_FRACTION:
+        return
+    emit = log.debug if _said_unbracketed else log.info
+    _said_unbracketed = True
+    emit("fstack: focus not bracketed: %.0f%% of pixels are sharpest at the first %d plane(s) "
+         "(fit inverted, fused as the mean) and %.0f%% at the last: acquire %d more z on each side",
+         100.0 * low, _STEP, 100.0 * high, _STEP)
+
+
 def fuse_stack(planes, nhsize: int = DEFAULT_NHSIZE, alpha: float = DEFAULT_ALPHA,
                sth: float = DEFAULT_STH) -> np.ndarray:
     """Fuse a z stack of same-shape planes into one all-in-focus plane, native dtype."""
@@ -183,6 +213,7 @@ def fuse_stack(planes, nhsize: int = DEFAULT_NHSIZE, alpha: float = DEFAULT_ALPH
     fm = np.empty_like(stack)
     for p in range(P):
         fm[p] = gfocus(stack[p], nhsize)
+    _say_unbracketed(fm.argmax(axis=0), P)
 
     u, s2, big_a, fmax = gauss3P(focus, fm)
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
