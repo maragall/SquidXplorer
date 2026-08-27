@@ -754,6 +754,8 @@ class MosaicLayers:
         try:
             ly.metadata = meta
             ly.multiscale = bool(stash["multiscale"])
+            first = stash["data"][0] if stash["multiscale"] else stash["data"]
+            self._reset_corner_pixels(ly, int(getattr(first, "ndim", 3)))
             ly.data = stash["data"]
             # AFTER the data: napari pads scale/translate to the new ndim with 1.0 / 0.0.
             ly.scale = stash["scale"]
@@ -785,6 +787,7 @@ class MosaicLayers:
             plane = coarsest[max(0, min(int(z_level), int(coarsest.shape[0]) - 1))]
             ly.metadata = meta
             ly.multiscale = False
+            self._reset_corner_pixels(ly, int(getattr(plane, "ndim", 2)))
             ly.data = plane
             self._reset_data_level(ly)
             # The coarsest level's own pixel size, not level 0's.
@@ -1211,6 +1214,7 @@ class MosaicLayers:
         peers = self._by_channel.setdefault(channel, [])
         peers.append(layer)
         self._bind_reset_contrast(channel, layer)
+        self._bind_slice_guard(layer)
         # Mirror FIRST: the identity must agree with itself before any tap is told about it.
         self._connect_identity_mirror(layer)
         # Connections are made HERE, per layer, because layer objects are destroyed and
@@ -1404,6 +1408,46 @@ class MosaicLayers:
 
         try:
             layer.reset_contrast_limits = _reset
+        except Exception:                        # noqa: BLE001 - a layer type without it
+            pass
+
+    @staticmethod
+    def _bind_slice_guard(layer: Any) -> None:
+        """Per instance: a slice response for DATA THE LAYER NO LONGER HOLDS is dropped.
+
+        Under async slicing a request outlives the data it was made from. ``visible = True`` on a
+        z-collapsed raw queues a slice of the collapsed PLANE before our listener restores the
+        stack; that stale 2-D response then landed on the 3-D layer, overwrote ``_slice_input``,
+        and every later draw clipped the window against the z axis and returned early (raw
+        pixelated until a zoom-out; Julio, G7 fstack, 2026-08-27). The reverse lands a 3-D
+        response on the collapsed plane and the next draw raises in napari. napari applies every
+        response unconditionally; the layer's dimensionality is the one fact that says whose data
+        a response describes."""
+        orig = getattr(layer, "_update_slice_response", None)
+        if orig is None:
+            return
+
+        def _guarded(response, _orig=orig, _ly=layer) -> None:
+            want = int(getattr(_ly, "ndim", 0) or 0)
+            got = int(getattr(getattr(response, "slice_input", None), "ndim", want) or want)
+            if got != want:
+                log.debug("dropped a stale %d-D slice response on %s (now %d-D)",
+                          got, getattr(_ly, "name", "layer"), want)
+                return
+            _orig(response)
+
+        try:
+            layer._update_slice_response = _guarded
+        except Exception:                        # noqa: BLE001 - a layer type without it
+            pass
+
+    @staticmethod
+    def _reset_corner_pixels(ly: Any, ndim: int) -> None:
+        """BEFORE a data swap that changes ndim: the draw-time window napari copies into the
+        swap's own slice request is shaped for the OLD data, and a mismatched window raises inside
+        the slicing pool, where the Future swallows it (no response, no log line)."""
+        try:
+            ly.corner_pixels = np.zeros((2, int(ndim)), dtype=int)
         except Exception:                        # noqa: BLE001 - a layer type without it
             pass
 

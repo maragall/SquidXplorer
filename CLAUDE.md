@@ -813,6 +813,22 @@ fine one computes on the slicer's pool. The rules:
 - Tests whose pins are inherently sync-semantic (`test_time_point_playback`,
   `test_roi_pitch`) force each viewer's slicer sync via the per-viewer `_force_sync` knob;
   the suite otherwise runs the production (async) configuration.
+- **A slice response for data the layer no longer holds never lands** (2026-08-27, Julio on
+  G7 fstack: zoomed in, switch to the result, back to raw: PIXELATED, healed only by a
+  zoom-out). A request outlives the data it was made from: `raw.visible = True` queues a
+  slice of the z-COLLAPSED plane before our listener restores the stack (`_restore_layer_z`),
+  and that stale 2-D response overwrote the 3-D layer's `_slice_input`, so every later draw
+  clipped the window against the z axis and returned early; the reverse (a 3-D response on
+  the freshly collapsed plane) raised in napari's own `_on_slice_ready` (matmul 3 vs 4, 9
+  times in one session). napari applies every response unconditionally.
+  `MosaicLayers._bind_slice_guard` (per instance, from `_register_channel`) drops a response
+  whose `slice_input.ndim` is not the layer's; `_reset_corner_pixels` runs BEFORE each z
+  swap so the swap's own request is not built on the old data's window (that request died
+  with an IndexError inside the slicing pool, swallowed by the Future, no log line). Pinned
+  in `tests/test_napari_view.py::test_relighting_raw_zoomed_in_under_a_z_reducer_...`, which
+  drives napari's `_update_draw` between the gestures. Unfixed, same shape, not reported:
+  `_swap_layer_scale` (3D) keeps ndim, so a stale pyramid response can still land on the
+  single-scale volume.
 
 ## Operator shelf (Julio, 2026-08-21 + 2026-08-24, branch shelf-operators)
 

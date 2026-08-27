@@ -1318,6 +1318,46 @@ def test_a_z_collapse_leaves_data_level_a_valid_index_too(layers):
     raw._display_bounding_box_augmented_data_level(raw._slice_input.displayed)
 
 
+def _draw(ml, y0_um, x0_um, h_um, w_um, canvas=(800, 800)) -> None:
+    """napari's canvas draw, headless: what ``VispyCanvas.on_draw`` hands every layer."""
+    corners = np.array([[y0_um, x0_um], [y0_um + h_um, x0_um + w_um]], float)
+    for ly in ml.model.layers:
+        ly._update_draw(scale_factor=h_um / canvas[0], corner_pixels_displayed=corners,
+                        shape_threshold=np.array(canvas))
+
+
+def test_relighting_raw_zoomed_in_under_a_z_reducer_shows_the_pyramid_not_the_collapsed_plane(layers):
+    """Julio, live on G7 (2026-08-27): zoomed in, switch to fstack, back to raw: PIXELATED; only zooming out heals it.
+
+    ``raw.visible = True`` makes napari queue an ASYNC slice of what raw holds at that instant, the
+    collapsed coarsest plane; our listener restores the stack only after. That stale response landed
+    on the restored layer and overwrote ``_slice_input`` with the plane's 2-D one, so every later draw
+    clipped the window against the z axis and returned early. A response for data the layer no longer
+    holds must never land."""
+    layers.add_mosaic("raw", "405", _z_stack_pyramid(nz=4, shape=(256, 256)), multiscale=True,
+                      bbox_um=_Z_BBOX, z_scale_um=2.0)
+    layers.add_mosaic("mip", "405", np.zeros((256, 256), np.uint16), bbox_um=_Z_BBOX)  # lit: raw collapses
+    _settle(layers)
+    raw = layers.find("raw", "405")
+    assert raw.multiscale is False, "the collapse never ran; this test's premise is stale"
+    window = (25.0, 50.0, 10.0, 20.0)                  # a tenth of the 100 x 200 um mosaic
+    _draw(layers, *window); _settle(layers)
+
+    raw.visible = True                                 # the layer tree's write, verbatim
+    _settle(layers)
+    _draw(layers, *window); _settle(layers)
+
+    assert raw.multiscale is True and raw.ndim == 3, "the restore never ran"
+    assert raw._slice_input.ndim == raw.ndim, (
+        "a stale slice of the collapsed plane landed on the restored stack; every draw from here "
+        "clips the window against the z axis and never re-slices")
+    assert raw.loaded, "the last slice request never landed"
+    shown = np.asarray(raw._slice.image.raw)
+    assert 20 <= max(shown.shape) < 64, (
+        f"raw shows a {shown.shape} slice for a {window[2]:.0f} um window over 256 px: "
+        "the collapsed plane, not the zoomed pyramid")
+
+
 def test_full_res_level_takes_level_zero_off_napari_s_own_container():
     """``np.asarray(MultiScaleData)`` returns the COARSEST level (``__array__`` is ``_data[-1]``), so treating a non-list Sequence as a plain array silently"""
     from napari.components import ViewerModel
