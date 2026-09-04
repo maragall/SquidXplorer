@@ -81,9 +81,33 @@ class NapariBindingError(RuntimeError):
     """A napari symbol this module depends on has moved, been renamed, or been removed."""
 
 
+def _napari_major_minor(version: str) -> tuple:
+    """(major, minor) ints off a version string; a non-numeric tail is ignored."""
+    nums = []
+    for piece in str(version).split(".")[:2]:
+        digits = ""
+        for ch in piece:
+            if not ch.isdigit():
+                break
+            digits += ch
+        nums.append(int(digits or 0))
+    return tuple(nums)
+
+
 def verify_napari_bindings(modules: Optional[dict] = None) -> None:
     """Fail loudly if any napari API this module drives is missing."""
     import importlib
+
+    nap = (modules["napari"] if modules and "napari" in modules
+           else importlib.import_module("napari"))
+    installed = str(getattr(nap, "__version__", "unknown"))
+    if _napari_major_minor(installed) >= (0, 7):
+        raise NapariBindingError(
+            f"verify_napari_bindings: napari {installed} is installed, but this app is built "
+            "against the napari 0.6 line. Installs between 2026-07-30 and 2026-08-18 could "
+            "resolve napari 0.8.0, the known-broken line; the pin was re-tightened in commit "
+            "066d1f4. Reinstall with the pinned napari (< 0.7) and relaunch."
+        )
 
     missing: list[str] = []
     for dotted, attr in REQUIRED_NAPARI_BINDINGS:

@@ -131,11 +131,13 @@ def _add_bounding_box(viewer: Any, scale: tuple, shape_zyx: tuple) -> None:
         ticks += [[[0, y, 0], [0, y, tick]], [[0, y, 0], [tick, y, 0]]]
     for z in np.arange(100, z_max, 100):
         ticks += [[[z, 0, 0], [z, tick, 0]], [[z, 0, 0], [z, 0, tick]]]
-    viewer.add_shapes(
+    layer = viewer.add_shapes(
         [np.array(line) for line in edges + ticks],
         shape_type="line", edge_color="white", edge_width=2,
         name="Bounding Box (100um ticks)",
     )
+    from squidxplorer._napari_view import MosaicLayers
+    MosaicLayers._label_units(layer)                 # stage um: napari >= 0.7 nulls mixed units
 
 
 def _wire_close_to_release_memory(viewer: Any) -> None:

@@ -191,10 +191,15 @@ class _PlateSlotBox(QWidget):
     def sizeHint(self):
         return QSize(super().sizeHint().width(), self.PLATE_SLOT_PX)
 
-    def set_view(self, widget: QWidget) -> None:
-        """Mount the plate view (rebuilt per ingest) as the slot's content."""
-        self._bv.addWidget(widget, 1)
+    def set_view(self, widget: QWidget, bar: Optional[QWidget] = None) -> None:
+        """Mount the plate view (rebuilt per ingest), and the timepoint bar under it."""
+        if self._bv.indexOf(widget) < 0:
+            self._bv.addWidget(widget, 1)
         widget.setVisible(True)
+        if bar is not None:
+            if self._bv.indexOf(bar) < 0:
+                self._bv.addWidget(bar, 0)       # under the plate, next to what it navigates
+            bar.setVisible(bar.count > 1)        # set_count's own rule: hidden at n_t == 1
 
 
 # --- the main window: the plate on top, the Open View list and the console below --------------
@@ -747,6 +752,7 @@ class PlateWindow(QMainWindow):
 
         rv.addWidget(body, 1)                   # plate over band, in the drawing's order
         rv.addWidget(self._time_point_bar, 0)   # hidden unless n_t > 1
+        self._root_v = rv                       # the bar's HOME layout; _mount_overview re-homes it
         self.setCentralWidget(root)
 
         # LOCK THE WHOLE ROOT DARK so macOS LIGHT theme cannot whiten the framing (Julio: "make
@@ -1628,15 +1634,26 @@ class PlateWindow(QMainWindow):
         return box, self._log_panel
 
     def _mount_overview(self) -> None:
-        """The ONE place the (per-ingest rebuilt) overview lands: the hosted slot, else home."""
+        """The ONE place the (per-ingest rebuilt) overview lands: the hosted slot, else home.
+
+        The timepoint bar moves WITH the overview: it navigates the plate, so a hosted plate
+        without it would pin a timelapse's thumbnails to t=0 with no reachable control.
+        """
         if self._overview is None or not _widget_alive(self._overview):
             return
+        bar = getattr(self, "_time_point_bar", None)
+        if bar is not None and not _widget_alive(bar):
+            bar = None                           # never touch a widget a dead host took down
         if self._plate_hosted and self._plate_slot_box is not None \
                 and _widget_alive(self._plate_slot_box):
-            self._plate_slot_box.set_view(self._overview)
+            self._plate_slot_box.set_view(self._overview, bar)
         else:
             self._left_l.addWidget(self._overview, 1)
             self._overview.show()
+            root_v = getattr(self, "_root_v", None)
+            if bar is not None and root_v is not None and root_v.indexOf(bar) < 0:
+                root_v.addWidget(bar, 0)         # back under the body, where _build put it
+                bar.setVisible(bar.count > 1)
 
     def adopt_plate_slots_home(self) -> None:
         """Take the plate view and the log BACK into this window (idempotent).

@@ -66,6 +66,8 @@ def roi_shapes_layer(win, create: bool = False):
         except Exception:                            # noqa: BLE001 - fall back to a plain layer
             layer = v.add_shapes(name="ROIs", edge_color="#58a6ff",
                                  face_color="transparent")
+        from squidxplorer._napari_view import MosaicLayers
+        MosaicLayers._label_units(layer)             # stage um: napari >= 0.7 nulls mixed units
         win._roi_layer = layer
         sync_roi_width(v, layer)
         try:
