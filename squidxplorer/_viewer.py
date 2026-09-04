@@ -2128,8 +2128,7 @@ class PlateWindow(QMainWindow):
         # test_a_gesture_in_a_window_leaves_the_plate_alone), and after a paste the plate's
         # channel windows equal the pasted window's, through the FOLLOW path — never the manual
         # latch, and never a plate write from the window's side. Contrast only: a stain-LUT
-        # channel's plate look must remain the LUT rendering after a paste, so no colormap and
-        # no eye icons travel.
+        # channel's plate look must remain the LUT rendering, so no colormap travels.
         # `on_user_op` is KEPT for its own reason: which processing LAYER the plate draws is a
         # different quantity from how it is windowed, and it has exactly one honest answer.
 
@@ -2142,29 +2141,59 @@ class PlateWindow(QMainWindow):
         def _op_sink(op: str, on: bool):
             self._follow_window_layer(str(op), bool(on))
 
+        # ...and the CHANNEL's eye (2026-09-04, Julio + hongquan): the same latch one level
+        # down. `on_user_visibility` answers any-visible ACROSS ops, so an exclusive-op swap
+        # never reads as channel-off (pinned in tests/test_napari_view.py), and only a moved
+        # answer arrives here; programmatic writes are filtered at the source.
+        def _vis_sink(channel: str, on: bool):
+            self._follow_window_channel(str(channel), bool(on))
+
         sub = getattr(mosaic, "on_user_op", None)            # same slot-abort hazard as above
         if callable(sub):
             sub(_op_sink)
+        sub = getattr(mosaic, "on_user_visibility", None)
+        if callable(sub):
+            sub(_vis_sink)
         bound.add(wid)
 
-    def _follow_window_contrast(self, channel: str, lo: float, hi: float) -> None:
-        """The plate takes ONE channel's resolved window from a view, through the FOLLOW path.
-
-        Name-to-index happens here, once: the overview counts channels by position in the
-        acquisition's own list. `follow_channel_window`, never `set_channel_window` — following
-        must not latch the channel manual (see `_bind_window_contrast`).
-        """
-        ov = getattr(self, "_overview", None)
-        if ov is None or self._meta is None:
-            return
-        for i, entry in enumerate(self._meta.get("channels") or []):
+    def _channel_index(self, channel: str):
+        """Name-to-index, once: the overview counts channels by position in the acquisition's list."""
+        for i, entry in enumerate((self._meta or {}).get("channels") or []):
             get = getattr(entry, "get", None)
             if get is None:
                 continue
             if str(get("name")) == str(channel) \
                     or str(get("display_name") or "") == str(channel):
-                ov.follow_channel_window(int(i), float(lo), float(hi))
-                return
+                return int(i)
+        return None
+
+    def _follow_window_contrast(self, channel: str, lo: float, hi: float) -> None:
+        """The plate takes ONE channel's resolved window from a view, through the FOLLOW path.
+
+        `follow_channel_window`, never `set_channel_window`: following must not latch the
+        channel manual (see `_bind_window_contrast`).
+        """
+        ov = getattr(self, "_overview", None)
+        if ov is None or self._meta is None:
+            return
+        i = self._channel_index(channel)
+        if i is not None:
+            ov.follow_channel_window(i, float(lo), float(hi))
+
+    def _follow_window_channel(self, channel: str, on: bool) -> None:
+        """A window showed or hid a CHANNEL (any layer, any op): the plate composites the same set.
+
+        Lands on `set_channel_visible`, whose last-channel guard keeps the plate a navigator;
+        a channel this plate does not carry is ignored at debug, like `_follow_window_layer`.
+        """
+        ov = getattr(self, "_overview", None)
+        if ov is None or self._meta is None:
+            return
+        i = self._channel_index(channel)
+        if i is None:
+            log.debug("window channel %r has no plate channel to follow", channel)
+            return
+        ov.set_channel_visible(i, bool(on))
 
     def _follow_window_layer(self, layer_key: str, on: bool) -> None:
         """A window showed or hid a processing layer: put the plate on the same one.

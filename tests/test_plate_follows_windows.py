@@ -109,25 +109,43 @@ def test_the_root_really_has_no_central_napari_pane_to_bind(qapp, squid_dataset)
 
 
 def test_a_gesture_in_a_window_leaves_the_plate_alone(qapp, squid_dataset):
-    """Live look-following is shelved: gestures in a window change nothing on the plate."""
+    """Live contrast-following is shelved: a drag in a window changes nothing on the plate."""
     win = _open_plate(squid_dataset)
     try:
         child = _spawn(win)
         ch_name = _channels(win)[0]
         before_window = win._overview._contrast.window(0)
-        before_mask = list(win._overview._mask)
 
         child.mosaic.user_drags_contrast(ch_name, 11.0, 222.0)
-        child.mosaic.user_clicks_eye(ch_name, False)
         child.mosaic.user_drags_contrast("a channel that is not in this acquisition", 1.0, 2.0)
-        child.mosaic.user_clicks_eye("a channel that is not in this acquisition", False)
 
         assert win._overview._contrast.window(0) == before_window, (
             "a contrast drag in a window still reaches the plate")
-        assert list(win._overview._mask) == before_mask, (
-            "an eye icon in a window still reaches the plate")
         assert not win._overview._contrast.is_followed(0), (
             "the plate is still following a window's resolved window")
+    finally:
+        win.close()
+
+
+def test_hiding_a_channel_in_a_window_follows_to_the_plate(qapp, squid_dataset):
+    """2026-09-04 (Julio + hongquan): the channel eye follows, one latch below the op layer."""
+    win = _open_plate(squid_dataset)
+    try:
+        child = _spawn(win)
+        ch = _channels(win)[0]
+        assert bool(win._overview._mask[0]) is True
+
+        child.mosaic.user_clicks_eye(ch, False)
+        assert bool(win._overview._mask[0]) is False, (
+            "hiding a channel in a window did not reach the plate")
+        assert bool(win._overview._mask[1]) is True, "the toggle spilled onto another channel"
+
+        child.mosaic.user_clicks_eye(ch, True)
+        assert bool(win._overview._mask[0]) is True, (
+            "showing the channel again did not bring the plate channel back")
+
+        child.mosaic.user_clicks_eye("a channel that is not in this acquisition", False)
+        assert bool(win._overview._mask[0]) is True, "an unknown channel moved the plate"
     finally:
         win.close()
 
