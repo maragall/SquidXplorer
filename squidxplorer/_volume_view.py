@@ -334,6 +334,43 @@ def refresh_bricks(win) -> None:
         win._say(f"3D: could not follow the camera ({exc}).")
 
 
+#: The snap chips' axis-aligned triples, and THE one place this app writes ``camera.angles``
+#: (``frame_bbox_um``'s docstring records that nothing else touches them). napari's world
+#: order is (z, y, x); each triple is pinned by ``camera.view_direction``, never trusted.
+SNAP_ANGLES = {
+    "xy": (0.0, 0.0, 90.0),                          # looking along z: napari's own 3D default
+    "xz": (0.0, 0.0, 0.0),                           # looking along y, z up
+    "yz": (0.0, 90.0, 0.0),                          # looking along x, z up
+}
+
+
+def snap_camera(win, plane: str) -> None:
+    """Snap the volume's camera to an axis plane ("xy", "xz", "yz"), or refit it ("fit").
+
+    IN CAMERA only: the angles, then the volume's own framing; "fit" is the framing alone,
+    so a user's rotation survives it. A pure rotation moves neither zoom nor center, so the
+    pane's camera-settle (wired to exactly those two events) may never fire; the brick
+    refinement runs here directly, the settle's own work.
+    """
+    vol = win._native3d
+    frame = getattr(vol, "frame", None)
+    if not callable(frame):
+        win._say("camera snap: no 3D volume is up in this view.")
+        return
+    if plane != "fit":
+        angles = SNAP_ANGLES.get(plane)
+        if angles is None:
+            win._say(f"camera snap: unknown plane '{plane}'.")
+            return
+        try:
+            vol._viewer.camera.angles = angles
+        except Exception as exc:                     # noqa: BLE001 - named, never silent
+            win._say(f"camera snap: could not turn the camera ({exc}).")
+            return
+    frame()
+    refresh_bricks(win)
+
+
 def displayed_pitch_um(win, layer, *, what: str):
     """MICROMETRES PER PIXEL of the pixels a layer is actually showing, as ``(y, x)``."""
     scale = getattr(layer, "scale", None)

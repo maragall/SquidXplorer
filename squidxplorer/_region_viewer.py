@@ -668,6 +668,21 @@ class RegionViewer(QMainWindow):
             self._chip("→ window", "Open the drawn ROIs as child views.", self._open_roi_children),
             self._btn_focus, self._btn_record, self._btn_png,
         ]
+        # 3D camera snaps, IN CAMERA (no panels: the grid is the whole UI): three axis
+        # planes plus a refit. Hidden on a 2D tab; `note_volume_tab` shows them.
+        self._snap_chips = [
+            self._chip("XY", "Snap the 3D camera to the XY plane (top view).",
+                       lambda: _volume_view.snap_camera(self, "xy")),
+            self._chip("XZ", "Snap the 3D camera to the XZ plane.",
+                       lambda: _volume_view.snap_camera(self, "xz")),
+            self._chip("YZ", "Snap the 3D camera to the YZ plane.",
+                       lambda: _volume_view.snap_camera(self, "yz")),
+            self._chip("fit", "Refit the volume to the canvas; the angles stay.",
+                       lambda: _volume_view.snap_camera(self, "fit")),
+        ]
+        for chip in self._snap_chips:
+            chip.setVisible(self._is_volume_tab)
+        chips += self._snap_chips
         for k, chip in enumerate(chips):
             chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             grid.addWidget(chip, k // 3, k % 3)
@@ -697,6 +712,9 @@ class RegionViewer(QMainWindow):
         if btn is not None and _alive(btn):
             btn.setEnabled(False)
             btn.setToolTip("This tab is the 3D view; close it to go back to 2D.")
+        for chip in getattr(self, "_snap_chips", ()):
+            if _alive(chip):
+                chip.setVisible(True)
 
     _AT_DEFAULTS_QSS = "color:#8b949e;font-size:10px;border:none;"
     _PROGRESS_QSS = (
