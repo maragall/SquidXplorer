@@ -1792,6 +1792,8 @@ class RegionViewer(QMainWindow):
                 layer = v.add_shapes(name="FOVs", face_color="transparent",
                                      edge_color=self._FOV_EDGE_IDLE)
                 layer.editable = False
+                from squidxplorer._napari_view import MosaicLayers
+                MosaicLayers._label_units(layer)     # stage um: napari >= 0.7 nulls mixed units
             except Exception as exc:                     # noqa: BLE001 - named, never fatal
                 self._say(f"could not draw the FOV boxes ({type(exc).__name__}: {exc}).")
                 return v, None

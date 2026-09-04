@@ -128,3 +128,30 @@ def test_the_deck_accepts_a_dropped_acquisition_for_the_plate(qapp, napari_pane_
         assert got == [str(root)], "the drop never reached the plate's ingest"
     finally:
         shutdown_plate_window(qapp, win)
+
+
+def test_the_timepoint_bar_rides_the_plate_slot_and_steps_the_plate(qapp, napari_pane_stub,
+                                                                    multi_time_point_dataset):
+    """One window, timelapse: the plate's timepoint bar is hosted in the plate slot (count 3,
+    visible), a step reaches the overview (its repaint trigger), and closing every view
+    re-homes the bar with the plate."""
+    root, _ = multi_time_point_dataset
+    win, mgr, deck, views = _tabbed(qapp, root)
+    try:
+        v = views[0]
+        bar = win._time_point_bar
+        assert _is_inside(bar, win._plate_slot_box), "the timepoint bar is not in the plate slot"
+        assert _is_inside(bar, v), "the timepoint bar did not reach the hosting view"
+        assert bar.count == 3
+        assert not bar.isHidden(), "a 3-timepoint bar must be visible in the slot"
+
+        bar.set_time_point_from_user(2)
+        assert win._overview._time_point == 2, (
+            "stepping the hosted bar did not re-read the plate at the new timepoint")
+
+        mgr.close_all()
+        for _ in range(10):
+            qapp.processEvents()
+        assert _is_inside(bar, win), "the timepoint bar did not come home with the plate"
+    finally:
+        shutdown_plate_window(qapp, win)

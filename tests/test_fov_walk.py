@@ -323,3 +323,35 @@ def test_a_view_cannot_be_both_an_roi_child_and_a_fov_walk():
     with pytest.raises(ValueError, match="cannot be both"):
         RegionViewer(None, _sweep_meta(), ["A1"], window_id=1,
                      roi_bbox=(0.0, 0.0, 10.0, 10.0), fovs=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# Units
+# ══════════════════════════════════════════════════════════════════════════════════════════
+
+def test_the_shapes_overlays_carry_the_mosaics_micrometre_units(qapp):
+    """FOV boxes, the ROI layer and the 3D bounding box are stage micrometres like every
+    mosaic layer; a bare Shapes layer's default pixel units null napari >= 0.7's merged
+    world units ("Inconsistent units across layers")."""
+    from squidxplorer import _napari3d, _roi_tools
+
+    meta = _sweep_meta()
+    win, model = _walker(meta)
+    try:
+        _open(win)
+        raw = next(ly for ly in model.layers if ly.name != "FOVs")
+        fovs = _fov_layer(model)
+        assert tuple(fovs.units) == tuple(raw.units)[-fovs.ndim:], (
+            "the FOV boxes do not carry the mosaic's micrometre units")
+
+        _v, roi = _roi_tools.roi_shapes_layer(win, create=True)
+        assert roi is not None
+        assert tuple(roi.units) == tuple(raw.units)[-roi.ndim:], (
+            "the ROI layer does not carry the mosaic's micrometre units")
+
+        _napari3d._add_bounding_box(model, (1.0, 1.0, 1.0), (2, 300, 300))
+        box = next(ly for ly in model.layers if ly.name.startswith("Bounding Box"))
+        assert len(set(box.units)) == 1 and str(next(iter(set(box.units)))) == str(raw.units[0]), (
+            "the 3D bounding box does not carry micrometre units")
+    finally:
+        win._fov_slider.shutdown()
