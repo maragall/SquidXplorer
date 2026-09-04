@@ -235,11 +235,44 @@ def test_a_fovs_view_exports_the_current_field_not_the_whole_well(
 def test_the_renderer_caps_the_long_side_and_says_so_in_its_step():
     """Qt-free: a plane over the cap is decimated to fit, and the step reports the clip."""
     plane = (np.arange(100 * 40, dtype=np.uint16) % 251).reshape(100, 40)
-    ch = PngChannel("DAPI", plane, (0.0, 250.0), (0, 0, 255))
+    ch = PngChannel("DAPI", plane, (0.0, 250.0), (0, 0, 255), z_index=0)
 
-    rgb, step = render_view_png([ch], z_index=0, max_px=40)
+    rgb, step = render_view_png([ch], max_px=40)
 
     assert step == 3, f"ceil(100 / 40) is 3, got {step}"
     assert rgb.shape == (34, 14, 3), f"decimated shape is {rgb.shape}"
-    native, step1 = render_view_png([ch], z_index=0, max_px=PNG_MAX_PX)
+    native, step1 = render_view_png([ch], max_px=PNG_MAX_PX)
     assert step1 == 1 and native.shape == (100, 40, 3)
+
+
+def test_a_mixed_scene_exports_every_visible_channel_not_one_op(
+        qapp, napari_pane_stub, five_d_root, save_dialog):
+    """Raw lit on one channel beside an operator result on the other, which is what the
+    screen composites (the one-lit-op rule is per channel): the PNG equals that composite.
+    The old one-op walk silently dropped the raw channel from the export."""
+    win, w = _open_window(qapp, five_d_root)
+    _drain_until(qapp, lambda: len(w._pane._viewer.layers) >= 2, timeout=20)
+    names = [c["name"] for c in w._meta["channels"]]
+    mosaic = w._pane.mosaic
+
+    raw0 = mosaic.find("raw", names[0])
+    result = (np.asarray(_full_res_plane(raw0.data, 0)) // 2 + 7).astype(np.uint16)
+    mosaic.add_mosaic("blur", names[1], result, contrast_limits=(5.0, 99.0))
+    assert mosaic.top_visible_layer(names[0]) is raw0, "raw must stay lit on its own channel"
+    assert mosaic.visible_op() == "blur"
+    out = Path(save_dialog["path"])
+
+    w._save_png()
+    assert _drain_until(qapp, lambda: out.exists() and w._png_worker is None, timeout=60), (
+        "the PNG export never finished")
+
+    blur = mosaic.find("blur", names[1])
+    z = w._z_slider_index()
+    p0 = np.asarray(_full_res_plane(raw0.data, z))
+    p1 = np.asarray(_full_res_plane(blur.data, z))
+    expected = composite(
+        np.stack([p0, p1]),
+        np.stack([_rgb01(raw0), _rgb01(blur)]),
+        [tuple(float(v) for v in raw0.contrast_limits), (5.0, 99.0)])
+    np.testing.assert_array_equal(_png_pixels(out), expected)
+    shutdown_plate_window(qapp, win)

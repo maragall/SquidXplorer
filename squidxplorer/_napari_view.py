@@ -1593,6 +1593,16 @@ class MosaicLayers:
             return None
         return any(bool(getattr(p, "visible", False)) for p in peers)
 
+    def top_visible_layer(self, channel: str) -> Optional[Any]:
+        """The topmost VISIBLE layer rendering *channel* — what the screen's composite shows
+        for it — or None. Model order, so 'topmost' is napari's own stacking, the same walk
+        as :meth:`visible_op` but resolved per channel."""
+        for ly in reversed(self.ours()):
+            k = key_of(ly)
+            if k is not None and k.channel == channel and bool(getattr(ly, "visible", False)):
+                return ly
+        return None
+
     def on_user_contrast(self, callback) -> None:
         """Subscribe to contrast changes the USER made. ``callback(channel, lo, hi)``."""
         self._user_contrast_cbs.append(callback)

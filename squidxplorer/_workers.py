@@ -560,13 +560,12 @@ class _PngWorker(QThread):
     done = Signal(str, int, int, int, float)   # (path, width px, height px, step, seconds)
     problem = Signal(str)                      # a named failure, never a silent no-op
 
-    def __init__(self, channels, out_path, *, z_index=0, max_px=None, parent=None):
+    def __init__(self, channels, out_path, *, max_px=None, parent=None):
         super().__init__(parent)
         from squidxplorer._png import PNG_MAX_PX
 
-        self._channels = list(channels)
+        self._channels = list(channels)     # each PngChannel carries its own z
         self._out_path = str(out_path)
-        self._z = int(z_index)
         self._max_px = int(max_px) if max_px else PNG_MAX_PX
         self._stop = threading.Event()
 
@@ -578,7 +577,7 @@ class _PngWorker(QThread):
 
         started = time.perf_counter()
         try:
-            rgb, step = render_view_png(self._channels, z_index=self._z, max_px=self._max_px)
+            rgb, step = render_view_png(self._channels, max_px=self._max_px)
             if self._stop.is_set():
                 return
             path = write_png(rgb, self._out_path)

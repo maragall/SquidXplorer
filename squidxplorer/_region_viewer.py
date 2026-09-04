@@ -1158,18 +1158,23 @@ class RegionViewer(QMainWindow):
 
         from squidxplorer._napari_view import colormap_hue_rgb, colormap_mid_rgb, full_res_level
 
+        z_now = self._z_slider_index()
         channels = []
         for c in (self._meta or {}).get("channels", []):
-            layer = mosaic.find(op, c["name"])
-            if layer is None or not bool(getattr(layer, "visible", False)):
+            # Per CHANNEL, the topmost VISIBLE layer: the one-lit-op rule is per channel, so
+            # the screen legitimately composites raw beside a result. One op's walk here
+            # silently dropped the raw channels of a mixed scene from the export.
+            layer = mosaic.top_visible_layer(c["name"])
+            if layer is None:
                 continue
             clim = getattr(layer, "contrast_limits", None)
             if clim is None:                      # a labels layer has no contrast window
                 continue
             rgb = colormap_hue_rgb(layer) or colormap_mid_rgb(layer) or (255, 255, 255)
-            channels.append(PngChannel(c["name"], layer.data, tuple(clim), tuple(rgb)))
+            channels.append(PngChannel(c["name"], layer.data, tuple(clim), tuple(rgb),
+                                       z_index=z_now))
         if not channels:
-            self._say(f"png: the {op} layer has no visible intensity channel to export.")
+            self._say("png: no visible intensity channel to export.")
             return
 
         region = self.current_region()
@@ -1197,7 +1202,7 @@ class RegionViewer(QMainWindow):
 
         from squidxplorer._workers import _PngWorker
 
-        w = _PngWorker(channels, path, z_index=self._z_slider_index(), parent=self)
+        w = _PngWorker(channels, path, parent=self)
         self._say(f"png: rendering {what} at full resolution to {path}…")
         _launch_worker(
             self, w, slot="_png_worker",
