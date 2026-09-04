@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -108,22 +109,48 @@ def test_the_root_really_has_no_central_napari_pane_to_bind(qapp, squid_dataset)
         win.close()
 
 
-def test_a_gesture_in_a_window_leaves_the_plate_alone(qapp, squid_dataset):
-    """Live contrast-following is shelved: a drag in a window changes nothing on the plate."""
+def _drain(qapp, until, seconds=5.0):
+    deadline = time.time() + seconds
+    while time.time() < deadline and not until():
+        qapp.processEvents()
+        time.sleep(0.005)
+    return until()
+
+
+def test_a_window_contrast_drag_reaches_the_plate_without_a_paste(qapp, squid_dataset):
+    """2026-09-04 (Julio + hongquan): live follow, superseding the 2026-08-06 paste-only rule."""
     win = _open_plate(squid_dataset)
     try:
+        ov = win._overview
+        assert _drain(qapp, lambda: getattr(ov, "_contrast", None) is not None
+                      and getattr(ov, "_mask", None) is not None and len(ov._mask) > 0, 10.0), (
+            "the plate's contrast books never seeded")
         child = _spawn(win)
-        ch_name = _channels(win)[0]
-        before_window = win._overview._contrast.window(0)
+        colors_before = None if ov._colors is None else [tuple(c) for c in ov._colors]
 
-        child.mosaic.user_drags_contrast(ch_name, 11.0, 222.0)
+        for k in range(30):                        # a drag: a flood of events...
+            child.mosaic.user_drags_contrast(_channels(win)[0], 10.0 + k, 200.0 + k)
+        assert not ov._contrast.is_followed(0), (
+            "the drag's flood reached the plate uncoalesced")
+
+        assert _drain(qapp, lambda: ov._contrast.is_followed(0)), (
+            "the settled drag never reached the plate")   # ...one settled repaint
+        assert ov._contrast.window(0) == (39.0, 229.0), "not the drag's LAST window"
+        colors_after = None if ov._colors is None else [tuple(c) for c in ov._colors]
+        assert colors_after == colors_before, "the contrast follow moved the plate's colours"
+
+        decoy = _FakeWindow(9)                     # the plate follows the FOCUSED view only
+        win._viewer_manager._windows[9] = decoy
+        win._viewer_manager._focused_id = 9
+        child.mosaic.user_drags_contrast(_channels(win)[0], 1.0, 2.0)
+        _drain(qapp, lambda: False, 0.4)
+        assert ov._contrast.window(0) == (39.0, 229.0), (
+            "an unfocused window's drag moved the plate")
+
         child.mosaic.user_drags_contrast("a channel that is not in this acquisition", 1.0, 2.0)
-
-        assert win._overview._contrast.window(0) == before_window, (
-            "a contrast drag in a window still reaches the plate")
-        assert not win._overview._contrast.is_followed(0), (
-            "the plate is still following a window's resolved window")
+        _drain(qapp, lambda: False, 0.2)           # an unknown channel is ignored, not raised
     finally:
+        win._viewer_manager._windows.pop(9, None)
         win.close()
 
 
