@@ -426,3 +426,22 @@ def test_applying_a_lut_record_carries_CHANNEL_VISIBILITY_not_just_contrast(qapp
 
     assert two._pane.mosaic.channel_visible(CH_IN_YAML) is False, (
         "the source window had this channel switched OFF; applying its record dropped that")
+
+
+def test_the_users_contrast_survives_a_region_round_trip(qapp, manager):
+    """A region move rebuilds the raw layers; the look on screen must ride the move.
+
+    Measured before the fix: the user's (500, 1234) came back as a fresh auto seed
+    (2969.0, 2994.5) after B2 -> B3 -> B2, because `load_mosaic` removed the raw layers
+    without reading them first."""
+    win = manager.open(list(REGIONS))
+    _loaded(qapp, win)
+    win._pane.mosaic.set_contrast(CH_IN_YAML, 500.0, 1234.0)
+
+    assert win.show_region(REGIONS[1])
+    assert _drain_until(qapp, lambda: win._shown_region == REGIONS[1], timeout=30)
+    assert win.show_region(REGIONS[0])
+    assert _drain_until(qapp, lambda: win._shown_region == REGIONS[0], timeout=30)
+
+    assert _layer_clims(win)[CH_IN_YAML] == (500.0, 1234.0), (
+        "the round trip handed the user's window back to the auto seed")

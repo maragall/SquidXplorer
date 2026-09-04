@@ -22,12 +22,16 @@ PNG_MAX_PX = int(_MAX_FUSED_PX)
 
 
 class PngChannel(NamedTuple):
-    """One visible channel of the layer being exported, as the window sees it."""
+    """One visible channel of the scene being exported, as the window sees it."""
 
     name: str
     data: object            #: the napari layer's ``data`` — pyramid, stack or plane; may be lazy
     clim: tuple             #: the on-screen ``(lo, hi)`` contrast window
     rgb: tuple              #: the layer's 8-bit tint, ``(r, g, b)`` in 0–255
+    #: THIS channel's z plane (a raw stack's on-screen z; a single-plane result clamps to its
+    #: own plane). None falls back to the opening z. Per channel, because one scene mixes
+    #: depth-keeping and z-reduced layers.
+    z_index: Optional[int] = None
 
 
 def png_problem() -> Optional[str]:
@@ -42,10 +46,9 @@ def png_problem() -> Optional[str]:
 def render_view_png(
     channels: "Sequence[PngChannel]",
     *,
-    z_index: int = 0,
     max_px: int = PNG_MAX_PX,
 ) -> tuple[np.ndarray, int]:
-    """Composite *channels* at the z plane on screen into one ``(H, W, 3)`` uint8 RGB.
+    """Composite *channels*, each at its OWN z plane, into one ``(H, W, 3)`` uint8 RGB.
 
     Returns ``(rgb, step)`` where ``step`` is the decimation that kept the long side within
     *max_px* — 1 means native resolution, anything else is a clip the caller must SAY.
@@ -55,7 +58,7 @@ def render_view_png(
         raise ValueError("no channels to export - every channel is hidden.")
     from squidxplorer._workers import _full_res_plane  # the one layer-data plane rule
 
-    planes = [np.asarray(_full_res_plane(c.data, int(z_index))) for c in channels]
+    planes = [np.asarray(_full_res_plane(c.data, c.z_index)) for c in channels]
     shapes = {p.shape for p in planes}
     if len(shapes) > 1:
         raise ValueError(

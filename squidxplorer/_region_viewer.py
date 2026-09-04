@@ -1176,22 +1176,32 @@ class RegionViewer(QMainWindow):
 
         from squidxplorer._napari_view import colormap_hue_rgb, colormap_mid_rgb, full_res_level
 
+        z_now = self._z_slider_index()
         channels = []
         for c in (self._meta or {}).get("channels", []):
-            layer = mosaic.find(op, c["name"])
-            if layer is None or not bool(getattr(layer, "visible", False)):
+            # Per CHANNEL, the topmost VISIBLE layer: the one-lit-op rule is per channel, so
+            # the screen legitimately composites raw beside a result. One op's walk here
+            # silently dropped the raw channels of a mixed scene from the export.
+            layer = mosaic.top_visible_layer(c["name"])
+            if layer is None:
                 continue
             clim = getattr(layer, "contrast_limits", None)
             if clim is None:                      # a labels layer has no contrast window
                 continue
             rgb = colormap_hue_rgb(layer) or colormap_mid_rgb(layer) or (255, 255, 255)
-            channels.append(PngChannel(c["name"], layer.data, tuple(clim), tuple(rgb)))
+            channels.append(PngChannel(c["name"], layer.data, tuple(clim), tuple(rgb),
+                                       z_index=z_now))
         if not channels:
-            self._say(f"png: the {op} layer has no visible intensity channel to export.")
+            self._say("png: no visible intensity channel to export.")
             return
 
         region = self.current_region()
-        title = f"Save a PNG of {region} · {op}"
+        # A FOVs view exports the FIELD on screen, not the whole well its camera sits over.
+        fov = self._fov_slider.fov if (self._fov_mode and self._fov_slider is not None) else None
+        if fov is not None:
+            channels, fov = self._crop_channels_to_fov(channels, region, int(fov))
+        what = f"{region} · {op}" if fov is None else f"{region} fov {fov} · {op}"
+        title = f"Save a PNG of {what}"
         try:
             shape = tuple(full_res_level(channels[0].data).shape)   # metadata, no decode
             if max(int(shape[-2]), int(shape[-1])) > PNG_MAX_PX:
@@ -1200,7 +1210,8 @@ class RegionViewer(QMainWindow):
             pass
         src = getattr(self._reader, "source_id", None)
         acq = Path(str(src)).name if src else region
-        path, _ = QFileDialog.getSaveFileName(self, title, f"{acq}_{op}.png",
+        stem = f"{acq}_{op}" if fov is None else f"{acq}_{region}_fov{fov}_{op}"
+        path, _ = QFileDialog.getSaveFileName(self, title, f"{stem}.png",
                                               "PNG image (*.png)")
         if not path:
             return
@@ -1209,13 +1220,36 @@ class RegionViewer(QMainWindow):
 
         from squidxplorer._workers import _PngWorker
 
-        w = _PngWorker(channels, path, z_index=self._z_slider_index(), parent=self)
-        self._say(f"png: rendering {region} · {op} at full resolution to {path}…")
+        w = _PngWorker(channels, path, parent=self)
+        self._say(f"png: rendering {what} at full resolution to {path}…")
         _launch_worker(
             self, w, slot="_png_worker",
             on_done=self._on_png_done,
             on_problem=self._on_png_failed,
             on_finished=lambda: self._forget_png_worker(w))
+
+    def _crop_channels_to_fov(self, channels: list, region: str, fov: int) -> tuple:
+        """Crop each channel's data to one field's box, for a FOVs view's export.
+
+        Returns ``(channels, fov)``; ``fov`` comes back None when the geometry cannot
+        answer, and the caller exports the whole region under the plain name instead.
+        """
+        from squidxplorer._mosaic_source import mosaic_bbox_um
+        from squidxplorer._napari_view import pyramid_levels
+
+        box = ((getattr(self, "_fov_boxes_cache", None) or {}).get(int(fov))
+               or self._fov_boxes().get(int(fov)))
+        region_bbox = mosaic_bbox_um(self._meta or {}, region)
+        if box is None or region_bbox is None:
+            return channels, None
+        out = []
+        for c in channels:
+            levels = pyramid_levels(c.data) or [c.data]
+            cut = _crop_levels_to_bbox(levels, region_bbox, box)
+            if cut is None:
+                return channels, None
+            out.append(c._replace(data=cut[0]))
+        return out, int(fov)
 
     def _forget_png_worker(self, worker) -> None:
         if self._png_worker is worker:

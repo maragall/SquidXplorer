@@ -51,6 +51,14 @@ def load_mosaic(win, region: Optional[str]) -> None:
     if win._result_region is not None and win._result_region != str(region):
         win._drop_result_layers(f"this window moved from {win._result_region} to {region}")
     if win._shown_region != str(region):
+        # A region move rebuilds the raw layers, so the look on screen is read off FIRST;
+        # `on_plane` re-seeds each fresh layer from it. Never overwritten with an empty
+        # snapshot: mid-move the layers are already gone and the carried look must survive.
+        from squidxplorer._lut_clipboard import per_channel_luts
+
+        carried = per_channel_luts(win)
+        if carried:
+            win._carried_luts = carried
         pane.mosaic.remove_op(_RAW_OP)
     channels = [c["name"] for c in win._meta["channels"]]
     w = _MosaicWorker(win._reader, win._meta, region, channels, parent=win,
@@ -118,10 +126,16 @@ def on_plane(win, region: str, channel: str, levels, bbox_um, window=None,
         else:
             win._say("ROI does not overlap this region - showing the whole region.")
 
+    # The carried look wins over the worker's auto seed; a channel with no prior look keeps
+    # its honest per-well auto window. Ignored on a same-region reload (add_mosaic reuses).
+    carried = (getattr(win, "_carried_luts", None) or {}).get(channel) or {}
+    if carried.get("clim") is not None:
+        add_window = tuple(carried["clim"])
     pane.mosaic.add_mosaic(
         _RAW_OP, channel, add_levels,
         contrast_limits=add_window,
-        colormap=_colormap_for(channel, (win._meta or {}).get("channels")),
+        colormap=carried.get("cmap")
+        or _colormap_for(channel, (win._meta or {}).get("channels")),
         multiscale=True,
         bbox_um=add_bbox,
         z_scale_um=(win._meta or {}).get("dz_um"),
