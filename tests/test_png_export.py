@@ -49,11 +49,12 @@ def save_dialog(monkeypatch, tmp_path):
     """``QFileDialog.getSaveFileName`` answering with a path, so nothing modal blocks the run."""
     from qtpy.QtWidgets import QFileDialog
 
-    chosen = {"path": str(tmp_path / "view.png"), "calls": 0, "title": ""}
+    chosen = {"path": str(tmp_path / "view.png"), "calls": 0, "title": "", "suggested": ""}
 
     def _answer(_parent, title, *_a, **_k):
         chosen["calls"] += 1
         chosen["title"] = str(title)
+        chosen["suggested"] = str(_a[0]) if _a else ""
         return chosen["path"], ""
 
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(_answer))
@@ -193,6 +194,41 @@ def test_the_export_never_reads_a_plane_on_the_qt_thread(
     assert not on_ui, (
         f"{len(on_ui)} of {recording.reads - before} plane reads happened on the Qt thread; "
         f"the export must decode only in _PngWorker")
+    shutdown_plate_window(qapp, win)
+
+
+def test_a_fovs_view_exports_the_current_field_not_the_whole_well(
+        qapp, napari_pane_stub, tmp_path, save_dialog):
+    """The png chip in a FOVs view crops to the field on screen and names it in the file."""
+    from squidxplorer._mosaic_source import mosaic_bbox_um
+    from squidxplorer._napari_view import full_res_level, pyramid_levels
+    from squidxplorer._region_viewer import _crop_levels_to_bbox
+
+    root = tmp_path / "acq4fov"
+    _make_5d().build(root, ["A1"], n_fovs=4, nz=2, nt=1, size=64)
+    win, w = _open_window(qapp, root)
+    child = win._viewer_manager.open_child(["A1"], parent_id=w.window_id, fovs=True)
+    assert child is not None
+    assert _drain_until(
+        qapp, lambda: child._shown_region == "A1" and bool(child._fov_boxes_cache), timeout=30)
+    fov = child._fov_slider.fov
+    assert fov is not None
+    out = Path(save_dialog["path"])
+
+    child._save_png()
+    assert _drain_until(qapp, lambda: out.exists() and child._png_worker is None, timeout=60), (
+        "the PNG export never finished")
+
+    layer = child._pane.mosaic.find("raw", child._meta["channels"][0]["name"])
+    full = tuple(int(v) for v in full_res_level(layer.data).shape[-2:])
+    cut, _bbox = _crop_levels_to_bbox(pyramid_levels(layer.data),
+                                      mosaic_bbox_um(child._meta, "A1"),
+                                      child._fov_boxes_cache[int(fov)])
+    want = tuple(int(v) for v in cut[0].shape[-2:])
+    pixels = _png_pixels(out)
+    assert pixels.shape[:2] != full, "the export is still the whole well"
+    assert pixels.shape[:2] == want, f"wrote {pixels.shape[:2]}, the field's box is {want}"
+    assert save_dialog["suggested"] == f"{root.name}_A1_fov{fov}_raw.png"
     shutdown_plate_window(qapp, win)
 
 
