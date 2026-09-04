@@ -1041,7 +1041,7 @@ DESIGN) still tell its story on purpose; re-instating starts from git history, n
   CHANNELS**, not the stain LUT: the reader expands it into the same (R)/(G)/(B) components a
   real color file gets; (G) is the file's own plane, (R)/(B) are that plane times the overview
   PNG's local R/G and B/G ratio windows (`_stain.ChromaSource`, bilinear upsample, ratios
-  clipped to `_RATIO_MAX`). The LUT stays the fallback when the PNG/geometry is absent. The
+  bounded by the `_RATIO_DENOM_FLOOR` denominator floor; see the 2026-09-04 run below). The LUT stays the fallback when the PNG/geometry is absent. The
   geometry convention is MEASURED, not assumed: the mosaic yaml's `top_left_mm` is (y, x) and a
   FOV's stage position is its CENTER (verified corr 0.88 at zero offset; the corner convention
   measured 0.01). An uncovered FOV reads its own plane with ratio 1 (neutral), counted in one
@@ -1319,6 +1319,49 @@ After: 488 row/column 215/210 (the MIP's own 1.005 ratio is the scene), BF 33.5/
 transposition symmetry with a 5% row/column bound, inverted fit carried, windowed == whole
 field bit-exact). NOT done: no MATLAB run of `fstack.m` on G7 to compare against count for
 count; the s^2 carrying is the MATLAB's arithmetic by construction, not by a side-by-side.
+
+## Demo and support run (2026-09-04, branch demo-fixes-integration)
+
+Five parallel worktree branches off origin/main, one feedback item each, merged together on
+Julio's green light. The rules and facts:
+
+- **Timelapse reaches every surface** (`timelapse-t-and-units`): the three bare Shapes
+  overlays (FOV boxes, ROI, 3D frame) are labelled um through `_label_units` — one unitless
+  layer nulls napari >= 0.7's merged units and fires "Inconsistent units across layers"; the
+  plate's timepoint bar rides `_PlateSlotBox` through `_mount_overview` BOTH directions
+  (hosted and re-homed, never an orphan), hidden at n_t == 1; `verify_napari_bindings`
+  REFUSES napari >= 0.7 by name (installs from 2026-07-30 to 2026-08-18 could resolve 0.8.0,
+  the known-broken line, 066d1f4).
+- **The chroma ratio cap is a DENOMINATOR FLOOR** (`chroma-ratio-cap`, Coskun): `_RATIO_MAX`
+  (flat clip at 4.0) became `_RATIO_DENOM_FLOOR = 16.0`, ratio = R / max(G, 16). Measured:
+  dense pink tissue's true R/G reaches p99 10.5 and the cap rendered it dark purple (the
+  customer's "dark on the pink circles"); after, FOV 399 mean R/G 2.703 -> 2.962 against the
+  overview's 3.149, lost-pink 8.79% -> 1.37%, the FOV-72 hot-magenta case stays 0, and the
+  no-dense-stain LaserAF set is bit-identical. Near-black division glow stays
+  `_luminance_weight`'s job — that is why the flat cap could go.
+- **The look latches, then walks** (`validtx-export`, ValidTX): a region move carries the
+  view's live LUTs (`load_mosaic` snapshots `per_channel_luts` BEFORE `remove_op`; the auto
+  seed only touches channels with no prior user look); a FOVs view's png chip exports the
+  CURRENT FIELD ({acq}_{region}_fov{N}_{op}.png, `_crop_levels_to_bbox` on the field's box);
+  the PNG collects per CHANNEL (`MosaicLayers.top_visible_layer`, `PngChannel.z_index`), so
+  raw BF lit beside operator fluorescence exports — the screen's composite IS the export's
+  contract. The per-well batch export is deferred pending ValidTX's confirmation.
+- **3D camera snaps are IN CAMERA** (`camera-snap`): `_volume_view.snap_camera` is the app's
+  ONE writer of `camera.angles` (XY/XZ/YZ/fit chips, volume tabs only, hidden on 2D, no new
+  panels — Julio shelved the QC visualization for side-panel clunk and this deliberately adds
+  none back). A pure rotation moves neither zoom nor center, so a snap calls `refresh_bricks`
+  itself; the settle hook would never fire. The pin asserts `camera.view_direction`, never
+  the angle triple. NOT done: the GL look on a live canvas is a hand check owed (offscreen
+  has no OpenGL).
+- **The plate follows the focused view LIVE** (`plate-follow-sync`; supersedes 2026-08-06's
+  "the plate image shouldn't change unless we paste a LUT" — Julio + hongquan, 2026-09-04):
+  `_vis_sink` (the per-channel any-visible-across-ops latch `on_user_visibility` ->
+  `set_channel_visible`, last-channel guard holds, exclusive-op swaps suppressed) and
+  `_contrast_sink` (`on_user_contrast` -> `follow_channel_window`, focused view only, 120 ms
+  trailing debounce — measured ~46k events/s possible against 43.9 ms per plate recomposite).
+  Contrast only, never the manual latch or a colormap: a stain-LUT plate look survives.
+  `_apply_channel_visibility` replays saved visibility inside `programmatic()` so a
+  window-open replay never reads as a gesture.
 
 ## Agent skills
 

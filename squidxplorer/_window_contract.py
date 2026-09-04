@@ -92,6 +92,7 @@ class MosaicPlaybackWindow(Protocol):
     _retired_workers: Optional[list]
     _shown_region: Optional[str]
     _result_region: Optional[str]
+    _carried_luts: Any  # {channel: lut record} carried across a region move
 
     # -- what a load reads ------------------------------------------------------------------------
     _reader: Any

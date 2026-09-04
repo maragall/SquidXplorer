@@ -49,11 +49,12 @@ def save_dialog(monkeypatch, tmp_path):
     """``QFileDialog.getSaveFileName`` answering with a path, so nothing modal blocks the run."""
     from qtpy.QtWidgets import QFileDialog
 
-    chosen = {"path": str(tmp_path / "view.png"), "calls": 0, "title": ""}
+    chosen = {"path": str(tmp_path / "view.png"), "calls": 0, "title": "", "suggested": ""}
 
     def _answer(_parent, title, *_a, **_k):
         chosen["calls"] += 1
         chosen["title"] = str(title)
+        chosen["suggested"] = str(_a[0]) if _a else ""
         return chosen["path"], ""
 
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(_answer))
@@ -196,14 +197,82 @@ def test_the_export_never_reads_a_plane_on_the_qt_thread(
     shutdown_plate_window(qapp, win)
 
 
+def test_a_fovs_view_exports_the_current_field_not_the_whole_well(
+        qapp, napari_pane_stub, tmp_path, save_dialog):
+    """The png chip in a FOVs view crops to the field on screen and names it in the file."""
+    from squidxplorer._mosaic_source import mosaic_bbox_um
+    from squidxplorer._napari_view import full_res_level, pyramid_levels
+    from squidxplorer._region_viewer import _crop_levels_to_bbox
+
+    root = tmp_path / "acq4fov"
+    _make_5d().build(root, ["A1"], n_fovs=4, nz=2, nt=1, size=64)
+    win, w = _open_window(qapp, root)
+    child = win._viewer_manager.open_child(["A1"], parent_id=w.window_id, fovs=True)
+    assert child is not None
+    assert _drain_until(
+        qapp, lambda: child._shown_region == "A1" and bool(child._fov_boxes_cache), timeout=30)
+    fov = child._fov_slider.fov
+    assert fov is not None
+    out = Path(save_dialog["path"])
+
+    child._save_png()
+    assert _drain_until(qapp, lambda: out.exists() and child._png_worker is None, timeout=60), (
+        "the PNG export never finished")
+
+    layer = child._pane.mosaic.find("raw", child._meta["channels"][0]["name"])
+    full = tuple(int(v) for v in full_res_level(layer.data).shape[-2:])
+    cut, _bbox = _crop_levels_to_bbox(pyramid_levels(layer.data),
+                                      mosaic_bbox_um(child._meta, "A1"),
+                                      child._fov_boxes_cache[int(fov)])
+    want = tuple(int(v) for v in cut[0].shape[-2:])
+    pixels = _png_pixels(out)
+    assert pixels.shape[:2] != full, "the export is still the whole well"
+    assert pixels.shape[:2] == want, f"wrote {pixels.shape[:2]}, the field's box is {want}"
+    assert save_dialog["suggested"] == f"{root.name}_A1_fov{fov}_raw.png"
+    shutdown_plate_window(qapp, win)
+
+
 def test_the_renderer_caps_the_long_side_and_says_so_in_its_step():
     """Qt-free: a plane over the cap is decimated to fit, and the step reports the clip."""
     plane = (np.arange(100 * 40, dtype=np.uint16) % 251).reshape(100, 40)
-    ch = PngChannel("DAPI", plane, (0.0, 250.0), (0, 0, 255))
+    ch = PngChannel("DAPI", plane, (0.0, 250.0), (0, 0, 255), z_index=0)
 
-    rgb, step = render_view_png([ch], z_index=0, max_px=40)
+    rgb, step = render_view_png([ch], max_px=40)
 
     assert step == 3, f"ceil(100 / 40) is 3, got {step}"
     assert rgb.shape == (34, 14, 3), f"decimated shape is {rgb.shape}"
-    native, step1 = render_view_png([ch], z_index=0, max_px=PNG_MAX_PX)
+    native, step1 = render_view_png([ch], max_px=PNG_MAX_PX)
     assert step1 == 1 and native.shape == (100, 40, 3)
+
+
+def test_a_mixed_scene_exports_every_visible_channel_not_one_op(
+        qapp, napari_pane_stub, five_d_root, save_dialog):
+    """Raw lit on one channel beside an operator result on the other, which is what the
+    screen composites (the one-lit-op rule is per channel): the PNG equals that composite.
+    The old one-op walk silently dropped the raw channel from the export."""
+    win, w = _open_window(qapp, five_d_root)
+    _drain_until(qapp, lambda: len(w._pane._viewer.layers) >= 2, timeout=20)
+    names = [c["name"] for c in w._meta["channels"]]
+    mosaic = w._pane.mosaic
+
+    raw0 = mosaic.find("raw", names[0])
+    result = (np.asarray(_full_res_plane(raw0.data, 0)) // 2 + 7).astype(np.uint16)
+    mosaic.add_mosaic("blur", names[1], result, contrast_limits=(5.0, 99.0))
+    assert mosaic.top_visible_layer(names[0]) is raw0, "raw must stay lit on its own channel"
+    assert mosaic.visible_op() == "blur"
+    out = Path(save_dialog["path"])
+
+    w._save_png()
+    assert _drain_until(qapp, lambda: out.exists() and w._png_worker is None, timeout=60), (
+        "the PNG export never finished")
+
+    blur = mosaic.find("blur", names[1])
+    z = w._z_slider_index()
+    p0 = np.asarray(_full_res_plane(raw0.data, z))
+    p1 = np.asarray(_full_res_plane(blur.data, z))
+    expected = composite(
+        np.stack([p0, p1]),
+        np.stack([_rgb01(raw0), _rgb01(blur)]),
+        [tuple(float(v) for v in raw0.contrast_limits), (5.0, 99.0)])
+    np.testing.assert_array_equal(_png_pixels(out), expected)
+    shutdown_plate_window(qapp, win)

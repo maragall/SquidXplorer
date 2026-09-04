@@ -280,9 +280,6 @@ class RegionViewer(QMainWindow):
     """ONE independent napari window over a subset of regions."""
 
     closed = Signal(object)
-    #: A LUT paste landed on this window's layers. The plate connects (windowOpened →
-    #: `_bind_window_contrast`) and follows the pasted windows — the ONE event that moves the
-    #: plate's contrast (Julio: "the plate image shouldn't change unless we paste a LUT").
     regionsChanged = Signal(object)   # emits self: this window ADOPTED a region it was not opened
     #                                   over, so anything that published its region set — the
     #                                   navigator row, the plate's per-view wash — is now stale.
@@ -668,6 +665,21 @@ class RegionViewer(QMainWindow):
             self._chip("→ window", "Open the drawn ROIs as child views.", self._open_roi_children),
             self._btn_focus, self._btn_record, self._btn_png,
         ]
+        # 3D camera snaps, IN CAMERA (no panels: the grid is the whole UI): three axis
+        # planes plus a refit. Hidden on a 2D tab; `note_volume_tab` shows them.
+        self._snap_chips = [
+            self._chip("XY", "Snap the 3D camera to the XY plane (top view).",
+                       lambda: _volume_view.snap_camera(self, "xy")),
+            self._chip("XZ", "Snap the 3D camera to the XZ plane.",
+                       lambda: _volume_view.snap_camera(self, "xz")),
+            self._chip("YZ", "Snap the 3D camera to the YZ plane.",
+                       lambda: _volume_view.snap_camera(self, "yz")),
+            self._chip("fit", "Refit the volume to the canvas; the angles stay.",
+                       lambda: _volume_view.snap_camera(self, "fit")),
+        ]
+        for chip in self._snap_chips:
+            chip.setVisible(self._is_volume_tab)
+        chips += self._snap_chips
         for k, chip in enumerate(chips):
             chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             grid.addWidget(chip, k // 3, k % 3)
@@ -697,6 +709,9 @@ class RegionViewer(QMainWindow):
         if btn is not None and _alive(btn):
             btn.setEnabled(False)
             btn.setToolTip("This tab is the 3D view; close it to go back to 2D.")
+        for chip in getattr(self, "_snap_chips", ()):
+            if _alive(chip):
+                chip.setVisible(True)
 
     _AT_DEFAULTS_QSS = "color:#8b949e;font-size:10px;border:none;"
     _PROGRESS_QSS = (
@@ -1158,22 +1173,32 @@ class RegionViewer(QMainWindow):
 
         from squidxplorer._napari_view import colormap_hue_rgb, colormap_mid_rgb, full_res_level
 
+        z_now = self._z_slider_index()
         channels = []
         for c in (self._meta or {}).get("channels", []):
-            layer = mosaic.find(op, c["name"])
-            if layer is None or not bool(getattr(layer, "visible", False)):
+            # Per CHANNEL, the topmost VISIBLE layer: the one-lit-op rule is per channel, so
+            # the screen legitimately composites raw beside a result. One op's walk here
+            # silently dropped the raw channels of a mixed scene from the export.
+            layer = mosaic.top_visible_layer(c["name"])
+            if layer is None:
                 continue
             clim = getattr(layer, "contrast_limits", None)
             if clim is None:                      # a labels layer has no contrast window
                 continue
             rgb = colormap_hue_rgb(layer) or colormap_mid_rgb(layer) or (255, 255, 255)
-            channels.append(PngChannel(c["name"], layer.data, tuple(clim), tuple(rgb)))
+            channels.append(PngChannel(c["name"], layer.data, tuple(clim), tuple(rgb),
+                                       z_index=z_now))
         if not channels:
-            self._say(f"png: the {op} layer has no visible intensity channel to export.")
+            self._say("png: no visible intensity channel to export.")
             return
 
         region = self.current_region()
-        title = f"Save a PNG of {region} · {op}"
+        # A FOVs view exports the FIELD on screen, not the whole well its camera sits over.
+        fov = self._fov_slider.fov if (self._fov_mode and self._fov_slider is not None) else None
+        if fov is not None:
+            channels, fov = self._crop_channels_to_fov(channels, region, int(fov))
+        what = f"{region} · {op}" if fov is None else f"{region} fov {fov} · {op}"
+        title = f"Save a PNG of {what}"
         try:
             shape = tuple(full_res_level(channels[0].data).shape)   # metadata, no decode
             if max(int(shape[-2]), int(shape[-1])) > PNG_MAX_PX:
@@ -1182,7 +1207,8 @@ class RegionViewer(QMainWindow):
             pass
         src = getattr(self._reader, "source_id", None)
         acq = Path(str(src)).name if src else region
-        path, _ = QFileDialog.getSaveFileName(self, title, f"{acq}_{op}.png",
+        stem = f"{acq}_{op}" if fov is None else f"{acq}_{region}_fov{fov}_{op}"
+        path, _ = QFileDialog.getSaveFileName(self, title, f"{stem}.png",
                                               "PNG image (*.png)")
         if not path:
             return
@@ -1191,13 +1217,36 @@ class RegionViewer(QMainWindow):
 
         from squidxplorer._workers import _PngWorker
 
-        w = _PngWorker(channels, path, z_index=self._z_slider_index(), parent=self)
-        self._say(f"png: rendering {region} · {op} at full resolution to {path}…")
+        w = _PngWorker(channels, path, parent=self)
+        self._say(f"png: rendering {what} at full resolution to {path}…")
         _launch_worker(
             self, w, slot="_png_worker",
             on_done=self._on_png_done,
             on_problem=self._on_png_failed,
             on_finished=lambda: self._forget_png_worker(w))
+
+    def _crop_channels_to_fov(self, channels: list, region: str, fov: int) -> tuple:
+        """Crop each channel's data to one field's box, for a FOVs view's export.
+
+        Returns ``(channels, fov)``; ``fov`` comes back None when the geometry cannot
+        answer, and the caller exports the whole region under the plain name instead.
+        """
+        from squidxplorer._mosaic_source import mosaic_bbox_um
+        from squidxplorer._napari_view import pyramid_levels
+
+        box = ((getattr(self, "_fov_boxes_cache", None) or {}).get(int(fov))
+               or self._fov_boxes().get(int(fov)))
+        region_bbox = mosaic_bbox_um(self._meta or {}, region)
+        if box is None or region_bbox is None:
+            return channels, None
+        out = []
+        for c in channels:
+            levels = pyramid_levels(c.data) or [c.data]
+            cut = _crop_levels_to_bbox(levels, region_bbox, box)
+            if cut is None:
+                return channels, None
+            out.append(c._replace(data=cut[0]))
+        return out, int(fov)
 
     def _forget_png_worker(self, worker) -> None:
         if self._png_worker is worker:
@@ -1792,6 +1841,8 @@ class RegionViewer(QMainWindow):
                 layer = v.add_shapes(name="FOVs", face_color="transparent",
                                      edge_color=self._FOV_EDGE_IDLE)
                 layer.editable = False
+                from squidxplorer._napari_view import MosaicLayers
+                MosaicLayers._label_units(layer)     # stage um: napari >= 0.7 nulls mixed units
             except Exception as exc:                     # noqa: BLE001 - named, never fatal
                 self._say(f"could not draw the FOV boxes ({type(exc).__name__}: {exc}).")
                 return v, None
@@ -2053,11 +2104,12 @@ class RegionViewer(QMainWindow):
         mosaic = getattr(pane, "mosaic", None) if pane is not None else None
         if mosaic is None:
             return
-        for name, on in (visibility or {}).items():
-            try:
-                mosaic.set_channel_visible(str(name), bool(on))
-            except Exception:                            # noqa: BLE001 - a missing channel is skipped
-                pass
+        with mosaic.programmatic():
+            for name, on in (visibility or {}).items():
+                try:
+                    mosaic.set_channel_visible(str(name), bool(on))
+                except Exception:                        # noqa: BLE001 - a missing channel is skipped
+                    pass
 
     def _apply_settings_once(self) -> None:
         """Put this window's settings on screen, ONCE, now that its layers exist."""

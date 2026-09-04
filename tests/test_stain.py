@@ -132,6 +132,21 @@ def test_a_uniformly_scaled_window_keeps_the_full_ratio(tmp_path):
     assert np.array_equal(out_b, np.full((16, 16), 40, np.uint8))            # 80 * 0.5
 
 
+def test_a_dense_stain_ratio_survives_while_a_near_black_denominator_stays_bounded(tmp_path):
+    """A true R/G of 6 measured at adequate PNG luminance reaches the display (the old flat cap
+    at 4 rendered dense pink tissue dark purple, measured 1.9% of the 20x trichrome set), while
+    a near-black denominator's raw ratio (250/3 = 83) stays bounded by the denominator floor."""
+    png = np.zeros((30, 30, 3), np.uint8)
+    png[:, :12, 0], png[:, :12, 1] = 192, 32   # dense stain: R/G 6.0, bright denominator
+    png[:, 12:, 0], png[:, 12:, 1] = 250, 3    # near-black denominator: raw R/G 83
+    src = _chroma_source(tmp_path, png)
+    plane = np.zeros((16, 16), np.uint8)       # plane == PNG G: gain 1, full trust everywhere
+    plane[:, :5], plane[:, 5:] = 32, 3
+    out_r = src.component_plane(plane, 0, "manual", 0, 30.0, 30.0, 2.0)
+    assert np.array_equal(out_r[:, :5], np.full((16, 5), 192, np.uint8))     # 32 * 6.0, > old 4
+    assert np.array_equal(out_r[:, 5:], np.full((16, 11), 47, np.uint8))     # 3 * 250/16, not 250
+
+
 # --- Ownership-aware ratios --------------------------------------------------------------------
 #
 # The overview PNG is written tile over tile, later overwrites earlier: in an FOV's overlap

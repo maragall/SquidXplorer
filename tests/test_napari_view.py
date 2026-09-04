@@ -1739,3 +1739,19 @@ def test_a_timepoint_reload_does_not_relight_raw_over_a_lit_result(layers):
 
     assert raw.visible is False, "a timepoint step relit raw over the operator the user chose"
     assert layers.find("mip", "BF").visible is True
+
+
+def test_binding_check_refuses_the_napari_07_line():
+    """Installs from 2026-07-30 to 2026-08-18 could resolve napari 0.8.0, the known-broken
+    line (pin re-tightened in 066d1f4); the check names itself and refuses."""
+
+    class _Modern:
+        __version__ = "0.8.0"
+
+    with pytest.raises(NapariBindingError) as exc:
+        verify_napari_bindings(modules={"napari": _Modern})
+
+    msg = str(exc.value)
+    assert "verify_napari_bindings" in msg
+    assert "0.8.0" in msg
+    assert "066d1f4" in msg
