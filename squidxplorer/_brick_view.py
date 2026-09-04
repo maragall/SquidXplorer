@@ -191,6 +191,10 @@ class BrickedVolume:
         self._loader.start()
         self.refresh(force=True)
 
+    def frame(self) -> None:
+        """Re-point the camera at this volume's own box: the snap chips' "fit"."""
+        self._frame_camera()
+
     def _frame_camera(self) -> None:
         """Point the camera at this ROI and zoom so the whole box fits the canvas.
 
@@ -220,8 +224,11 @@ class BrickedVolume:
         w_um = (c1 - c0) * self._scale[2]
         try:
             canvas_hw = tuple(float(v) for v in self._viewer.window._qt_viewer.canvas.size)
-        except Exception:                               # noqa: BLE001 - no canvas: leave the camera
-            return
+        except Exception:                               # noqa: BLE001 - a bare ViewerModel
+            # No Qt window: `frame_bbox_um`'s canvas source, so headless framing is real.
+            canvas_hw = getattr(self._viewer, "_canvas_size", None)
+            if canvas_hw is None:
+                return                                  # no canvas at all: leave the camera
         try:
             # `camera_for_bbox_um` takes (x0, y0, x1, y1) and returns the 2D centre; the z centre
             # is this view's own and napari needs all three in 3D, so only the zoom and the y/x
