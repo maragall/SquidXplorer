@@ -280,9 +280,6 @@ class RegionViewer(QMainWindow):
     """ONE independent napari window over a subset of regions."""
 
     closed = Signal(object)
-    #: A LUT paste landed on this window's layers. The plate connects (windowOpened →
-    #: `_bind_window_contrast`) and follows the pasted windows — the ONE event that moves the
-    #: plate's contrast (Julio: "the plate image shouldn't change unless we paste a LUT").
     regionsChanged = Signal(object)   # emits self: this window ADOPTED a region it was not opened
     #                                   over, so anything that published its region set — the
     #                                   navigator row, the plate's per-view wash — is now stale.
@@ -2107,11 +2104,12 @@ class RegionViewer(QMainWindow):
         mosaic = getattr(pane, "mosaic", None) if pane is not None else None
         if mosaic is None:
             return
-        for name, on in (visibility or {}).items():
-            try:
-                mosaic.set_channel_visible(str(name), bool(on))
-            except Exception:                            # noqa: BLE001 - a missing channel is skipped
-                pass
+        with mosaic.programmatic():
+            for name, on in (visibility or {}).items():
+                try:
+                    mosaic.set_channel_visible(str(name), bool(on))
+                except Exception:                        # noqa: BLE001 - a missing channel is skipped
+                    pass
 
     def _apply_settings_once(self) -> None:
         """Put this window's settings on screen, ONCE, now that its layers exist."""
