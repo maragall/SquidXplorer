@@ -338,6 +338,12 @@ class PlateWindow(QMainWindow):
         # are skipped, see _bind_window_contrast.
         self._followed_windows: set = set()
         self._viewer_manager.windowOpened.connect(self._bind_window_contrast)
+        # Live window->plate contrast follow, coalesced: a drag emits per mouse move and the
+        # plate repaints once, CONTRAST_FOLLOW_MS after the drag settles.
+        self._pending_follow: dict = {}
+        self._follow_timer = QTimer(self)
+        self._follow_timer.setSingleShot(True)
+        self._follow_timer.timeout.connect(self._flush_window_contrast)
 
         # File menu: a reliable "Open acquisition folder" (drag-drop can be blocked on Windows by the
         # GL child pane or an elevation mismatch, so this is the always-works path).
@@ -570,8 +576,7 @@ class PlateWindow(QMainWindow):
         # NO SELECTION BAR (2026-08-19, Julio's mock: "move rest, top row"). The selection caption
         # lives in the STATUS BAR at the bottom; Select all is a View-menu action (and the plate's
         # own Cmd/Ctrl-A, `PlateOverview.keyPressEvent`). The PLATE grows no LUT pair of its own;
-        # the window-side clipboard is two buttons in each view's left column, and the plate
-        # follows a PASTE and only a paste (`_bind_window_contrast` / `_follow_window_luts`).
+        # it follows the focused view's contrast live (`_bind_window_contrast`).
         _sel_cap = QLabel("Selection:")
         _sel_cap.setStyleSheet("color:#8b98ad;font-size:12px;border:none;")
         self._selection_label = QLabel("none - click wells, or Select all")
@@ -2130,23 +2135,21 @@ class PlateWindow(QMainWindow):
         if wid in bound:
             return          # subscribe ONCE per window: MosaicLayers keeps a list of callbacks
 
-        # THE PLATE FOLLOWS A PASTE, AND ONLY A PASTE (2026-08-19).
+        # THE PLATE FOLLOWS THE FOCUSED VIEW'S CONTRAST, LIVE (2026-09-04, Julio + hongquan).
         #
-        # History, because this seam has flipped twice: the 2026-08-06 shelving deleted the
-        # three per-channel LIVE subscriptions (contrast, eye icons, colormap) — "last gestured
-        # in" was a history with no surface, and the plate could go dark with nothing on screen
-        # having changed. Julio then: *"the plate image shouldn't change unless we paste a
-        # LUT."* The copy/paste pair itself was shelved 2026-08-19, and the same day he asked
-        # for the minimum back: two buttons, and "make sure that we don't have the issue where
-        # we copy luts and plate contrast is different from the window contrast."
-        #
-        # Both sentences hold at once only if the PASTE is the one event the plate hears: a
-        # slider drag still reaches the plate NOT AT ALL (pinned by
-        # test_a_gesture_in_a_window_leaves_the_plate_alone), and after a paste the plate's
-        # channel windows equal the pasted window's, through the FOLLOW path — never the manual
-        # latch, and never a plate write from the window's side. Contrast only: a stain-LUT
-        # channel's plate look must remain the LUT rendering after a paste, so no colormap and
-        # no eye icons travel.
+        # Supersedes 2026-08-06's "the plate image shouldn't change unless we paste a LUT":
+        # the paste trigger was shelved 2026-08-25 and left this sink dormant. A drag FLOODS
+        # (measured ~46000 events/s through the fan-out, against a 44 ms plate repaint), so
+        # the sink queues and a trailing CONTRAST_FOLLOW_MS debounce repaints once the drag
+        # settles, under the plate's own 150 ms full-res pass. FOLLOW path only: never the
+        # manual latch, and no colormap travels, so a stain-LUT plate look survives. The
+        # focused view only, through ViewerManager.active_view.
+        def _contrast_sink(channel: str, lo: float, hi: float, _win=win):
+            av = self._viewer_manager.active_view()
+            if av is not None and av is not _win:
+                return          # the plate follows the FOCUSED view only
+            self._queue_window_contrast(str(channel), float(lo), float(hi))
+
         # `on_user_op` is KEPT for its own reason: which processing LAYER the plate draws is a
         # different quantity from how it is windowed, and it has exactly one honest answer.
 
@@ -2159,29 +2162,77 @@ class PlateWindow(QMainWindow):
         def _op_sink(op: str, on: bool):
             self._follow_window_layer(str(op), bool(on))
 
+        # ...and the CHANNEL's eye (2026-09-04, Julio + hongquan): the same latch one level
+        # down. `on_user_visibility` answers any-visible ACROSS ops, so an exclusive-op swap
+        # never reads as channel-off (pinned in tests/test_napari_view.py), and only a moved
+        # answer arrives here; programmatic writes are filtered at the source.
+        def _vis_sink(channel: str, on: bool):
+            self._follow_window_channel(str(channel), bool(on))
+
         sub = getattr(mosaic, "on_user_op", None)            # same slot-abort hazard as above
         if callable(sub):
             sub(_op_sink)
+        sub = getattr(mosaic, "on_user_visibility", None)
+        if callable(sub):
+            sub(_vis_sink)
+        sub = getattr(mosaic, "on_user_contrast", None)
+        if callable(sub):
+            sub(_contrast_sink)
         bound.add(wid)
 
-    def _follow_window_contrast(self, channel: str, lo: float, hi: float) -> None:
-        """The plate takes ONE channel's resolved window from a view, through the FOLLOW path.
-
-        Name-to-index happens here, once: the overview counts channels by position in the
-        acquisition's own list. `follow_channel_window`, never `set_channel_window` — following
-        must not latch the channel manual (see `_bind_window_contrast`).
-        """
-        ov = getattr(self, "_overview", None)
-        if ov is None or self._meta is None:
-            return
-        for i, entry in enumerate(self._meta.get("channels") or []):
+    def _channel_index(self, channel: str):
+        """Name-to-index, once: the overview counts channels by position in the acquisition's list."""
+        for i, entry in enumerate((self._meta or {}).get("channels") or []):
             get = getattr(entry, "get", None)
             if get is None:
                 continue
             if str(get("name")) == str(channel) \
                     or str(get("display_name") or "") == str(channel):
-                ov.follow_channel_window(int(i), float(lo), float(hi))
-                return
+                return int(i)
+        return None
+
+    def _follow_window_contrast(self, channel: str, lo: float, hi: float) -> None:
+        """The plate takes ONE channel's resolved window from a view, through the FOLLOW path.
+
+        `follow_channel_window`, never `set_channel_window`: following must not latch the
+        channel manual (see `_bind_window_contrast`).
+        """
+        ov = getattr(self, "_overview", None)
+        if ov is None or self._meta is None:
+            return
+        i = self._channel_index(channel)
+        if i is not None:
+            ov.follow_channel_window(i, float(lo), float(hi))
+
+    #: Trailing debounce for the live contrast follow, ms. Measured 2026-09-04: the layer
+    #: fan-out can emit ~46000 events/s (22 us each) while one plate follow repaint costs
+    #: 44 ms, so the plate repaints when the drag settles, under its own 150 ms full-res pass.
+    CONTRAST_FOLLOW_MS = 120
+
+    def _queue_window_contrast(self, channel: str, lo: float, hi: float) -> None:
+        """Coalesce a drag's flood: keep the LAST window per channel, repaint on settle."""
+        self._pending_follow[channel] = (float(lo), float(hi))
+        self._follow_timer.start(self.CONTRAST_FOLLOW_MS)
+
+    def _flush_window_contrast(self) -> None:
+        pending, self._pending_follow = self._pending_follow, {}
+        for ch, (lo, hi) in pending.items():
+            self._follow_window_contrast(ch, lo, hi)
+
+    def _follow_window_channel(self, channel: str, on: bool) -> None:
+        """A window showed or hid a CHANNEL (any layer, any op): the plate composites the same set.
+
+        Lands on `set_channel_visible`, whose last-channel guard keeps the plate a navigator;
+        a channel this plate does not carry is ignored at debug, like `_follow_window_layer`.
+        """
+        ov = getattr(self, "_overview", None)
+        if ov is None or self._meta is None:
+            return
+        i = self._channel_index(channel)
+        if i is None:
+            log.debug("window channel %r has no plate channel to follow", channel)
+            return
+        ov.set_channel_visible(i, bool(on))
 
     def _follow_window_layer(self, layer_key: str, on: bool) -> None:
         """A window showed or hid a processing layer: put the plate on the same one.
