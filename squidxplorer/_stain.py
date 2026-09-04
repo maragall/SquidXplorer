@@ -195,8 +195,10 @@ def attach_stain_luts(root, channels: list, rgb_bases: set) -> None:
 # ratios over that FOV. Additive blending of the three then reconstructs the mosaic's own color
 # at the file's full resolution and luminance.
 
-#: Chroma ratio ceiling; stain hues live well inside it, and a division artifact must not glow.
-_RATIO_MAX = 4.0
+#: Ratio denominator floor in PNG counts; a dim denominator rolls the ratio off (bounded at
+#: 255/16) instead of flat-capping dense stain, whose true R/G runs past 10 (measured p99 10.5
+#: on the 20x trichrome set); division glow on near-black PNG is _luminance_weight's job.
+_RATIO_DENOM_FLOOR = 16.0
 #: PNG green at/below this is unwritten mosaic area, not tissue: ratio stays neutral there.
 _CHROMA_G_FLOOR = 2.0
 #: Per-FOV ratio windows kept in memory (each ~2.6 MB at 2 um over a 1900 px frame).
@@ -529,11 +531,9 @@ class ChromaSource:
             crop = self._image()[ra:rb, ca:cb].astype(np.float32)
             g = crop[..., 1]
             usable = g > _CHROMA_G_FLOOR           # near-black PNG is unwritten, not tissue
-            with np.errstate(divide="ignore", invalid="ignore"):
-                ratio_r = np.clip(np.where(usable, crop[..., 0] / np.maximum(g, 1.0), 1.0),
-                                  0.0, _RATIO_MAX)
-                ratio_b = np.clip(np.where(usable, crop[..., 2] / np.maximum(g, 1.0), 1.0),
-                                  0.0, _RATIO_MAX)
+            denom = np.maximum(g, _RATIO_DENOM_FLOOR)
+            ratio_r = np.where(usable, crop[..., 0] / denom, 1.0)
+            ratio_b = np.where(usable, crop[..., 2] / denom, 1.0)
             fb_r = np.ones_like(ratio_r)
             fb_b = np.ones_like(ratio_b)
             fb_g = g.astype(np.float32).copy()
