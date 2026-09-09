@@ -222,14 +222,46 @@ def hide_native_rows(controls_widget) -> "list[str]":
 def fit_controls_container(container) -> None:
     """Cap napari's layer-controls container at its CURRENT page's need. The container is
     a QStackedWidget whose hint is its TALLEST page (an Image form, 289 px measured), so a
-    Shapes page - or a dieted Image page - sat over a blank band."""
+    Shapes page - or a dieted Image page - sat over a blank band.
+
+    The no-selection placeholder (a bare QFrame, invalid hint) keeps the PREVIOUS cap:
+    capping on it collapsed the whole block to 1 px, and a group click in the layer tree
+    (a multi-select, active None) or deleting the selected layer parks the stack there."""
     current = container.currentWidget() if hasattr(container, "currentWidget") else None
     if current is None:
         return
     lay = current.layout()
     if lay is not None:
         lay.activate()
-    container.setMaximumHeight(max(1, int(current.sizeHint().height())))
+    hint = int(current.sizeHint().height())
+    if hint <= 0:
+        return
+    container.setMaximumHeight(hint)
+
+
+def follow_controls_pages(container, dims=None) -> Callable[[int], None]:
+    """Keep the row diet and the height cap on whatever page napari shows: refit on the
+    stack's own ``currentChanged`` (new layers get fresh controls widgets) AND on a 2D/3D
+    flip, which regrows the CURRENT page in place (its 3D rows appear, 137 -> 193 px
+    measured) without any ``currentChanged``. Returns the refit slot."""
+
+    def refit(index=None) -> None:
+        try:
+            i = container.currentIndex() if index is None else int(index)
+            hide_native_rows(container.widget(i))
+            fit_controls_container(container)
+        except Exception:                        # noqa: BLE001 - cosmetic, never fatal
+            pass
+
+    container.currentChanged.connect(refit)
+    if dims is not None:
+        try:
+            # The container updates its pages' rows on this same event, connected at its
+            # own construction, so it runs first and refit measures the new rows.
+            dims.events.ndisplay.connect(lambda event=None: refit())
+        except Exception:                        # noqa: BLE001 - cosmetic, never fatal
+            pass
+    return refit
 
 
 def slim_dock_title(dock) -> None:
@@ -505,7 +537,7 @@ class MosaicPane(QWidget):
         if container is not None:
             try:
                 widgets = [container.widget(i) for i in range(container.count())]
-                container.currentChanged.connect(self._diet_current_controls)
+                self._refit_controls = follow_controls_pages(container, self._viewer.dims)
             except Exception as exc:             # noqa: BLE001 - degrade to the one-shot pass
                 get_logger("napari_pane").debug(
                     "layer-controls diet cannot follow new layers (%s).", exc)
@@ -529,18 +561,6 @@ class MosaicPane(QWidget):
                 pass
         get_logger("napari_pane").debug(
             "napari chrome minimized: %s", ", ".join(self.native_chrome_hidden) or "nothing")
-
-    def _diet_current_controls(self, index: int) -> None:
-        """Apply the row diet to the controls widget napari just switched to (new layers
-        get fresh controls widgets; this keeps the diet on all of them)."""
-        container = getattr(self, "_controls_container", None)
-        if container is None:
-            return
-        try:
-            hide_native_rows(container.widget(int(index)))
-            fit_controls_container(container)
-        except Exception:                        # noqa: BLE001 - cosmetic, never fatal
-            pass
 
     def native_column_widgets(self):
         """napari's layer-controls container and the app's layer tree, taken OUT of their
