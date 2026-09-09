@@ -37,11 +37,8 @@ GUI_MODULES = frozenset({
     "_fov_nav",          # the FOV axis: napari's dims slider walking a region's fields with the
                           # CAMERA. Where a FOV is lives in `_mosaic_source.mosaic_fov_bboxes_um`,
                           # what framing one means in `_napari_view.camera_for_bbox_um` — Qt-free.
-    "_iter_nav",         # the decon iteration axis: the same dims-slider family as `_fov_nav`,
-                          # stepping held MIP planes. What a capture IS lives in `_decon`'s
-                          # Qt-free store; this module is only the bar.
-    "_decon_qc",         # the iteration QC WINDOW (tri-MIP panels, `_iter_nav`'s slider) and
-                          # its solve worker; the captures themselves live in `_decon`, Qt-free.
+    "_decon_qc",         # the iteration QC deck TAB (tri-MIP layers, use-k bar) and its
+                          # solve worker; the captures themselves live in `_decon`, Qt-free.
     "_logpanel",         # the log PANEL (the Qt widget). `_logpane`, no 'l', is the Qt-free bus.
     "_napari_pane",
     "_op_panels",
@@ -73,13 +70,7 @@ def _is_napari_module(stem: str) -> bool:
 #: without the facade becoming a copy of napari's private layout. Both imports are inside function
 #: bodies, so neither makes napari a load-time dependency; delete an entry if it stops applying,
 #: and do not add a third without saying why here.
-NAPARI_EXCEPTIONS = frozenset({
-    "_layer_tree", "_region_nav",
-    # _decon_qc renders its MIP panels under napari's OWN gray/turbo colormaps
-    # (ensure_colormap, inside a function body) without owning a viewer; the `_napari_*`
-    # facades carry no colormap-to-RGBA helper and are outside the QC change's file set.
-    "_decon_qc",
-})
+NAPARI_EXCEPTIONS = frozenset({"_layer_tree", "_region_nav"})
 
 #: The modules lifted out of ``_viewer.py``, and what each may lift out of the others. `_viewer` is
 #: absent from every value on purpose: that absence is the property under test.

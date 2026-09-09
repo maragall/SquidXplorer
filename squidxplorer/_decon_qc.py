@@ -1,22 +1,24 @@
-"""The decon iteration QC window: tri-MIP inspection over ONE solve.
+"""The decon iteration QC: tri-MIP layers in a DECK TAB, iteration as a dims axis.
 
 Julio, 2026-09-09, verbatim: "For looking at iterations we look at the mip only. So a mip
-is part of the computation. Then when we choose the iterations after the previewing, we
-run it on the whole stack. This means that there should be a button in the decon UI that
-opens another window with the MIP, and the turbo colormap togle, and the xy and xz yz
-bands by it's side, and then with the iterations slider. Then there's the preview button
-that actually runs it on the whole stack and you can see the rsults in 3D. But the MIP is
-more than enough for QC."
+is part of the computation. ... But the MIP is more than enough for QC." And the
+correction that shaped this module: "It should be a tab in the napari GUI. You leverage
+napari layers, decon sliders, the mip is just a 2d view of the ROI. You're not leveraging
+the GUI capabilities and you added some sepparate window code."
 
-Reinstated in spirit from the shelved ``DeconQCResultView`` (bf982a2^): one solve captures
-every iteration, a stepper revisits them for free, and "use k iterations" adopts the
-DISPLAYED count into the run's own parameter. The layout is the new spec: the XY MIP
-large, the XZ band below it and the YZ band beside it (both z-scaled by dz/pixel so the
-bands are geometrically honest), ``_iter_nav``'s slider (turbo rides its bar), one channel
-at a time through a combo. The QC solve is scoped EXACTLY like a Preview: the ROI window
-plus the operator's halo when one is drawn, the in-view region's centre field otherwise,
-every channel. A real separate window, on purpose; the one-column rule binds the view,
-not this.
+So the QC surface RIDES THE APP: the inspect button runs one Preview-scoped solve
+capturing every iteration's three max-projections (XY, XZ, YZ), then opens an ROI child
+view through the ordinary ``open_child`` deck machinery and adds the captures as REAL
+napari layers with the iteration count as dims AXIS 0 - napari's own bottom slider steps
+k for every layer at once (its Dims owns the index; a second wrapped slider would be the
+two-owner hand-sync ``_fov_nav``'s notes exist to forbid, so the native slider won). Per
+channel the three projections are three layers ADOPTED under ONE identity, so the layer
+tree's channel checkbox, the contrast controls and the colormap dropdown (turbo lives
+there) drive all three through the identity mirror; contrast is seeded once from the
+final iteration's window and napari owns it after that. The bands are placed by layer
+``translate`` and z-scaled by dz through their own ``scale`` - no resampling: the YZ band
+sits beside the XY MIP (transposed so y aligns), the XZ band below it. One small bottom
+bar carries "use iteration k", which writes the decon panel's own spin.
 """
 
 from __future__ import annotations
@@ -25,30 +27,21 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from qtpy.QtCore import Qt, QThread, Signal
-from qtpy.QtWidgets import (
-    QComboBox,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
-)
+from qtpy.QtCore import QThread, Signal
 
 from squidxplorer._logpane import get_logger
 
 log = get_logger("decon.qc")
 
-#: The XY panel's display budget on its long side; the bands share its scale.
-XY_MAX_PX = 640
+#: The identity every QC layer is adopted under (three layers per channel, one identity).
+QC_OP = "decon QC"
 
-#: The latched contrast window: percentiles of the FINAL iteration's XY MIP, one window
-#: per channel for the whole inspection. Per-k windows would normalise away the very
-#: change being inspected (the movie's latch rule).
+#: The contrast seed: percentiles of the FINAL iteration's XY MIP, per channel, set once
+#: as add-time contrast_limits; napari's own controls take over from there.
 CONTRAST_PCT = (1.0, 99.9)
 
-PROJECTIONS = ("xy", "xz", "yz")
+#: Gap between the MIP and its bands, in acquisition pixels.
+GAP_PX = 8
 
 
 class QCWorker(QThread):
@@ -83,146 +76,6 @@ def run_qc_solve(reader, region, fov, window, op, time_point) -> None:
         arm_capture(False)
 
 
-def _rgba(arr: np.ndarray, lo: float, hi: float, turbo: bool) -> np.ndarray:
-    """8-bit RGBA of *arr* under the latched window, gray or napari's own turbo."""
-    from napari.utils.colormaps import ensure_colormap
-
-    span = float(hi - lo) or 1.0
-    normed = np.clip((arr.astype(np.float32) - float(lo)) / span, 0.0, 1.0)
-    cmap = ensure_colormap("turbo" if turbo else "gray")
-    return (cmap.map(normed.ravel()) * 255).astype(np.uint8).reshape(*arr.shape, 4)
-
-
-def _pixmap(arr: np.ndarray, lo: float, hi: float, turbo: bool, w_px: int, h_px: int):
-    from qtpy.QtGui import QImage, QPixmap
-
-    rgba = np.ascontiguousarray(_rgba(arr, lo, hi, turbo))
-    h, w = arr.shape
-    image = QImage(rgba.data, w, h, w * 4, QImage.Format_RGBA8888).copy()
-    return QPixmap.fromImage(image).scaled(
-        max(1, int(w_px)), max(1, int(h_px)),
-        Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-
-
-class DeconQCWindow(QWidget):
-    """The tri-MIP stepper window. OWNS its captures (taken whole from the store), so the
-    store never outlives the run and closing this window frees the bytes."""
-
-    def __init__(self, caps: dict, z_ratio: float, subject: str = "",
-                 on_use: "Optional[Callable[[int], None]]" = None, parent=None):
-        super().__init__(parent)
-        from squidxplorer._iter_nav import IterationSlider
-
-        self.setWindowTitle("decon iteration QC")
-        self.setStyleSheet("background:#0d1117;color:#e6edf3;")
-        self._caps = {str(c): {int(k): dict(tri) for k, tri in by_k.items()}
-                      for c, by_k in caps.items()}
-        self._z_ratio = max(float(z_ratio), 1e-6)
-        self._on_use = on_use
-        self._turbo = False
-        self._ks = sorted(set.intersection(*(set(b) for b in self._caps.values()))) \
-            if self._caps else []
-        if not self._ks:
-            raise ValueError("the QC solve captured no iterations to inspect.")
-        self._k = self._ks[-1]
-        # One latched window per channel: the FINAL iteration's XY percentiles.
-        self._window_by_channel = {
-            c: tuple(np.percentile(by_k[self._ks[-1]]["xy"], CONTRAST_PCT))
-            for c, by_k in self._caps.items()}
-
-        v = QVBoxLayout(self)
-        v.setContentsMargins(10, 8, 10, 8)
-        v.setSpacing(6)
-        head = QHBoxLayout()
-        head.setSpacing(8)
-        title = QLabel(subject or "decon QC")
-        title.setStyleSheet("color:#8b98ad;font-size:12px;")
-        head.addWidget(title, 1)
-        # ONE channel at a time: three tri-panels per channel would be a dashboard.
-        self.channel_combo = QComboBox()
-        for c in sorted(self._caps):
-            self.channel_combo.addItem(c)
-        self.channel_combo.setEnabled(len(self._caps) > 1)
-        self.channel_combo.currentTextChanged.connect(lambda *_: self._repaint())
-        head.addWidget(self.channel_combo)
-        v.addLayout(head)
-
-        grid = QGridLayout()
-        grid.setSpacing(4)
-        self.xy_label, self.xz_label, self.yz_label = QLabel(), QLabel(), QLabel()
-        for lab in (self.xy_label, self.xz_label, self.yz_label):
-            lab.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        grid.addWidget(self.xy_label, 0, 0)          # the MIP, large
-        grid.addWidget(self.yz_label, 0, 1)          # the YZ band beside it
-        grid.addWidget(self.xz_label, 1, 0)          # the XZ band below it
-        grid.setColumnStretch(2, 1)
-        grid.setRowStretch(2, 1)
-        v.addLayout(grid)
-
-        self.slider = IterationSlider(on_change=self._show_k, on_turbo=self._set_turbo)
-        self.slider.set_iterations(self._ks)
-        v.addWidget(self.slider)
-
-        self.use_btn = QPushButton("")
-        self.use_btn.setToolTip(
-            "Adopt the displayed iteration count as the decon run's own parameter; "
-            "Preview then runs it on the whole stack.")
-        self.use_btn.clicked.connect(self._use)
-        v.addWidget(self.use_btn)
-
-        self._repaint()
-        self.resize(self.sizeHint())
-
-    # -- the testable surface -------------------------------------------------------------
-    @property
-    def shown_k(self) -> int:
-        return int(self._k)
-
-    @property
-    def channel(self) -> str:
-        return str(self.channel_combo.currentText())
-
-    def projection(self, name: str) -> np.ndarray:
-        """The array the *name* panel is currently showing (pre-render)."""
-        return self._caps[self.channel][self._k][str(name)]
-
-    # -- stepping (a repaint of held planes, never a re-solve) ----------------------------
-    def _show_k(self, k: int) -> None:
-        if int(k) in self._ks:
-            self._k = int(k)
-            self._repaint()
-
-    def _set_turbo(self, on: bool) -> None:
-        self._turbo = bool(on)
-        self._repaint()
-
-    def _use(self, *_):
-        if self._on_use is not None:
-            self._on_use(int(self._k))
-
-    def _repaint(self) -> None:
-        channel = self.channel
-        tri = self._caps.get(channel, {}).get(self._k)
-        if tri is None:
-            return
-        lo, hi = self._window_by_channel[channel]
-        xy, xz, yz = tri["xy"], tri["xz"], tri["yz"]
-        h, w = xy.shape
-        scale = min(max(XY_MAX_PX / max(h, w), 0.1), 8.0)
-        zpx = xz.shape[0] * self._z_ratio * scale    # a band's z extent, geometrically honest
-        self.xy_label.setPixmap(_pixmap(xy, lo, hi, self._turbo,
-                                        round(w * scale), round(h * scale)))
-        self.xz_label.setPixmap(_pixmap(xz, lo, hi, self._turbo,
-                                        round(w * scale), round(zpx)))
-        self.yz_label.setPixmap(_pixmap(np.ascontiguousarray(yz.T), lo, hi, self._turbo,
-                                        round(zpx), round(h * scale)))
-        self.use_btn.setText(f"use {self._k} iteration" + ("s" if self._k != 1 else ""))
-
-    def closeEvent(self, event):                     # noqa: N802 - Qt naming
-        self._caps = {}                              # closing frees the held projections
-        super().closeEvent(event)
-
-
 def qc_scope(view) -> "tuple[str, int, Optional[tuple]]":
     """The QC solve's field, scoped EXACTLY like a Preview: the ROI's first windowed
     field when a box is drawn, else the in-view region's CENTRE field, whole."""
@@ -239,11 +92,138 @@ def qc_scope(view) -> "tuple[str, int, Optional[tuple]]":
     return str(region), int(fovs[len(fovs) // 2]), None
 
 
-def start_qc(panel, view) -> None:
-    """Run the QC solve off-thread and open the window when its captures land.
+def qc_bbox_um(meta: dict, region: str, fov: int, window) -> "tuple[float, float, float, float]":
+    """The solved pixels' stage box: the field's own box, cut to the window when one ran."""
+    from squidxplorer._mosaic_source import mosaic_fov_bboxes_um
 
-    *panel* is the DeconPanel (owns the worker and the window; its ``shutdown`` joins
-    them); *view* is the asking RegionViewer.
+    x0, y0, x1, y1 = mosaic_fov_bboxes_um(meta, region)[int(fov)]
+    if window is None:
+        return (float(x0), float(y0), float(x1), float(y1))
+    r0, r1, c0, c1 = (int(v) for v in window)
+    px = float(meta["pixel_size_um"])
+    return (float(x0) + c0 * px, float(y0) + r0 * px,
+            float(x0) + c1 * px, float(y0) + r1 * px)
+
+
+def _capture_ks(caps: dict) -> list:
+    return sorted(set.intersection(*(set(b) for b in caps.values()))) if caps else []
+
+
+def open_qc_tab(view, caps: dict, region: str, fov: int, window,
+                on_use: "Optional[Callable[[int], None]]" = None):
+    """Open the QC deck tab: an ROI child over the solved box, the tri-MIPs as layers.
+
+    Every layer is ADOPTED under ``(QC_OP, channel)`` so the identity rules hold; the
+    iteration count is dims axis 0 (each layer is ``(N, 1, H, W)``, so the raw crop's own
+    z stays a separate axis); ``show_op`` lights the QC layers and dims raw, and the tree
+    turns raw back on if wanted. Returns the child view, or ``None`` said to the view.
+    """
+    manager = getattr(view, "_manager", None)
+    meta = view._meta or {}
+    ks = _capture_ks(caps)
+    if manager is None or not ks:
+        view._say("iteration QC: nothing to open (no manager or no captures).")
+        return None
+    bbox = qc_bbox_um(meta, region, fov, window)
+    child = manager.open_child([region], roi_bbox=bbox, parent_id=view.window_id)
+    pane = getattr(child, "_pane", None) if child is not None else None
+    mosaic = getattr(pane, "mosaic", None) if pane is not None else None
+    if mosaic is None:
+        view._say("iteration QC: the QC tab could not open a viewer pane.")
+        return None
+
+    from squidxplorer._napari_pane import _colormap_for
+
+    model = mosaic.model
+    px = float(meta["pixel_size_um"])
+    dz = float(meta.get("dz_um") or px)
+    x0, y0, x1, y1 = bbox
+    gap = GAP_PX * px
+    for channel in sorted(caps):
+        by_k = caps[channel]
+        # Axis 0 is the ITERATION; the size-1 axis 1 keeps it apart from the raw crop's z.
+        xy = np.stack([by_k[k]["xy"] for k in ks])[:, None]
+        xz = np.stack([by_k[k]["xz"] for k in ks])[:, None]
+        yz = np.stack([np.ascontiguousarray(by_k[k]["yz"].T) for k in ks])[:, None]
+        lo, hi = np.percentile(by_k[ks[-1]]["xy"], CONTRAST_PCT)
+        colormap = _colormap_for(channel, meta.get("channels"))
+        specs = (
+            ("xy", xy, (1.0, 1.0, px, px), (0.0, 0.0, y0, x0)),
+            ("xz", xz, (1.0, 1.0, dz, px), (0.0, 0.0, y1 + gap, x0)),   # the band below
+            ("yz", yz, (1.0, 1.0, px, dz), (0.0, 0.0, y0, x1 + gap)),   # the band beside
+        )
+        for tag, data, scale, translate in specs:
+            layer = model.add_image(
+                data, name=f"{QC_OP} {tag} [{channel}]",
+                scale=scale, translate=translate,
+                colormap=colormap, blending="additive",
+                contrast_limits=(float(lo), float(hi)),
+            )
+            mosaic.adopt(QC_OP, channel, layer)
+    try:
+        mosaic.show_op(QC_OP)                    # the QC layers lead; the tree offers raw back
+    except Exception:                            # noqa: BLE001 - a look, never a failed open
+        pass
+    labels = list(model.dims.axis_labels)
+    if labels:
+        labels[0] = "iteration"
+        model.dims.axis_labels = tuple(labels)
+    _attach_use_bar(child, model, ks, on_use)
+    model.dims.set_current_step(0, len(ks) - 1)  # open on the final iteration
+    fit = getattr(mosaic, "reset_view", None)
+    if callable(fit):
+        fit()
+    return child
+
+
+def _attach_use_bar(child, model, ks: list, on_use) -> None:
+    """One small bottom bar in the QC tab: the shown k, and 'use iteration k' writing the
+    decon panel's spin through *on_use*. The k is READ off napari's own Dims (its slider
+    owns the index; this bar holds no copy)."""
+    from qtpy.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
+
+    from squidxplorer import _qtstyle
+
+    bar = QWidget()
+    row = QHBoxLayout(bar)
+    row.setContentsMargins(8, 2, 8, 2)
+    row.setSpacing(8)
+    label = QLabel("")
+    label.setStyleSheet("color:#c9d1d9;font-size:12px;")
+    button = QPushButton("")
+    button.setStyleSheet(_qtstyle.BTN_QSS)
+    button.setToolTip(
+        "Adopt the shown iteration count as the decon run's own parameter; Preview then "
+        "runs it on the whole stack.")
+
+    def _k() -> int:
+        i = min(max(int(model.dims.current_step[0]), 0), len(ks) - 1)
+        return int(ks[i])
+
+    def _refresh(*_a) -> None:
+        k = _k()
+        label.setText(f"iteration {k} of {ks[-1]}")
+        button.setText(f"use iteration {k}")
+
+    model.dims.events.current_step.connect(_refresh)
+    if on_use is not None:
+        button.clicked.connect(lambda *_: on_use(_k()))
+    row.addWidget(label, 1)
+    row.addWidget(button)
+    layout = child.centralWidget().layout() if child.centralWidget() is not None else None
+    if layout is not None:
+        layout.addWidget(bar)
+    child._qc_use_bar = bar                      # the tests' handle; dies with the tab
+    child._qc_use_button = button
+    _refresh()
+
+
+def start_qc(panel, view) -> None:
+    """Run the QC solve off-thread and open the QC tab when its captures land.
+
+    *panel* is the DeconPanel (owns the worker; its ``shutdown`` joins it); *view* is the
+    asking RegionViewer. The store is TAKEN whole into the tab's layers, so it never
+    outlives the run, and the tab's ordinary dispose frees the pixels.
     """
     from squidxplorer._decon import take_captures
     from squidxplorer._engine import bind_operator
@@ -263,11 +243,14 @@ def start_qc(panel, view) -> None:
     except Exception as exc:                     # noqa: BLE001 - a refusal, said not raised
         panel.say(f"iteration QC: {exc}")
         return
-    z_ratio = float(meta.get("dz_um") or 1.0) / float(meta.get("pixel_size_um") or 1.0)
     what = (f"{region} field {fov}"
             + (f", {window[3] - window[2]}x{window[1] - window[0]} px window" if window
                else ", whole field"))
     log.info("iteration QC: solving %s, every channel, capturing each iteration", what)
+
+    def _adopt(k: int) -> None:
+        refusal = panel.set_param("iterations", int(k))
+        panel.say(refusal or f"decon iterations set to {k}.")
 
     def _land():
         panel.inspect_btn.setEnabled(True)
@@ -276,20 +259,10 @@ def start_qc(panel, view) -> None:
             panel.say("iteration QC: the solve captured nothing "
                       "(every channel copied through?).")
             return
-        old = getattr(panel, "_qc_window", None)
-        if old is not None:
-            try:
-                old.close()
-            except RuntimeError:
-                pass
-
-        def _adopt(k: int) -> None:
-            refusal = panel.set_param("iterations", int(k))
-            panel.say(refusal or f"decon iterations set to {k}.")
-
-        window_ = DeconQCWindow(caps, z_ratio, subject=what, on_use=_adopt)
-        panel._qc_window = window_
-        window_.show()
+        try:
+            open_qc_tab(view, caps, region, fov, window, on_use=_adopt)
+        except Exception as exc:                 # noqa: BLE001 - named, never a hang
+            panel.say(f"iteration QC: the tab could not open: {exc}")
 
     def _fail(msg: str) -> None:
         panel.inspect_btn.setEnabled(True)
