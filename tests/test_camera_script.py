@@ -241,6 +241,97 @@ def test_the_comparison_is_two_passes_composed_with_visibility_restored(mosaic):
     assert shell.said == [], shell.said
 
 
+def _open_vol(mosaic, op):
+    """A volume opened the PRODUCTION way: open() parks the 2D scene, then bricks arrive."""
+    from squidxplorer._brick_view import BrickedVolume
+
+    from .conftest import _scene_stack
+
+    vol = BrickedVolume(
+        mosaic, reader=None, meta={}, region="A1", window_px=(0, 8, 0, 8),
+        channels=["488"], scale=(1.5, 0.75, 0.75), origin_um=(0.0, 0.0, 0.0),
+        limit=2048, budget_bytes=1 << 30, op=op)
+    vol._loader.start = lambda *a, **k: None
+    vol._loader.stop = lambda *a, **k: None
+    vol._loader.wait = lambda *a, **k: True
+    vol.open()
+    vol._add_layer(("488", (0, 0)), "488", _scene_stack(3, (4, 8, 8)),
+                   (1.5, 0.75, 0.75), (0.0, 0.0, 0.0))
+    return vol
+
+
+def _parked_scene(mosaic):
+    """The REAL volume tab's shape: raw and result 2D layers PARKED under the result's
+    bricks (the state _show_result_volume leaves behind)."""
+    from .conftest import build_flat_scene
+
+    build_flat_scene(mosaic, "raw", ("488",))
+    build_flat_scene(mosaic, "decon", ("488",))
+    mosaic.show_op("decon")
+    raw_flat = mosaic.find("raw", "488")
+    decon_flat = mosaic.find("decon", "488")
+    vol = _open_vol(mosaic, "decon")
+    return _Shell(vol), vol, raw_flat, decon_flat
+
+
+def test_the_comparison_rebuilds_the_volume_per_pass_on_a_real_volume_tab(mosaic):
+    """One identity on the bricks, the other parked: each pass REBUILDS the volume over
+    its own identity (raw then result, asserted via the model's identity holders), the
+    frames compose, and the tab ends where it started - the original volume's identity
+    and the 2D layers' own visibility restored."""
+    shell, vol, raw_flat, decon_flat = _parked_scene(mosaic)
+    assert mosaic.ops() == ["decon"] and set(mosaic.parked_ops()) == {"raw", "decon"}
+    rebuilt, seen, waits, frames = [], [], [], []
+
+    def fake_rebuild(win, mo, op, scene=None):
+        _volume_view.close_native3d(win)
+        out = [(ly, bool(ly.visible)) for ly in mo.ours()]
+        if scene is not None:
+            for ly, was in scene:
+                ly.visible = was
+            show = mo.visible_op() or "raw"
+        else:
+            mo.show_op(op)
+            show = op
+        win._native3d = _open_vol(mo, show)
+        win._native3d.refresh = lambda *a, **k: None
+        rebuilt.append(show)
+        return out
+
+    def capture():
+        seen.append(tuple(mosaic.ops()))
+        return np.zeros((6, 8, 3), np.uint8)
+
+    def writer(gen, out_path, fps):
+        frames.extend(gen)
+        return str(out_path), len(frames)
+
+    result = CS.record_comparison(
+        shell, "cmp.mp4", steps=[CS.Step("xy", dwell_s=0.5)], fps=4,
+        capture=capture, wait_ready=lambda _w: waits.append(True) or True,
+        sleep=lambda _s: None, writer=writer, rebuild=fake_rebuild)
+
+    assert rebuilt == ["raw", "decon", "decon"], rebuilt   # pass A, pass B, the restore
+    assert seen == [("raw",), ("raw",), ("decon",), ("decon",)], seen
+    assert result.n_frames == 2
+    assert all(f.shape == (6, 8 + CS.DIVIDER_PX + 8, 3) for f in frames)
+    assert len(waits) == 4, "each pass owes a residency wait at rebuild and at its step"
+    assert shell._native3d._op == "decon", "the tab lost its original volume identity"
+    # The original state, exactly: both flats parked dark under the decon volume, with the
+    # user's lit layer remembered by the volume so ITS close relights it.
+    assert mosaic.ops() == ["decon"] and set(mosaic.parked_ops()) == {"raw", "decon"}
+    assert raw_flat.visible is False and decon_flat.visible is False
+    assert decon_flat in shell._native3d._hidden, (
+        "closing the restored volume would not relight the user's own layer")
+
+
+def test_a_z_reducing_result_is_refused_with_the_declaration_sentence(mosaic):
+    shell, _vol, _raw, _decon = _parked_scene(mosaic)
+    mosaic._reduces_z = lambda op: op == "decon"
+    with pytest.raises(ValueError, match="reduces z to a single plane"):
+        CS.record_comparison(shell, "cmp.mp4", steps=[CS.Step("xy")])
+
+
 def test_the_comparison_refuses_a_missing_side_by_name(mosaic):
     from napari.components import ViewerModel
 

@@ -305,6 +305,29 @@ def _side_by_side(a: np.ndarray, b: np.ndarray, divider_px: int) -> np.ndarray:
     return np.concatenate([a[:h], divider, b[:h]], axis=1)
 
 
+def _rebuild_volume(win, mosaic, op, scene=None):
+    """Reopen the view's volume over *op*'s identity: the ``_show_result_volume`` chain
+    (close, relight, ``open_3d``), never a second open path. Returns the 2D scene's
+    ``(layer, visible)`` pairs as they stood between the close and the relight - the
+    user's own underlying look; pass it back as *scene* to restore it instead of *op*.
+    """
+    from squidxplorer import _volume_view
+
+    _volume_view.close_native3d(win)             # gives the parked layers their identities back
+    out = [(ly, bool(getattr(ly, "visible", False))) for ly in mosaic.ours()]
+    if scene is not None:
+        with mosaic.programmatic():
+            for ly, was in scene:
+                try:
+                    ly.visible = was
+                except Exception:                # noqa: BLE001 - the layer may be gone
+                    pass
+    elif op is not None:
+        mosaic.show_op(str(op))
+    _volume_view.open_3d(win)
+    return out
+
+
 def record_comparison(
     win,
     out_path,
@@ -317,31 +340,50 @@ def record_comparison(
     sleep: Callable[[float], None] = _pump_sleep,
     wait_ready: Callable[..., bool] = wait_bricks_resident,
     writer: Optional[Callable] = None,
+    rebuild: Optional[Callable] = None,
 ) -> ScriptResult:
     """Record raw beside the operator result: two passes of the SAME steps over the SAME
-    view (camera and zoom identical by construction), raw-only visible on the left pass,
-    the operator identity on the right, composed frame by frame into one .mp4.
+    view, raw on the left, the operator identity on the right, composed frame by frame
+    into one .mp4. Camera and zoom match by construction - both passes execute identical
+    steps from a fresh frame over the same extent.
 
-    Contrast latches once PER PASS on that pass's own visible layers, so each modality is
-    honestly windowed rather than sharing one window. The user's layer visibility is
-    restored afterwards, success or failure. *steps* defaults to :func:`demo_orbit_steps`.
+    When both identities hold live layers, a pass is a visibility flip; on a real volume
+    tab (where the volume's bricks hold ONE identity and the other side is parked) each
+    pass REBUILDS the volume over its identity through the existing close/relight/open_3d
+    chain and waits for brick residency before the steps run. Contrast latches once PER
+    PASS on that pass's own layers, so each modality is honestly windowed rather than
+    sharing one window. The tab ends where it started, success or failure: the original
+    volume's identity and the 2D layers' own visibility come back. *steps* defaults to
+    :func:`demo_orbit_steps`.
     """
     vol = getattr(win, "_native3d", None)
     mosaic = getattr(vol, "_mosaic", None)
     if vol is None or mosaic is None:
         raise ValueError("comparison: no 3D volume is up in this view. Open 3D first.")
-    if not mosaic.channels(_RAW_OP):
+    live = [str(o) for o in mosaic.ops()]
+    parked = [str(o) for o in mosaic.parked_ops()]
+    present = list(dict.fromkeys([*live, *parked]))
+    if _RAW_OP not in present:
         raise ValueError("comparison: no raw layer in this view to put beside the result.")
-    others = [op for op in mosaic.ops() if str(op) != _RAW_OP]
+    others = [o for o in present if o != _RAW_OP]
     if not others:
         raise ValueError("comparison: no operator result in this view. Run an operator, "
                          "then record the comparison.")
-    op = getattr(vol, "_op", None)
+    op = str(getattr(vol, "_op", "") or "")
     if op not in others:
         if len(others) > 1:
             raise ValueError(f"comparison: several operator layers here ({sorted(others)}); "
                              f"show the one to compare and click 3D again.")
         op = others[0]
+    reduces = False
+    try:
+        reduces = bool(mosaic._reduces_z(op))
+    except Exception:                            # noqa: BLE001 - undeclared: try to render
+        reduces = False
+    if reduces:
+        # The 3D path's own declaration refusal, surfaced with the comparison's name on it.
+        raise ValueError(f"comparison: '{op}' reduces z to a single plane, so it has no "
+                         f"volume to render. Show a z-preserving operator and try again.")
     steps = list(steps) if steps is not None else demo_orbit_steps()
 
     passes: dict = {}
@@ -352,20 +394,47 @@ def record_comparison(
             return "", len(passes[name])
         return _write
 
-    snapshot = [(ly, bool(getattr(ly, "visible", False))) for ly in mosaic.ours()]
-    try:
-        for name, show in (("raw", _RAW_OP), ("op", op)):
-            _show_only(mosaic, show)
-            run_camera_script(win, steps, out_path=out_path, fps=fps,
-                              transition_s=transition_s, capture=capture, sleep=sleep,
-                              wait_ready=wait_ready, writer=_collector(name))
-    finally:
-        with mosaic.programmatic():
-            for ly, was in snapshot:
-                try:
-                    ly.visible = was
-                except Exception:                # noqa: BLE001 - the layer may be gone
-                    pass
+    def _run_pass(name):
+        run_camera_script(win, steps, out_path=out_path, fps=fps,
+                          transition_s=transition_s, capture=capture, sleep=sleep,
+                          wait_ready=wait_ready, writer=_collector(name))
+
+    if _RAW_OP in live and op in live:
+        # Both sides live as layers: a pass is a visibility flip, no re-read.
+        snapshot = [(ly, bool(getattr(ly, "visible", False))) for ly in mosaic.ours()]
+        try:
+            for name, show in (("raw", _RAW_OP), ("op", op)):
+                _show_only(mosaic, show)
+                _run_pass(name)
+        finally:
+            with mosaic.programmatic():
+                for ly, was in snapshot:
+                    try:
+                        ly.visible = was
+                    except Exception:            # noqa: BLE001 - the layer may be gone
+                        pass
+    else:
+        # A real volume tab: one identity is on the bricks, the other parked. Each pass
+        # reopens the volume over its own identity through the existing chain.
+        rebuild = rebuild or _rebuild_volume
+        underlying = None                        # the user's own 2D look, seen at first close
+        try:
+            for name, show in (("raw", _RAW_OP), ("op", op)):
+                scene = rebuild(win, mosaic, show)
+                if underlying is None:
+                    underlying = scene
+                if getattr(win, "_native3d", None) is None:
+                    raise ValueError(f"comparison: the volume could not be rebuilt over "
+                                     f"'{show}'; see this view's own message.")
+                wait_ready(win)
+                _run_pass(name)
+        finally:
+            try:
+                rebuild(win, mosaic, None, scene=underlying)
+            except Exception as exc:             # noqa: BLE001 - never mask the pass's error
+                say = getattr(win, "_say", None)
+                if callable(say):
+                    say(f"comparison: could not restore the original volume ({exc}).")
     a, b = passes["raw"], passes["op"]
     if len(a) != len(b):
         raise ValueError(f"comparison: the two passes disagree, {len(a)} raw frame(s) "
