@@ -2,8 +2,12 @@
 
 A backend, not an algorithm: a transcription of ``petakit.engine._rl_core`` with one departure
 (``rfftn`` for ``fftn``, an identity for real input). Non-7-smooth transform lengths are
-wrap-padded to fast lengths; a volume over the device's budget is solved in z tiles with
-petakit's own overlap rule; CUDA machines where CuPy works are left to petakit.
+wrap-padded to fast lengths; CUDA machines where CuPy works are left to petakit.
+
+THE SOLVE NEVER TILES (Julio, 2026-09-05: "you can't chunk the 3D volume when you do 3d
+decon. It has to run in one step and put the whole volume into memory."). The z-tiled arm
+(petakit's overlap rule, up to 25% off at seams) is deleted; a volume whose whole-volume
+working set does not fit is a NAMED refusal (:func:`working_set_refusal`), never a quiet tile.
 """
 
 from __future__ import annotations
@@ -29,12 +33,20 @@ PAD_CPU_ENV_VAR = "SQUIDXPLORER_DECON_PAD_CPU"
 #: How much longer a padded axis may get before padding stops being worth it.
 MAX_PAD_GROWTH = 1.15
 
-#: Bytes of working set per voxel (petakit's own estimate, deliberately pessimistic).
-BYTES_PER_VOXEL = 40
+#: MEASURED working-set multiples of the float32 volume bytes, one whole RL solve.
+#: Calibrated 2026-09-09 on synthetic solves (3 iterations, PSF (95, 19, 19), this Mac):
+#: torch/MPS driver-allocation peak 21.1x to 21.2x over 67 to 252 MB volumes; petakit CPU
+#: RSS peak 13.0x to 15.0x over the same sizes. Rounded up one; the refusal states which
+#: multiple it used. (petakit's own 40 B/voxel estimate, 10x, UNDERSTATES the measured peak.)
+GPU_WORKING_SET_MULTIPLE = 22
+CPU_WORKING_SET_MULTIPLE = 16
 
-#: Fraction of the DEVICE's free memory a single solve may claim; a larger volume is z-tiled
-#: (see :func:`tile_plan`), and one whose 4-plane tile is still over budget goes to petakit.
-MEMORY_FRACTION = 0.5
+#: float32 is what every backend solves in.
+_VOLUME_BYTES_PER_VOXEL = 4
+
+#: Fraction of the free memory one whole solve may claim (petakit's own whole-vs-tile
+#: threshold); over it the solve is REFUSED by name, never tiled.
+MEMORY_FRACTION = 0.8
 
 # One GPU, one volume at a time: parallel submission gains nothing and multiplies the footprint.
 _device_lock = threading.Lock()
@@ -115,66 +127,42 @@ def budget_bytes(device: Optional[str]) -> float:
     return _device_free_bytes(device) * MEMORY_FRACTION
 
 
-def _solve_bytes(shape) -> int:
-    """petakit's working-set estimate for one solve at *shape* (already padded)."""
-    return int(np.prod([int(n) for n in shape])) * BYTES_PER_VOXEL
+def working_set_multiple(device: Optional[str]) -> int:
+    """The MEASURED peak-working-set multiple of the float32 volume bytes on *device*."""
+    return GPU_WORKING_SET_MULTIPLE if device in ("mps", "cuda") else CPU_WORKING_SET_MULTIPLE
+
+
+def working_set_bytes(shape, device: Optional[str] = None, psf_shape=None) -> int:
+    """The estimated peak bytes of ONE whole solve of *shape* (at its padded length)."""
+    voxels = int(np.prod([int(n) for n in effective_shape(shape, psf_shape)]))
+    return voxels * _VOLUME_BYTES_PER_VOXEL * working_set_multiple(device)
 
 
 def fits_in_memory(shape, device: Optional[str] = None, psf_shape=None) -> bool:
     """True when one whole volume of *shape* (at its padded length) fits *device*'s budget."""
-    return _solve_bytes(effective_shape(shape, psf_shape)) < budget_bytes(device)
+    return working_set_bytes(shape, device, psf_shape) < budget_bytes(device)
 
 
-#: petakit's tiler refuses to go below this many planes per tile.
-MIN_TILE_Z = 4
+def working_set_refusal(shape, device: Optional[str] = None, psf_shape=None,
+                        extra_bytes: int = 0, extra_note: str = "") -> Optional[str]:
+    """THE memory refusal, or ``None`` when one whole solve of *shape* fits *device*.
 
-#: petakit's rule for a PSF's axial support: planes holding more than 1% of the peak plane.
-PSF_SUPPORT_THRESHOLD = 0.01
-
-
-def psf_support_z(psf, threshold: float = PSF_SUPPORT_THRESHOLD) -> int:
-    """petakit ``_psf_support_z``: the number of z planes carrying significant PSF energy."""
-    profile = np.sum(np.asarray(psf, dtype=np.float64), axis=(1, 2))
-    profile = profile / profile.max()
-    above = np.where(profile > threshold)[0]
-    if len(above) == 0:
-        return int(np.asarray(psf).shape[0])
-    return int(above[-1] - above[0] + 1)
-
-
-def tile_plan(shape, *, budget: float, support_z: int, psf_shape=None) -> Optional[tuple[int, int]]:
-    """``(chunk_nz, border)`` for a z-tiled solve within *budget*, ``None`` when the whole fits.
-
-    A transcription of petakit ``_tile_z``'s planning so the two backends tile alike: halve
-    the tile depth until one tile's working set fits (never below :data:`MIN_TILE_Z`), then
-    the overlap is the PSF's axial half-support plus two planes, at least three, capped at
-    a third of the tile. Raises ``MemoryError`` by name when even the smallest tile does not
-    fit: that volume is not this device's to run.
+    The solve never tiles, so the only honest answers are "the whole volume fits" and this
+    sentence: the volume's shape, the estimate (with the measured multiple it was derived
+    from), what the machine has, and the way out (an ROI, or a z subset). *extra_bytes* is
+    a caller's additional held memory (iteration snapshots), named by *extra_note*.
     """
-    nz, ny, nx = (int(n) for n in shape)
-    _, ey, ex = effective_shape(shape, psf_shape)
-    max_tile_z = nz
-    while max_tile_z > MIN_TILE_Z and _solve_bytes((max_tile_z, ey, ex)) >= budget:
-        max_tile_z //= 2
-    if max_tile_z >= nz:
+    need = working_set_bytes(shape, device, psf_shape) + int(extra_bytes)
+    avail = _device_free_bytes(device)
+    if need < avail * MEMORY_FRACTION:
         return None
-    if _solve_bytes((max_tile_z, ey, ex)) >= budget:
-        raise MemoryError(
-            f"a {MIN_TILE_Z}-plane tile of a {(nz, ny, nx)} volume wants "
-            f"~{_solve_bytes((max_tile_z, ey, ex)) / 1e9:.1f} GB against a budget of "
-            f"{budget / 1e9:.1f} GB")
-    ideal_border = max(int(support_z) // 2 + 2, 3)
-    border = min(ideal_border, max_tile_z // 3)
-    chunk_nz = max(max_tile_z - 2 * border, 2)
-    return chunk_nz, border
-
-
-def tile_count(nz: int, plan: Optional[tuple[int, int]]) -> int:
-    """How many z tiles *plan* cuts *nz* planes into (1 when there is no plan)."""
-    if plan is None:
-        return 1
-    chunk_nz, _ = plan
-    return -(-int(nz) // chunk_nz)
+    where = f"torch/{device}" if device else "CPU"
+    return (
+        f"a {tuple(int(n) for n in shape)} volume's whole-volume solve on {where} is "
+        f"estimated at ~{need / 1e9:.1f} GB (a measured {working_set_multiple(device)}x the "
+        f"float32 volume bytes{extra_note}), against {avail / 1e9:.1f} GB available (one "
+        f"solve may claim {MEMORY_FRACTION:.0%}). The solve never tiles: deconvolve a "
+        "smaller volume instead, an ROI (draw one for a windowed solve) or a z subset.")
 
 
 def _torch_device() -> Optional[str]:
@@ -193,29 +181,6 @@ def _torch_device() -> Optional[str]:
     return None
 
 
-def _support_hint(psf, psf_shape) -> int:
-    """The axial support a plan is made with: measured off the PSF when it is given, else its
-    whole declared depth (a wider border, never a narrower one)."""
-    if psf is not None:
-        return psf_support_z(psf)
-    return int(psf_shape[0]) if psf_shape is not None else 1
-
-
-def _plan_for(shape, device, psf_shape=None, psf=None) -> Optional[tuple[int, int]]:
-    """The z-tile plan a solve of *shape* on *device* would run; ``None`` when it fits whole."""
-    return tile_plan(shape, budget=budget_bytes(device),
-                     support_z=_support_hint(psf, psf_shape), psf_shape=psf_shape)
-
-
-def _runnable(shape, device, psf_shape=None) -> bool:
-    """False when even the smallest z tile of *shape* is over *device*'s budget."""
-    try:
-        _plan_for(shape, device, psf_shape)
-    except MemoryError:
-        return False
-    return True
-
-
 def select_device(shape, *, gpu: bool = True, psf_shape=None) -> Optional[str]:
     """Which device should run a volume of *shape* — ``"mps"``, ``"cuda"``, or ``None`` for CPU."""
     override = os.environ.get(ENV_VAR, "").strip().lower()
@@ -224,7 +189,7 @@ def select_device(shape, *, gpu: bool = True, psf_shape=None) -> Optional[str]:
     if override in {"mps", "cuda"}:
         # An explicit device skips the smoothness guard but not the memory guard, and must fall
         # back rather than name a device this machine does not have.
-        if _torch_device() != override or not _runnable(shape, override, psf_shape):
+        if _torch_device() != override or not fits_in_memory(shape, override, psf_shape):
             return None
         return override
     if override not in {"", "auto"}:
@@ -238,13 +203,14 @@ def select_device(shape, *, gpu: bool = True, psf_shape=None) -> Optional[str]:
         return None                     # petakit already has this machine covered; change nothing.
     if not all(is_smooth(int(n)) for n in effective_shape(shape, psf_shape)[1:]):
         # Metal would fall onto Bluestein along y or x and lose to the CPU pool. z is NOT
-        # guarded: a tile's depth is whatever the plan cuts, and a non-smooth z measured 2x
-        # on the transform ((46, 1024, 1024) 136 ms against (48, 1024, 1024) 70 ms on MPS),
-        # nowhere near the CPU's cost for the same volume.
+        # guarded: a non-smooth z measured 2x on the transform ((46, 1024, 1024) 136 ms
+        # against (48, 1024, 1024) 70 ms on MPS), nowhere near the CPU's cost.
         return None
     device = _torch_device()
-    if device is None or not _runnable(shape, device, psf_shape):
-        return None                     # petakit's z-tiler owns what a 4-plane tile cannot hold.
+    if device is None or not fits_in_memory(shape, device, psf_shape):
+        # Over the DEVICE's budget: the CPU pool gets one whole solve. When even the system's
+        # budget cannot hold it, working_set_refusal is the caller's named refusal.
+        return None
     return device
 
 
@@ -327,29 +293,12 @@ def rl(volume: np.ndarray, psf: np.ndarray, iterations: int, device: str):
     The per-iteration ``snapshot_iters`` capture hook is DELETED with the QC sweep
     (Julio, 2026-08-25); reinstating starts from git history.
 
-    A volume over the device's budget (:func:`budget_bytes`) is solved in z tiles with
-    petakit's own overlap rule (:func:`tile_plan`): each tile carries ``border`` extra planes
-    on each side, clamped at the volume's ends, and only its own planes are kept.
+    ONE solve, the whole volume in memory (Julio, 2026-09-05). A volume over the device's
+    budget never reaches this function: :func:`working_set_refusal` is the caller's refusal.
     """
     raw = np.maximum(np.asarray(volume, dtype=np.float32), 0)
     widths = (0, 0, 0) if padding_disabled() else pad_plan(raw.shape, psf.shape)
-    plan = tile_plan(raw.shape, budget=budget_bytes(device), support_z=psf_support_z(psf),
-                     psf_shape=psf.shape)
-    if plan is None:
-        return _solve(raw, psf, iterations, device, widths)
-
-    chunk_nz, border = plan
-    nz = raw.shape[0]
-    out = np.empty_like(raw)
-    for z in range(0, nz, chunk_nz):
-        z_end = min(z + chunk_nz, nz)
-        load_start, load_end = max(z - border, 0), min(z_end + border, nz)
-        # A tile's depth is whatever the plan cut; only y and x are padded to smooth lengths.
-        piece = _solve(raw[load_start:load_end], psf, iterations, device,
-                       (0,) + tuple(widths[1:]))
-        keep = slice(z - load_start, z - load_start + (z_end - z))
-        out[z:z_end] = piece[keep]
-    return out
+    return _solve(raw, psf, iterations, device, widths)
 
 
 def _solve(raw: np.ndarray, psf: np.ndarray, iterations: int, device: str, widths):
@@ -415,47 +364,35 @@ def _pad_note(shape, psf_shape=None) -> str:
     return f", transform padded to {padded} (+{grew - 1:.1%} area) for a 7-smooth FFT"
 
 
-def _tile_notes(shape, device, psf_shape=None, psf=None) -> tuple[str, str]:
-    """(', N z tiles', the trailing limitation clause) when the solve will tile, else ('', '')."""
-    n = tile_count(shape[0], _plan_for(shape, device, psf_shape, psf))
-    if n <= 1:
-        return "", ""
-    return (f", {n} z tiles",
-            ", z-tiled with petakit's overlap rule (approximate at tile seams)")
-
-
-def describe(shape, *, gpu: bool = True, psf_shape=None, psf=None) -> str:
+def describe(shape, *, gpu: bool = True, psf_shape=None) -> str:
     """A one-line, human-readable account of the device decision, for logs, not for control flow.
 
-    *psf* (the array) makes the tile count exact; with only *psf_shape* the border is planned
-    from the PSF's whole depth, so the count can only be equal or higher than the run's.
+    Always one whole solve; there is no tile count to report any more.
     """
     device = select_device(shape, gpu=gpu, psf_shape=psf_shape)
     if device is not None:
-        count, limitation = _tile_notes(shape, device, psf_shape, psf)
-        return (f"decon backend: torch/{device}{count} for shape {tuple(shape)}"
-                f"{_pad_note(shape, psf_shape)}{limitation}")
+        return (f"decon backend: torch/{device} for shape {tuple(shape)}"
+                f"{_pad_note(shape, psf_shape)}")
     if not gpu:
         return "decon backend: CPU (caller passed gpu=False)"
     override = os.environ.get(ENV_VAR, "").strip().lower()
     if override in {"cpu", "off", "0", "none", "false"}:
         return f"decon backend: CPU ({ENV_VAR}={override})"
     if _cupy_cuda_present():
-        return "decon backend: petakit/CuPy CUDA (unchanged)"
+        return "decon backend: petakit/CuPy CUDA (whole solve, tiling pinned off)"
     torch_device = _torch_device()
     if torch_device is None:
         return "decon backend: CPU (no torch GPU device)"
-    try:
-        _plan_for(shape, torch_device, psf_shape)
-    except MemoryError as exc:
-        return f"decon backend: CPU ({exc}; petakit's z-tiler owns it)"
+    if not fits_in_memory(shape, torch_device, psf_shape):
+        return (f"decon backend: CPU (a whole {tuple(shape)} solve is over torch/"
+                f"{torch_device}'s budget; the CPU pool takes it whole, never tiled)")
     cpu_pad = " (padded, SQUIDXPLORER_DECON_PAD_CPU)" if cpu_padding_enabled() else ""
     return f"decon backend: petakit CPU{cpu_pad}"
 
 
-def log_choice(shape, *, gpu: bool = True, psf_shape=None, psf=None) -> None:
+def log_choice(shape, *, gpu: bool = True, psf_shape=None) -> None:
     """Say which device a run picked, once per distinct answer (not once per plane)."""
-    message = describe(shape, gpu=gpu, psf_shape=psf_shape, psf=psf)
+    message = describe(shape, gpu=gpu, psf_shape=psf_shape)
     with _log_once_lock:
         if message in _LOG_ONCE:
             return

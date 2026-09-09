@@ -183,6 +183,13 @@ def lateral_halo_px(optics: OpticsParams) -> int:
     return max(HALO_MIN_PX, int(np.ceil(float(at))))
 
 
+#: What petakit is told it has, in GB: infinite, so its own z-tiler NEVER engages under us
+#: (Julio, 2026-09-05: the solve runs in one step). Our refusal above it already said no
+#: when the whole solve does not fit; this pin is what makes "never tiles" true of the
+#: CPU/CuPy arms too, where petakit offers the choice through ``avail_memory_gb``.
+_NEVER_TILE_GB = float("inf")
+
+
 def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool):
     """One call into RL: device selection, optional FFT-length padding, and an all-zero result guard.
 
@@ -192,7 +199,10 @@ def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool):
     """
     volume = np.ascontiguousarray(volume, dtype=np.float32)
     device = _decon_gpu.select_device(volume.shape, gpu=gpu, psf_shape=psf.shape)
-    _decon_gpu.log_choice(volume.shape, gpu=gpu, psf_shape=psf.shape, psf=psf)
+    refusal = _decon_gpu.working_set_refusal(volume.shape, device, psf.shape)
+    if refusal:
+        raise MemoryError(refusal)
+    _decon_gpu.log_choice(volume.shape, gpu=gpu, psf_shape=psf.shape)
     if device is not None:
         out = _decon_gpu.rl(volume, psf, iterations, device)
     else:
@@ -203,6 +213,7 @@ def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool):
         out = petakit.deconvolve(
             np.ascontiguousarray(padded), psf,
             method=METHOD, iterations=iterations, gpu=gpu,
+            avail_memory_gb=_NEVER_TILE_GB,
         )
         if any(widths):
             core = tuple(slice(w, w + n) for w, n in zip(widths, volume.shape))
@@ -514,14 +525,22 @@ def decon_op(
     if optics is None:
         _decon.for_channel = lambda path, channel: _decon_for_channel(path, channel, iterations)
     else:
+        def _bound(nz: int) -> OpticsParams:
+            return optics if optics.nz == int(nz) else OpticsParams(
+                optics.na, optics.wavelength_um, optics.dxy_um, optics.dz_um, int(nz), optics.ni)
+
         # The declaration an ROI-scoped run reads (``projection.operator_halo_px``): the PSF's
         # lateral support AT THE STACK'S DEPTH, since the PSF is bound to it in the solve.
-        def _halo(nz: int) -> int:
-            bound = optics if optics.nz == int(nz) else OpticsParams(
-                optics.na, optics.wavelength_um, optics.dxy_um, optics.dz_um, int(nz), optics.ni)
-            return lateral_halo_px(bound)
+        _decon.halo_px = lambda nz: lateral_halo_px(_bound(int(nz)))
 
-        _decon.halo_px = _halo
+        # The declaration the engine reads BEFORE reading a single plane
+        # (``project_well``): the whole-volume solve either fits or is refused by name.
+        def _refuse(shape) -> Optional[str]:
+            psf_shape = make_psf(_bound(int(shape[0]))).shape
+            device = _decon_gpu.select_device(shape, psf_shape=psf_shape)
+            return _decon_gpu.working_set_refusal(shape, device, psf_shape)
+
+        _decon.refuse_solve = _refuse
     return _decon
 
 
