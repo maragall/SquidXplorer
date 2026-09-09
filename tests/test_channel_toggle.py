@@ -284,19 +284,17 @@ def test_unticking_one_decon_channel_leaves_the_other_decon_channels_lit(
 
 # --- (C) a decon preview from a 3D ROI tab lands as a full-depth volume of decon ---------------
 
-@pytest.mark.parametrize("prior_2d_preview", [False, True],
-                         ids=["fresh", "after-a-2d-decon-preview-in-the-parent"])
 def test_a_decon_preview_from_a_3d_roi_tab_lands_as_a_full_depth_volume(
-        qapp, napari_pane_stub, g7_dataset, prior_2d_preview):
-    """*prior_2d_preview*: the parent already previewed decon in 2D (an unscoped run, so its
-    one-plane result is CACHED and replayed into every later tab over the region)."""
+        qapp, napari_pane_stub, g7_dataset):
+    """The parent already previewed decon in 2D (an unscoped run, so its one-plane result is
+    CACHED and replayed into every later tab over the region): the measured parked-layer case.
+    The fresh path is this one minus the replay, and ruling aa's own pin is test_volume_preview."""
     from squidxplorer._napari_view import full_res_level
 
     win, mgr, view = _open_plate(qapp, g7_dataset)
     try:
-        if prior_2d_preview:
-            _run_preview(qapp, view, "decon")
-            assert int(full_res_level(view._pane.mosaic.find("decon", CHANNELS[0]).data).ndim) == 2
+        _run_preview(qapp, view, "decon")
+        assert int(full_res_level(view._pane.mosaic.find("decon", CHANNELS[0]).data).ndim) == 2
         child = mgr.open_child([REGION], roi_bbox=_roi_bbox_um(view._meta),
                                parent_id=view.window_id)
         assert _drain_until(qapp, lambda: _raw_landed(child))

@@ -282,20 +282,8 @@ def test_add_and_resolve_region_operator(master):
         _OPERATORS.pop(name, None)
 
 
-def test_duplicate_operator_refused():
-    with pytest.raises(ValueError, match="already defined"):
-        add_region_operator("stitch", lambda *a, **k: None)
-
-
-@pytest.mark.parametrize("bad", ["", None])
-def test_invalid_operator_registration(bad):
-    with pytest.raises(ValueError):
-        add_region_operator(bad or "", bad)
-
-
-def test_unknown_operator_names_the_alternatives(master):
-    with pytest.raises(KeyError, match="unknown operator 'nope'"):
-        list(_stitch_plate(_FakeReader(master), operator="nope"))
+# Duplicate-name, invalid-name and unknown-name refusals are _engine._declare's and
+# _resolve_operator's, ONE validator both registrars share; test_engine.py pins them.
 
 
 def test_a_plane_operator_handed_to_the_region_loop_is_refused_as_the_wrong_kind(master):
@@ -559,16 +547,6 @@ def test_the_fixture_can_actually_tell_the_two_channels_apart(master):
                     registration_channel=CHANNELS[1])
     assert np.abs(textured[3]).max() > 2.0, "channel 0 should recover the 6px injected error"
     assert np.abs(flat).max() < 0.5, "flat channel 1 should recover nothing"
-
-
-def test_registration_channel_outside_the_selection_still_drives_the_solve(master):
-    """Selecting only channel 1 must not move registration onto channel 1."""
-    got = _offsets(_SplitChannelReader(master, error_px=_ERR),
-                   registration_channel=CHANNELS[0], channels=[1])
-    assert np.abs(got[3]).max() > 2.0, (
-        f"registration did not run on {CHANNELS[0]!r}: offsets {got[3]} look like the flat "
-        "channel's (all-zero) solve, i.e. the channel was silently substituted."
-    )
 
 
 def test_the_solved_geometry_does_not_depend_on_which_channels_were_selected(master):

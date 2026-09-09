@@ -172,30 +172,8 @@ def test_playback_loops_over_the_series(make_bar, qapp):
         settings.playback_mode = was
 
 
-def test_playback_never_runs_ahead_of_the_loading(make_bar, qapp):
-    """Nothing finishes, so exactly one frame may ever be requested: this is what separates playback from a timer."""
-    asked = []
-    bar = make_bar(on_change=asked.append, playback=True)
-    bar.set_count(N_TIME_POINTS)
-    bar.play(fps=60)                                # NOBODY calls frame_done
-    _pump(qapp, lambda: False, seconds=1.0)         # let a free-running timer do its worst
-    bar.stop()
-    qapp.processEvents()
-    assert len(asked) == 1, (
-        f"playback requested {len(asked)} timepoints while none had finished loading; "
-        "the render gate is not holding")
-
-
-def test_a_stalled_playback_says_so_instead_of_looking_pressed(make_bar, qapp):
-    bar = make_bar(playback=True)
-    bar.set_count(3)
-    bar.playback.STALL_GRACE_S = 0.2
-    said = []
-    bar.on_problem(said.append)
-    bar.play(fps=30)
-    assert _pump(qapp, lambda: bool(said), seconds=6.0), "a stall was never reported"
-    assert "not finished loading" in said[0]
-    assert not bar.is_playing
+# The render gate and the stall report live in _region_nav.AxisPlayback, the ONE engine the
+# bar wraps; their pins are test_region_nav.py's own pair.
 
 
 def _added_values(pane, channel):
