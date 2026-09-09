@@ -254,6 +254,21 @@ def camera_for_bbox_um(
     return ((y0 + y1) / 2.0, (x0 + x1) / 2.0), zoom
 
 
+def camera_basis(angles: Sequence[float]) -> tuple:
+    """``(right, up, forward)`` unit vectors in napari world (z, y, x) for a camera at
+    *angles*, off napari's own ``Camera`` model, so the Euler math is napari's and not a
+    reimplementation that drifts with it. ``up`` points up on the canvas; ``forward``
+    points from the camera INTO the scene. The camera gizmo projects through this; the
+    cross order is pinned there at the XY top view (right must be world +x).
+    """
+    from napari.components import Camera
+
+    cam = Camera(angles=tuple(float(v) for v in angles))
+    forward = np.asarray(cam.view_direction, dtype=float)
+    up = np.asarray(cam.up_direction, dtype=float)
+    return np.cross(forward, up), up, forward
+
+
 def placement_for(ndim: int, bbox_um: Sequence[float], shape: Sequence[int],
                   z_scale_um: Optional[float] = None) -> tuple[tuple, tuple]:
     """``(scale, translate)`` for a layer of *ndim* axes whose trailing two are ``(y, x)``."""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -283,6 +284,8 @@ class RegionViewer(QMainWindow):
     regionsChanged = Signal(object)   # emits self: this window ADOPTED a region it was not opened
     #                                   over, so anything that published its region set — the
     #                                   navigator row, the plate's per-view wash — is now stale.
+    capturesChanged = Signal()        # the decon capture store changed (fired from engine worker
+    #                                   threads through a weakref wrapper; Qt marshals the emit)
 
     _op_action: Optional[str] = None
     _op_address: Any = None
@@ -363,6 +366,8 @@ class RegionViewer(QMainWindow):
         # navigation unit is the region".
         self._fov_mode = bool(fovs)
         self._fov_slider = None    # the FOV axis, built ONLY in a FOVs view; None means "no axis"
+        self._iter_slider = None   # the decon iteration axis; built on first landed captures
+        self._captures_cb = None   # the capture store's subscriber, unsubscribed in dispose
         self._fov_layer = None     # the napari Shapes layer this window draws FOV rectangles on
         self._fov_boxes_cache: dict = {}   # the current region's FOV boxes; see _draw_fov_boxes
         if self._fov_mode and self._roi_bbox is not None:
@@ -487,6 +492,10 @@ class RegionViewer(QMainWindow):
             self._install_canvas_loupe(pane)
         except Exception as exc:                          # noqa: BLE001 - a magnifier, never fatal
             log.debug("view %s could not wire the canvas loupe: %s", self.window_id, exc)
+        try:
+            self._install_camera_gizmo(pane)
+        except Exception as exc:                          # noqa: BLE001 - a gizmo, never fatal
+            log.debug("view %s could not wire the camera gizmo: %s", self.window_id, exc)
 
         # EVERYTHING WINDOW-SCOPED lives in napari's LEFT column, above the layer controls (UI
         # feedback 2026-08-19: "free up the viewer space to the top" — no full-width top dock;
@@ -557,6 +566,29 @@ class RegionViewer(QMainWindow):
         self._time_point_bar.on_problem(self._say)
         self._time_point_bar.set_count(int((self._meta or {}).get("n_t", 1) or 1))
         lay.addWidget(self._time_point_bar)
+
+        # THE ITERATION AXIS (Julio, 2026-09-09: "you should do a slider for the decon
+        # iterations that pops on the bottom. Like the fov's button makes that slider.").
+        # Built lazily like the FOV axis; pops when a decon run lands captures, hides when
+        # they are gone. The store must never hold a Qt object (a dead subscriber's bound
+        # emit measured a bus error), so a weakref wrapper emits into a live window only
+        # and unsubscribes itself the first time it finds a corpse.
+        from squidxplorer._decon import subscribe_captures, unsubscribe_captures
+
+        self._axis_lay = lay              # where a lazily built bottom bar docks itself
+        self.capturesChanged.connect(self._refresh_iteration_slider)
+        ref = weakref.ref(self)
+
+        def _on_captures_changed():
+            win = ref()
+            if win is None or not _alive(win):
+                unsubscribe_captures(_on_captures_changed)
+                return
+            win.capturesChanged.emit()
+
+        self._captures_cb = _on_captures_changed
+        subscribe_captures(_on_captures_changed)
+        self._refresh_iteration_slider()
 
         self.setCentralWidget(central)
 
@@ -665,24 +697,14 @@ class RegionViewer(QMainWindow):
             self._chip("→ window", "Open the drawn ROIs as child views.", self._open_roi_children),
             self._btn_focus, self._btn_record, self._btn_png,
         ]
-        # 3D camera snaps, IN CAMERA (no panels: the grid is the whole UI): three axis
-        # planes plus a refit. Hidden on a 2D tab; `note_volume_tab` shows them.
-        self._snap_chips = [
-            self._chip("XY", "Snap the 3D camera to the XY plane (top view).",
-                       lambda: _volume_view.snap_camera(self, "xy")),
-            self._chip("XZ", "Snap the 3D camera to the XZ plane.",
-                       lambda: _volume_view.snap_camera(self, "xz")),
-            self._chip("YZ", "Snap the 3D camera to the YZ plane.",
-                       lambda: _volume_view.snap_camera(self, "yz")),
-            self._chip("fit", "Refit the volume to the canvas; the angles stay.",
-                       lambda: _volume_view.snap_camera(self, "fit")),
-            self._chip("orbit", "Play the demo camera orbit over this volume.",
-                       self._play_orbit),
-        ]
-        self._btn_orbit = self._snap_chips[-1]
-        for chip in self._snap_chips:
-            chip.setVisible(self._is_volume_tab)
-        chips += self._snap_chips
+        # 3D camera poses are NOT buttons (Julio, 2026-09-09: "the camera controls
+        # shouldn't be buttons"): the Blender-style gizmo on the canvas's top-right owns
+        # the snaps and the orbit-by-drag (`_camera_gizmo`, installed with the pane). The
+        # one chip left is the scripted demo orbit, a sequence, not a camera pose.
+        self._btn_orbit = self._chip(
+            "orbit", "Play the demo camera orbit over this volume.", self._play_orbit)
+        self._btn_orbit.setVisible(self._is_volume_tab)
+        chips.append(self._btn_orbit)
         for k, chip in enumerate(chips):
             chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             grid.addWidget(chip, k // 3, k % 3)
@@ -702,6 +724,8 @@ class RegionViewer(QMainWindow):
 
     #: Whether this view IS a 3D tab (spawned by another view's 3D chip).
     _is_volume_tab = False
+    #: The Blender-style camera gizmo; built with the pane, shown on volume tabs only.
+    _camera_gizmo = None
 
     def note_volume_tab(self) -> None:
         """This view IS the 3D tab: there is no 2D/3D mode switch (a 2D tab is 2D, a 3D
@@ -712,9 +736,12 @@ class RegionViewer(QMainWindow):
         if btn is not None and _alive(btn):
             btn.setEnabled(False)
             btn.setToolTip("This tab is the 3D view; close it to go back to 2D.")
-        for chip in getattr(self, "_snap_chips", ()):
-            if _alive(chip):
-                chip.setVisible(True)
+        chip = getattr(self, "_btn_orbit", None)
+        if chip is not None and _alive(chip):
+            chip.setVisible(True)
+        giz = self._camera_gizmo
+        if giz is not None and _alive(giz):
+            giz.set_active(True)
 
     def _play_orbit(self) -> None:
         """Play the canned demo orbit live in this view; the chip disables while it runs."""
@@ -1964,6 +1991,96 @@ class RegionViewer(QMainWindow):
         if slider is not None:
             slider.frame_done()
 
+    # -- THE ITERATION AXIS: a bottom bar over the decon capture store -----------------------
+
+    def _capture_ks(self) -> list:
+        """The iteration counts every captured channel has (the steppable set)."""
+        from squidxplorer._decon import iteration_captures
+
+        caps = iteration_captures()
+        if not caps:
+            return []
+        return sorted(set.intersection(*(set(by_k) for by_k in caps.values())))
+
+    def _refresh_iteration_slider(self) -> None:
+        """POPS when a decon run lands captures; HIDES when they are gone (operator change,
+        re-ingest, disarm). Built lazily on first captures, the FOV axis's own rule."""
+        ks = self._capture_ks()
+        slider = self._iter_slider
+        if not ks:
+            if slider is not None and _alive(slider):
+                slider.hide()
+            return
+        if slider is None:
+            from squidxplorer._iter_nav import IterationSlider
+
+            lay = getattr(self, "_axis_lay", None)
+            if lay is None:
+                return
+            slider = self._iter_slider = IterationSlider(
+                on_change=self._show_decon_iteration, on_turbo=self._set_iteration_turbo)
+            slider.on_problem(self._say)
+            lay.addWidget(slider)
+        slider.set_iterations(ks)
+        slider.show()
+
+    def _show_decon_iteration(self, k: int) -> None:
+        """Repaint THIS view's decon layers with iteration *k*'s MIP: a swap of held
+        planes, never a re-solve."""
+        from squidxplorer._decon import iteration_captures
+        from squidxplorer._napari_view import full_res_level
+        from squidxplorer.projection import cast_like
+
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if (pane is not None
+                                                   and getattr(pane, "ok", False)) else None
+        if mosaic is None:
+            return
+        for channel, by_k in iteration_captures().items():
+            plane = by_k.get(int(k))
+            layer = mosaic.find("decon", channel)
+            if plane is None or layer is None:
+                continue
+            current = np.asarray(full_res_level(layer.data))
+            data = cast_like(plane, current.dtype)
+            if tuple(current.shape) != tuple(data.shape):
+                self._say(
+                    f"iteration slider: the decon layer for {channel} is "
+                    f"{tuple(current.shape)} px but the capture is {tuple(data.shape)}; "
+                    "preview an ROI inside one field and step again.")
+                continue
+            layer.data = data
+
+    #: channel -> the colormap a layer had before turbo, restored on untick.
+    _pre_turbo: Optional[dict] = None
+
+    def _set_iteration_turbo(self, on: bool) -> None:
+        """Recolor the stepped layers with turbo (napari-native); untick restores each
+        layer's own colormap, remembered here."""
+        from squidxplorer._decon import iteration_captures
+
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if (pane is not None
+                                                   and getattr(pane, "ok", False)) else None
+        if mosaic is None:
+            return
+        if self._pre_turbo is None:
+            self._pre_turbo = {}
+        for channel in iteration_captures():
+            layer = mosaic.find("decon", channel)
+            if layer is None:
+                continue
+            try:
+                if on:
+                    self._pre_turbo[channel] = layer.colormap
+                    layer.colormap = "turbo"
+                else:
+                    previous = self._pre_turbo.pop(channel, None)
+                    if previous is not None:
+                        layer.colormap = previous
+            except Exception as exc:             # noqa: BLE001 - a recolor, never a crash
+                self._say(f"iteration slider: {channel} could not be recolored: {exc}")
+
     _auto_worker = None
 
     def _reset_contrast_off_thread(self, channel: str, sample) -> None:
@@ -2050,6 +2167,21 @@ class RegionViewer(QMainWindow):
         _roi_tools.open_roi_children(self)
         self._roi_used = True                    # used: the chip hands back to drawing
         self._refresh_roi_chip()
+
+    def _install_camera_gizmo(self, pane) -> None:
+        """The Blender-style camera gizmo, top-right ON the canvas (volume tabs only).
+
+        Hosted on the GL canvas widget where one exists (`MosaicPane.canvas_widget`, the
+        licensed overlay arrangement the loupe inset also uses); a pane without a canvas
+        (headless ModelPane) hosts it on its own body, so the volume-tab visibility rule
+        stays actuatable offscreen.
+        """
+        from squidxplorer._camera_gizmo import CameraGizmo
+
+        host = getattr(pane, "canvas_widget", None) or pane
+        self._camera_gizmo = CameraGizmo(host, self)
+        if self._is_volume_tab:                  # note_volume_tab can precede the pane
+            self._camera_gizmo.set_active(True)
 
     def _install_canvas_loupe(self, pane) -> None:
         """Give this window's canvas a shift-left-click magnifier.
@@ -2624,10 +2756,29 @@ class RegionViewer(QMainWindow):
         except Exception:                            # noqa: BLE001
             pass
         try:
+            # The iteration axis is the same family; also stop hearing the capture store,
+            # so a later landing never emits into this dying window.
+            if self._captures_cb is not None:
+                from squidxplorer._decon import unsubscribe_captures
+
+                unsubscribe_captures(self._captures_cb)
+                self._captures_cb = None
+            if self._iter_slider is not None:
+                self._iter_slider.shutdown()
+        except Exception:                            # noqa: BLE001
+            pass
+        try:
             # BEFORE the pane goes: the inset is parented to the canvas the pane is about to
             # destroy, and the loupe worker is a QThread like every other one joined above.
             if self._loupe is not None:
                 self._loupe.shutdown()
+        except Exception:                            # noqa: BLE001
+            pass
+        try:
+            # Same reason: the gizmo is a child of that canvas and taps the camera's events.
+            giz, self._camera_gizmo = self._camera_gizmo, None
+            if giz is not None:
+                giz.shutdown()
         except Exception:                            # noqa: BLE001
             pass
         try:

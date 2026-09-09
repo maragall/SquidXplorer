@@ -19,6 +19,9 @@ GUI_MODULES = frozenset({
     "_fontscale",        # lives outside `_viewer` only to avoid a circular import
     "_brick_view",       # the in-window 3D renderer; owns a QThread reading bricks off the UI
                           # thread. The Qt-free half (geometry, stride, budget policy) is `_bricks`.
+    "_camera_gizmo",     # the Blender-style camera gizmo: a QWidget overlay on the canvas. Its
+                          # geometry (projection, hit-testing, drag mapping) is pure functions;
+                          # the napari Camera math it projects with is `_napari_view.camera_basis`.
     "_camera_script",    # the camera-script EXECUTOR: pumps the Qt loop while waiting on the
                           # brick loader. The planning half (poses, interpolation, dwell) is pure.
     "_gallery_window",   # Gallery View's window; its producer `_gallery` is Qt-free on purpose
@@ -34,6 +37,9 @@ GUI_MODULES = frozenset({
     "_fov_nav",          # the FOV axis: napari's dims slider walking a region's fields with the
                           # CAMERA. Where a FOV is lives in `_mosaic_source.mosaic_fov_bboxes_um`,
                           # what framing one means in `_napari_view.camera_for_bbox_um` — Qt-free.
+    "_iter_nav",         # the decon iteration axis: the same dims-slider family as `_fov_nav`,
+                          # stepping held MIP planes. What a capture IS lives in `_decon`'s
+                          # Qt-free store; this module is only the bar.
     "_logpanel",         # the log PANEL (the Qt widget). `_logpane`, no 'l', is the Qt-free bus.
     "_napari_pane",
     "_op_panels",

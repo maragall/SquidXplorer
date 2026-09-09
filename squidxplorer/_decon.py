@@ -9,6 +9,10 @@ volume solve equals the old per-plane solve (float32 max abs diff 0.00195, uint1
 count, and the depth-1 3-D PSF's central plane renormalises exactly to the old in-focus
 slice). Optics are derived per channel via ``for_channel``. The old registered name
 ``decon3d`` is refused BY NAME with a pointer here.
+
+Iteration capture (2026-09-09, always on) keeps ONLY per-iteration MIP planes, one per
+channel per count. THE STATED TRADE: stepping a 3D volume, or a chosen per-plane z, at some
+iteration k later means one re-solve at that k, because the stacks are not kept.
 """
 
 from __future__ import annotations
@@ -194,26 +198,36 @@ def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool,
          snapshot_iters=None):
     """One call into RL: device selection, optional FFT-length padding, and an all-zero result guard.
 
-    ``snapshot_iters`` (petakit's own contract, reinstated from git history 2026-09-09) asks
-    ONE solve to capture the estimate after each named iteration; the return is then
-    ``{iter: volume}`` instead of one array. The stepper steps those captures back and
-    forth for free, never a re-solve per count. The captures are real bytes and join the
-    memory refusal's estimate.
+    ``snapshot_iters`` asks ONE solve to capture each named iteration's MIP; the return is
+    then ``(final volume, {iter: MIP plane})``. The stepper steps those planes back and
+    forth for free, never a re-solve per count. Held bytes are one float32 plane per count
+    on a torch device; on the petakit arm, whose ``engine.rl`` captures whole stacks, the
+    stacks exist TRANSIENTLY until reduced here, and the memory refusal counts that.
     """
     volume = np.ascontiguousarray(volume, dtype=np.float32)
     snaps = sorted({int(i) for i in snapshot_iters}) if snapshot_iters else None
     if snaps is not None:
         iterations = max(int(iterations), snaps[-1])
     device = _decon_gpu.select_device(volume.shape, gpu=gpu, psf_shape=psf.shape)
-    extra = len(snaps) * volume.nbytes if snaps is not None else 0
-    note = f" plus {len(snaps)} held iteration snapshots" if snaps is not None else ""
+    extra, note = 0, ""
+    if snaps is not None:
+        if device is not None:
+            extra = len(snaps) * (volume.nbytes // max(volume.shape[0], 1))
+            note = f" plus {len(snaps)} held iteration MIP planes"
+        else:
+            extra = len(snaps) * volume.nbytes
+            note = (f" plus {len(snaps)} transient iteration stacks, reduced to MIP "
+                    "planes after the solve")
     refusal = _decon_gpu.working_set_refusal(volume.shape, device, psf.shape,
                                              extra_bytes=extra, extra_note=note)
     if refusal:
         raise MemoryError(refusal)
     _decon_gpu.log_choice(volume.shape, gpu=gpu, psf_shape=psf.shape)
+    mips = None
     if device is not None:
         out = _decon_gpu.rl(volume, psf, iterations, device, snapshot_iters=snaps)
+        if snaps is not None:
+            out, mips = out
     else:
         petakit = _petakit()
         widths = (_decon_gpu.pad_plan(volume.shape, psf.shape)
@@ -228,11 +242,15 @@ def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool,
                     "per-iteration capture cannot happen inside one solve. Update petakit "
                     "(the pinned SHA in pyproject carries it); refusing to fall back to one "
                     "full re-solve per iteration count without saying so.")
-            out = petakit.engine.rl(
+            stacks = petakit.engine.rl(
                 np.ascontiguousarray(padded), psf,
                 n_iter=iterations, gpu=gpu, snapshot_iters=snaps,
                 avail_memory_gb=_NEVER_TILE_GB,
             )
+            out = stacks[snaps[-1]]
+            # petakit captures stacks; only their MIPs leave this frame.
+            mips = {k: np.ascontiguousarray(v.max(axis=0), dtype=np.float32)
+                    for k, v in stacks.items()}
         else:
             out = petakit.deconvolve(
                 np.ascontiguousarray(padded), psf,
@@ -241,9 +259,10 @@ def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool,
             )
         if any(widths):
             core = tuple(slice(w, w + n) for w, n in zip(widths, volume.shape))
-            out = ({k: v[core] for k, v in out.items()} if snaps is not None
-                   else out[core])
-    final = out[snaps[-1]] if snaps is not None else out
+            out = out[core]
+            if mips is not None:
+                mips = {k: v[core[1:]] for k, v in mips.items()}
+    final = out
     if np.any(volume) and not np.any(final):
         raise RuntimeError(
             "petakit returned an all-zero result for a non-empty input. That is the failure "
@@ -251,7 +270,7 @@ def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool,
             f"method={METHOD!r} with a PSF of shape {psf.shape}. Refusing to hand back a black "
             "image that would look like a successful deconvolution."
         )
-    return out
+    return out if snaps is None else (out, mips)
 
 
 def deconvolve_stack(
@@ -269,8 +288,9 @@ def deconvolve_stack(
     whole deconvolved stack — same shape as the input, the output the user examines plane by
     plane (the format contract: SquidXplorer writes in the format it ingests).
 
-    ``snapshot_sink`` receives ``{k: float32 stack}`` for EVERY iteration 1..*iterations*
-    of the ONE solve (the stepper's captures); the return is the final iteration, unchanged.
+    ``snapshot_sink`` receives ``{k: float32 MIP plane}`` for EVERY iteration
+    1..*iterations* of the ONE solve (the stepper's captures, reduced inside the solve
+    loop); the return is the final iteration, unchanged.
     """
     stack = planes if isinstance(planes, np.ndarray) else np.asarray(list(planes))
     if stack.ndim != 3 or stack.shape[0] < 1:
@@ -289,10 +309,9 @@ def deconvolve_stack(
     if snapshot_sink is None:
         out = _run(stack, make_psf(optics), iterations, gpu)
     else:
-        snaps = _run(stack, make_psf(optics), iterations, gpu,
-                     snapshot_iters=range(1, int(iterations) + 1))
-        snapshot_sink(snaps)
-        out = snaps[max(snaps)]
+        out, mips = _run(stack, make_psf(optics), iterations, gpu,
+                         snapshot_iters=range(1, int(iterations) + 1))
+        snapshot_sink(mips)
     return cast_like(out.max(axis=0) if project else out, dtype)
 
 
@@ -502,38 +521,25 @@ def rig_profile_notes(path) -> "list[str]":
 
 # ---------------------------------------------------------------------------------------
 # The iteration capture store (Qt-free). Julio, 2026-09-05: "make sure that I could revert
-# the iterations so that I can see how the halo's change". A decon preview run, when armed,
-# keeps EVERY iteration of its ONE solve ({k: (Z, H, W) float32} per channel, trimmed to
-# the delivered window); the panel's stepper repaints from these, never a re-solve. The
-# LAST solve per channel wins, so a multi-FOV run leaves the last field's captures and the
-# stepper's own shape check names the mismatch. Reinstated in spirit from the shelved QC
-# sweep (bf982a2^); the storage is session memory, freed on disarm.
+# the iterations so that I can see how the halo's change". EVERY decon run through the
+# per-channel bind captures ({k: (H, W) float32 MIP plane} per channel, trimmed to the
+# delivered window) - always on, no toggle, because a MIP plane per iteration is cheap
+# where the full stacks that shipped opt-in were not. The panel's stepper repaints from
+# these, never a re-solve. The LAST solve per channel wins, so a multi-FOV run leaves the
+# last field's captures and the stepper's own shape check names the mismatch.
+#
+# THE STATED TRADE: only MIPs are kept. Stepping a 3D volume, or a chosen per-plane z, at
+# some iteration k later means ONE re-solve at that k, because the stacks are not kept.
 # ---------------------------------------------------------------------------------------
 
 _capture_lock = threading.Lock()
-_capture_armed = False
 _captures: "dict[str, dict[int, np.ndarray]]" = {}
 _capture_subscribers: "list[Callable[[], None]]" = []
 
 
-def set_capture_iterations(on: bool) -> None:
-    """Arm or disarm per-iteration capture (session setting). Disarming FREES the captures."""
-    global _capture_armed
-    with _capture_lock:
-        _capture_armed = bool(on)
-        if not on:
-            _captures.clear()
-    _notify_captures()
-
-
-def capture_iterations() -> bool:
-    with _capture_lock:
-        return _capture_armed
-
-
 def iteration_captures() -> "dict[str, dict[int, np.ndarray]]":
-    """``{channel: {k: stack}}`` currently held. A per-call copy of the dicts; the stacks
-    themselves are shared and treated as read-only by every consumer."""
+    """``{channel: {k: MIP plane}}`` currently held. A per-call copy of the dicts; the
+    planes themselves are shared and treated as read-only by every consumer."""
     with _capture_lock:
         return {c: dict(by_k) for c, by_k in _captures.items()}
 
@@ -568,12 +574,10 @@ def _notify_captures() -> None:
 
 
 def _land_captures(channel: str, snaps: "dict[int, np.ndarray]") -> None:
-    """File one solve's trimmed captures under *channel* and say what is held."""
+    """File one solve's trimmed MIP captures under *channel* and say what is held."""
     if not snaps:
         return
     with _capture_lock:
-        if not _capture_armed:
-            return
         _captures[str(channel)] = {int(k): v for k, v in snaps.items()}
         held = sum(v.nbytes for by_k in _captures.values() for v in by_k.values())
     per = next(iter(snaps.values())).nbytes / 1e6
@@ -636,10 +640,10 @@ def decon_op(
     writer honour.
 
     *capture_channel* (the per-channel bind sets it) names the channel the iteration
-    capture store files under when capture is armed; the same solve serves both.
+    capture store files each solve's per-iteration MIPs under; the same solve serves both.
     """
     def _decon(planes: Iterable[np.ndarray]) -> np.ndarray:
-        if capture_channel is None or not capture_iterations():
+        if capture_channel is None:
             return deconvolve_stack(planes, optics, iterations, project=False)
         pending: "dict[int, np.ndarray]" = {}
         out = deconvolve_stack(planes, optics, iterations, project=False,
@@ -652,13 +656,14 @@ def decon_op(
     _decon.keeps_depth = True
     if capture_channel is not None:
         # The declaration ``project_well`` calls with ITS OWN trim slices after each solve,
-        # so a windowed capture is trimmed exactly as the delivered pixels were.
+        # so a windowed capture is trimmed exactly as the delivered pixels were. The
+        # captures are MIP planes, so the (y, x) trim applies directly.
         def _land(trim) -> None:
             pending = getattr(_decon, "_pending_snaps", None)
             _decon._pending_snaps = None
             if pending:
                 _land_captures(capture_channel,
-                               {k: np.ascontiguousarray(v[(slice(None),) + tuple(trim)])
+                               {k: np.ascontiguousarray(v[tuple(trim)])
                                 for k, v in pending.items()})
 
         _decon.land_snapshots = _land
