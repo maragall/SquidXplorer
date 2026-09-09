@@ -156,10 +156,29 @@ def deliver_qc(view, caps: dict, region: str, fov: int, window):
     nz = len(next(iter(caps.values()))[ks[0]]["xz"])
     z_um = nz * dz
 
+    # THE DISPLAY NORMALIZATION (Julio, 2026-09-09: "intesity grows with the
+    # iterations"): RL concentrates flux, so per-iteration maxima grow with k (measured
+    # on G7 488: XY p99.5 31250 -> 35759 and max 55852 -> 78365 over k=1..3) while the
+    # layer holds one contrast window - stepping read as global brightening. Each k's
+    # THREE projections are scaled by ONE scalar per (k, channel): the stack's smallest
+    # XY 99.5th percentile over that k's own, so apparent brightness holds constant
+    # across the step, the raw input (k=0) anchors the scheme, XY/XZ/YZ stay mutually
+    # consistent, and nothing is scaled UP into the cast ceiling. DISPLAY ONLY: these
+    # captures are a QC instrument, not a quantitative result - the capture store keeps
+    # the raw planes untouched.
+    factors: "dict[str, dict[int, float]]" = {}
+    for c in channels:
+        p = {k: float(np.percentile(caps[c][k]["xy"], 99.5)) for k in ks}
+        target = min(p.values())
+        factors[c] = {k: target / max(p[k], 1e-12) for k in ks}
+    log.info("iteration display normalized per step to its own 99.5th percentile "
+             "(display only; the captures stay raw)")
+
     def _stack(name: str, transpose: bool = False):
         out = []
         for c in channels:
-            planes = [caps[c][k][name].T if transpose else caps[c][k][name] for k in ks]
+            planes = [(caps[c][k][name].T if transpose else caps[c][k][name])
+                      * factors[c][k] for k in ks]
             out.append(cast_like(np.stack(planes), np.dtype(dtype)))
         return out
 

@@ -300,8 +300,9 @@ def deconvolve_stack(
     plane (the format contract: SquidXplorer writes in the format it ingests).
 
     ``snapshot_sink`` receives ``{k: {"xy", "xz", "yz"}}`` (three float32 max-projections)
-    for EVERY iteration 1..*iterations* of the ONE solve, reduced inside the solve loop;
-    the return is the final iteration, unchanged.
+    for iteration 0 (THE RAW INPUT, so the QC steps from unprocessed) and every iteration
+    1..*iterations* of the ONE solve, reduced inside the solve loop; the return is the
+    final iteration, unchanged.
     """
     stack = planes if isinstance(planes, np.ndarray) else np.asarray(list(planes))
     if stack.ndim != 3 or stack.shape[0] < 1:
@@ -320,6 +321,9 @@ def deconvolve_stack(
     if snapshot_sink is None:
         out = _run(stack, make_psf(optics), iterations, gpu)
     else:
+        raw32 = np.asarray(stack, dtype=np.float32)
+        snapshot_sink({0: {name: np.ascontiguousarray(raw32.max(axis=axis))
+                           for axis, name in ((0, "xy"), (1, "xz"), (2, "yz"))}})
         out, mips = _run(stack, make_psf(optics), iterations, gpu,
                          snapshot_iters=range(1, int(iterations) + 1))
         snapshot_sink(mips)

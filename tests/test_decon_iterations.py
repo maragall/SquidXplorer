@@ -45,13 +45,15 @@ def test_the_tri_mip_capture_rides_the_one_solve(monkeypatch):
     got: dict = {}
     with_sink = deconvolve_stack(stack, optics, 3, project=False, snapshot_sink=got.update)
     plain = deconvolve_stack(stack, optics, 3, project=False)
-    assert sorted(got) == [1, 2, 3]
+    assert sorted(got) == [0, 1, 2, 3], "k=0 is the RAW INPUT's own projections"
     assert sorted(got[3]) == ["xy", "xz", "yz"]
     assert got[3]["xy"].shape == (32, 40)
     assert got[3]["xz"].shape == (3, 40)
     assert got[3]["yz"].shape == (3, 32)
     assert np.array_equal(with_sink, plain)
     for axis, name in ((0, "xy"), (1, "xz"), (2, "yz")):
+        assert np.array_equal(got[0][name], stack.max(axis=axis).astype(np.float32)), (
+            f"the k=0 {name} capture must be the raw input's own max over axis {axis}")
         assert np.array_equal(cast_like(got[3][name], stack.dtype), plain.max(axis=axis)), (
             f"the final {name} capture must be the run's own max over axis {axis}")
     assert not np.array_equal(got[1]["xy"], got[3]["xy"])
@@ -119,7 +121,7 @@ def test_the_qc_solve_is_the_ordinary_dispatch_and_take_frees_the_store(monkeypa
     assert rode_dispatch["n"] == 1, "the QC solve must ride the one dispatch path"
     caps = take_captures()
     assert sorted(caps) == ["488"]
-    assert sorted(caps["488"]) == [1, 2]
+    assert sorted(caps["488"]) == [0, 1, 2], "raw input rides as k=0"
     assert sorted(caps["488"][2]) == ["xy", "xz", "yz"]
     assert caps["488"][2]["xy"].shape == (16, 16)
     assert caps["488"][2]["xz"].shape == (2, 16)
@@ -127,9 +129,11 @@ def test_the_qc_solve_is_the_ordinary_dispatch_and_take_frees_the_store(monkeypa
 
 
 def _tri(rng, k, h=24, w=30, z=4):
-    return {"xy": (rng.random((h, w)) * 1000 + k).astype(np.float32),
-            "xz": (rng.random((z, w)) * 1000 + k).astype(np.float32),
-            "yz": (rng.random((z, h)) * 1000 + k).astype(np.float32)}
+    # Intensity GROWS with k on purpose (RL concentrates flux; Julio's measured
+    # brightening) so the display-normalization pin has real growth to flatten.
+    return {"xy": ((rng.random((h, w)) * 1000 + 50) * k).astype(np.float32),
+            "xz": ((rng.random((z, w)) * 1000 + 50) * k).astype(np.float32),
+            "yz": ((rng.random((z, h)) * 1000 + 50) * k).astype(np.float32)}
 
 
 def _drain(app, pred, timeout=10):
@@ -168,6 +172,8 @@ def test_the_chained_qc_result_lands_as_layers_and_its_slices_actually_land(
         nz = 2
         rng = np.random.default_rng(1)
         caps = {"488": {k: _tri(rng, k, h=fh, w=fw, z=nz) for k in (1, 2, 3)}}
+        raw_before = {k: {n: v.copy() for n, v in tri.items()}
+                      for k, tri in caps["488"].items()}
         child = deliver_qc(view, caps, region, fov, None)
         assert child is not None and child is not view
         assert child._layers_only and child._worker is None, "no raw mosaic load, ever"
@@ -199,18 +205,34 @@ def test_the_chained_qc_result_lands_as_layers_and_its_slices_actually_land(
         assert model.dims.axis_labels[0] == "iteration"
         assert int(model.dims.current_step[0]) == 2, "opens on the final iteration"
 
+        # THE display-normalization pin (Julio: "intesity grows with the iterations"):
+        # every delivered iteration's XY p99.5 sits on the shared display target, so
+        # stepping holds apparent brightness constant; the input caps stay RAW.
+        p995 = [float(np.percentile(np.asarray(xy.data[i]), 99.5)) for i in range(3)]
+        target = min(float(np.percentile(raw_before[k]["xy"], 99.5)) for k in (1, 2, 3))
+        for i, p in enumerate(p995):
+            assert abs(p - target) <= 0.02 * target, (
+                f"delivered iteration {i} p99.5 {p:.0f} is off the shared display "
+                f"target {target:.0f}; stepping would read as brightening")
+        for k in (1, 2, 3):
+            for name in ("xy", "xz", "yz"):
+                assert np.array_equal(caps["488"][k][name], raw_before[k][name]), (
+                    "delivery must not touch the raw captures (normalize at delivery, "
+                    "not at capture)")
+
         def _no_solve(*_a, **_k):
             raise AssertionError("stepping the QC tab triggered a re-solve")
 
         monkeypatch.setattr(_decon, "_run", _no_solve)
+        factor1 = target / float(np.percentile(raw_before[1]["xy"], 99.5))
         model.dims.set_current_step(0, 0)
         assert _drain(qapp, lambda: np.array_equal(
             np.asarray(xy._slice.image.view),
-            cast_like(caps["488"][1]["xy"], np.dtype(np.uint16))), timeout=5), (
+            cast_like(raw_before[1]["xy"] * factor1, np.dtype(np.uint16))), timeout=5), (
             "the DISPLAYED slice must land for the stepped k (the 2026-09-09 defect)")
         assert _drain(qapp, lambda: np.array_equal(
             np.asarray(xz._slice.image.view),
-            cast_like(caps["488"][1]["xz"], np.dtype(np.uint16))), timeout=5)
+            cast_like(raw_before[1]["xz"] * factor1, np.dtype(np.uint16))), timeout=5)
 
         pane = child._pane
         child.dispose()
