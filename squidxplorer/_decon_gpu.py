@@ -291,10 +291,11 @@ def rl(volume: np.ndarray, psf: np.ndarray, iterations: int, device: str,
        snapshot_iters=None):
     """Biggs-Andrews accelerated Richardson-Lucy on *device*. Returns float32 ``(Z, Y, X)``.
 
-    ``snapshot_iters`` (petakit's own contract, reinstated from git history 2026-09-09): an
-    iterable of iteration counts; the return becomes ``{iter: volume}`` capturing the
-    estimate after each requested iteration of ONE solve. The loop runs to
-    ``max(iterations, max(snapshot_iters))``.
+    ``snapshot_iters``: an iterable of iteration counts; the return becomes
+    ``(final volume, {iter: MIP plane})`` — the estimate's z-MAXIMUM after each requested
+    iteration of ONE solve, reduced ON DEVICE so one (Y, X) float32 plane per count is all
+    that crosses to host memory (the capture redesign, 2026-09-09: stacks are not kept).
+    The loop runs to ``max(iterations, max(snapshot_iters))``.
 
     ONE solve, the whole volume in memory (Julio, 2026-09-05). A volume over the device's
     budget never reaches this function: :func:`working_set_refusal` is the caller's refusal.
@@ -356,14 +357,16 @@ def _solve(raw: np.ndarray, psf: np.ndarray, iterations: int, device: str, width
             )
 
             if snaps is not None and k in snaps:
-                captured[k] = (J_2[core].contiguous().to("cpu").numpy()
+                # The MIP, reduced on the device: one plane per count reaches host memory.
+                captured[k] = (torch.amax(J_2[core], dim=0).contiguous().to("cpu").numpy()
                                .astype(np.float32, copy=False))
 
-        if snaps is not None:
-            return captured
         out = J_2[core].contiguous().to("cpu").numpy()
 
-    return out.astype(np.float32, copy=False)
+    out = out.astype(np.float32, copy=False)
+    if snaps is not None:
+        return out, captured
+    return out
 
 
 def _pad_note(shape, psf_shape=None) -> str:

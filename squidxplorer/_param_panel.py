@@ -249,11 +249,12 @@ class DeconPanel(GenericOperatorPanel):
     Param; it survives the QC page's shelving as this one row.
 
     The STEPPER (Julio, 2026-09-05: "make sure that I could revert the iterations so that
-    I can see how the halo's change"; "I need to see the turbo colormap"): with capture
-    armed, a Preview's ONE solve keeps every iteration (`_decon`'s capture store), and one
-    compact row, visible only while captures exist, steps k back and forth by repainting
-    the view's own decon layers with iteration k's MIP, never a re-solve. The turbo box
-    recolors those layers and puts their own colormap back."""
+    I can see how the halo's change"; "I need to see the turbo colormap"): every decon
+    run's ONE solve keeps each iteration's MIP plane (`_decon`'s capture store, always on
+    since 2026-09-09, no toggle), and one compact row, visible only while captures exist,
+    steps k back and forth by repainting the view's own decon layers with iteration k's
+    MIP, never a re-solve. The turbo box recolors those layers and puts their own
+    colormap back."""
 
     #: The capture store changed (fired from engine worker threads; Qt marshals the emit).
     capturesChanged = Signal()
@@ -312,22 +313,12 @@ class DeconPanel(GenericOperatorPanel):
     def _build_stepper(self) -> None:
         from qtpy.QtWidgets import QHBoxLayout, QPushButton, QWidget
 
-        from squidxplorer._decon import (
-            capture_iterations, set_capture_iterations, subscribe_captures,
-            unsubscribe_captures,
-        )
+        from squidxplorer._decon import subscribe_captures, unsubscribe_captures
 
         self._shown_k = None
         self._pre_turbo: dict = {}
-        # Singular ON PURPOSE: ruling w pins the word "iterations" to ONE appearance in
-        # the visible operator area (the declared param's own row).
-        self.capture_check = QCheckBox("capture each iteration")
-        self.capture_check.setChecked(capture_iterations())
-        self.capture_check.setToolTip(
-            "Preview keeps every RL iteration of its one solve, so the stepper can revisit "
-            "them without re-solving. The snapshots are held in memory until unticked.")
-        self.capture_check.toggled.connect(set_capture_iterations)
-
+        # No capture checkbox: capture is always on (a MIP plane per iteration is cheap);
+        # the row simply appears when a run lands captures.
         self.iter_prev = QPushButton("<")
         self.iter_prev.setToolTip("Show the previous captured iteration.")
         self.iter_next = QPushButton(">")
@@ -355,8 +346,7 @@ class DeconPanel(GenericOperatorPanel):
         self._stepper_row.setVisible(False)
 
         at = self.v.indexOf(self.status)
-        self.v.insertWidget(at, self.capture_check)
-        self.v.insertWidget(at + 1, self._stepper_row)
+        self.v.insertWidget(at, self._stepper_row)
 
         self.capturesChanged.connect(self._refresh_stepper)
         # The store must never hold a Qt object: a dead panel's bound emit measured a bus
@@ -424,12 +414,12 @@ class DeconPanel(GenericOperatorPanel):
             return
         shown = 0
         for channel, by_k in caps.items():
-            volume = by_k.get(int(k))
+            plane = by_k.get(int(k))
             layer = mosaic.find("decon", channel)
-            if volume is None or layer is None:
+            if plane is None or layer is None:
                 continue
             current = np.asarray(full_res_level(layer.data))
-            data = cast_like(volume.max(axis=0), current.dtype)
+            data = cast_like(plane, current.dtype)
             if tuple(current.shape) != tuple(data.shape):
                 self.say(
                     f"iteration stepper: the decon layer for {channel} is "
