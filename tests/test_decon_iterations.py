@@ -82,71 +82,74 @@ def test_a_plain_run_lands_captures_with_no_panel_anywhere(monkeypatch):
     assert all(v.shape == (16, 16) for v in caps["488"].values())
 
 
-class _View:
-    def __init__(self, pane):
-        self._pane = pane
+def _drain(app, pred, timeout=10):
+    import time
+
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        app.processEvents()
+        if pred():
+            return True
+    return False
 
 
-class _Manager:
-    def __init__(self, view):
-        self._view = view
-
-    def active_view(self):
-        return self._view
-
-
-class _Host:
-    def __init__(self, view):
-        self._viewer_manager = _Manager(view)
-        self.said: list = []
-
-    def say(self, text):
-        self.said.append(str(text))
-
-
-def test_stepping_k_changes_the_displayed_pixels_without_a_new_solve(monkeypatch):
-    """THE stepper pin: with captures held, stepping to k swaps the view's decon layer to
-    iteration k's MIP while any solve attempt raises, and turbo recolors then restores.
-    The panel carries NO capture checkbox: capture is always on."""
-    from squidxplorer._napari_pane import model_pane_class
+def test_the_bottom_slider_steps_iterations_without_a_new_solve(qapp, napari_pane_stub,
+                                                                squid_dataset, monkeypatch):
+    """THE stepper pin, now driving the BOTTOM SLIDER (Julio, 2026-09-09: "a slider for the
+    decon iterations that pops on the bottom. Like the fov's button makes that slider."):
+    it POPS when captures land, dragging to k swaps the view's decon layer to iteration
+    k's MIP while any solve attempt raises, turbo rides the bar, and it HIDES when the
+    captures are gone. The panel carries no stepper and no capture checkbox any more."""
+    import squidxplorer._viewer as V
     from squidxplorer._param_panel import DeconPanel
+    from tests.conftest import shutdown_plate_window
 
-    pane = model_pane_class()()
-    pane.mosaic.add_result("intensity", "decon", "488", np.zeros((32, 40), np.uint16))
-    layer = pane.mosaic.find("decon", "488")
-    assert layer is not None
-    panel = DeconPanel(_Host(_View(pane)))
+    for name in ("capture_check", "_build_stepper", "_stepper_row"):
+        assert not any(name in vars(c) for c in DeconPanel.__mro__[:2]), f"{name} is back"
+
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    (view,) = [win._viewer_manager.open(list(win._order)[:1])]
     try:
-        assert not hasattr(panel, "capture_check"), "the opt-in checkbox is deleted"
+        assert _drain(qapp, lambda: view._pane is not None)
+        assert view._iter_slider is None, "no captures: the axis is not even built (lazy)"
+
+        mosaic = view._pane.mosaic
+        mosaic.add_result("intensity", "decon", "488", np.zeros((32, 40), np.uint16))
+        layer = mosaic.find("decon", "488")
         rng = np.random.default_rng(1)
         planes = {k: (rng.random((32, 40)) * 1000 + k).astype(np.float32)
                   for k in (1, 2, 3)}
         _land_captures("488", planes)
-        assert not panel._stepper_row.isHidden(), "captures exist, the row must appear"
-        assert panel._shown_k == 3
+        qapp.processEvents()
+        slider = view._iter_slider
+        assert slider is not None and not slider.isHidden(), "captures exist: the bar pops"
+        assert slider.iteration == 3, "the position follows the final iteration"
+        assert slider._label.text() == "iteration 3/3"
 
-        # From here, a re-solve is an assertion failure: stepping is a repaint of held bytes.
+        # From here, a re-solve is an assertion failure: dragging repaints held planes.
         def _no_solve(*_a, **_k):
-            raise AssertionError("the stepper triggered a re-solve")
+            raise AssertionError("the slider triggered a re-solve")
 
         monkeypatch.setattr(_decon, "_run", _no_solve)
-        panel._step(-1)
+        slider.set_index_from_user(1)
         expect2 = cast_like(planes[2], np.dtype(np.uint16))
         assert np.array_equal(np.asarray(layer.data), expect2)
-        panel._step(-1)
+        assert slider._label.text() == "iteration 2/3"
+        slider.set_index_from_user(0)
         expect1 = cast_like(planes[1], np.dtype(np.uint16))
         assert np.array_equal(np.asarray(layer.data), expect1)
         assert not np.array_equal(expect1, expect2)
-        assert "iteration 1/3" in panel.iter_label.text()
 
         before = layer.colormap.name
-        panel.turbo_check.setChecked(True)
+        slider.turbo_check.setChecked(True)
         assert layer.colormap.name == "turbo"
-        panel.turbo_check.setChecked(False)
+        slider.turbo_check.setChecked(False)
         assert layer.colormap.name == before
 
         clear_captures()
-        assert panel._stepper_row.isHidden()
+        qapp.processEvents()
+        assert slider.isHidden(), "captures gone: the bar hides"
     finally:
-        panel.deleteLater()
-        pane.deleteLater()
+        shutdown_plate_window(qapp, win)
