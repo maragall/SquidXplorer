@@ -34,6 +34,9 @@ GUI_MODULES = frozenset({
     "_fov_nav",          # the FOV axis: napari's dims slider walking a region's fields with the
                           # CAMERA. Where a FOV is lives in `_mosaic_source.mosaic_fov_bboxes_um`,
                           # what framing one means in `_napari_view.camera_for_bbox_um` — Qt-free.
+    "_iter_nav",         # the decon iteration axis: the same dims-slider family as `_fov_nav`,
+                          # stepping held MIP planes. What a capture IS lives in `_decon`'s
+                          # Qt-free store; this module is only the bar.
     "_logpanel",         # the log PANEL (the Qt widget). `_logpane`, no 'l', is the Qt-free bus.
     "_napari_pane",
     "_op_panels",
