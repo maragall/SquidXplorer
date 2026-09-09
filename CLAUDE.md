@@ -1490,6 +1490,31 @@ previewing, we run it on the whole stack." Supersedes the bottom-slider era abov
   per-plane look at a chosen k is the Preview button at that k (one re-solve).
 - The MIP is the QC instrument; the full-stack Preview is the result.
 
+## The QC surface is a TAB of napari layers (2026-09-09, branch decon-qc-tab)
+
+Julio, on the separate window: "It should be a tab in the napari GUI. You leverage napari
+layers, decon sliders, the mip is just a 2d view of the ROI. You're not leveraging the GUI
+capabilities and you added some sepparate window code." Supersedes the window section above;
+net -108 lines, the deletion IS the correction:
+
+- The inspect button opens an ordinary DECK TAB via `open_child` over the solved box (the
+  ROI-child path; teardown is `RegionViewer.dispose`, which frees the pixels). The MIP is
+  literally a 2D view of the ROI.
+- The three projections are real napari layers per channel, ALL adopted under ONE identity
+  `("decon QC", channel)` (the bricks' multi-holder precedent): the tree checkbox, contrast
+  sliders and colormap dropdown (turbo included) drive all three through the identity
+  mirror. Band geometry rides layer `scale`/`translate` (dz_um/pixel_size_um on the z
+  direction), never resampling.
+- The ITERATION axis is a napari dims axis: layers are (N, 1, H, W), axis 0 labeled
+  "iteration", stepped by napari's own bottom slider for every layer at once. `_iter_nav`
+  became caller-free and is DELETED whole (wrapping the axis in a second Dims owner is the
+  two-owner defect the fov-nav notes forbid).
+- One small bottom bar reads k off napari's own Dims: "iteration k of N" + "use iteration k"
+  writing the panel's spin. Contrast seeds once per channel from the final iteration's
+  percentiles; napari owns it afterwards.
+- Known and accepted: on an nz > 1 acquisition the raw crop contributes its own z slider
+  beside the iteration slider.
+
 ## Agent skills
 
 ### Issue tracker
