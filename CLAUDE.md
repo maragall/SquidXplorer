@@ -1465,6 +1465,31 @@ Supersedes parts of the section above, in Julio's own testing order:
   mechanism). The upstream napari race is NOT fixed here; a stuck-False global also degrades
   non-napari computes (png export, contrast seeds) - filed as an action item.
 
+## Iteration QC is a WINDOW of three MIPs (2026-09-09, branch decon-qc-window)
+
+Julio, after driving the bottom slider: "For looking at iterations we look at the mip only.
+So a mip is part of the computation. Then when we choose the iterations after the
+previewing, we run it on the whole stack." Supersedes the bottom-slider era above:
+
+- **Tri-MIP capture**: the per-iteration snapshot is THREE on-device max-projections per k
+  per channel - XY (over z), XZ (over y), YZ (over x) - ~1 MB each, memory line
+  "3 snapshots x 0.9 MB (XY+XZ+YZ)". Capture is armed ONLY by the QC solve
+  (`_decon.arm_capture`); ordinary previews and saves land nothing (the save-captures
+  deviation is retired).
+- **`_decon_qc.DeconQCWindow`** (revived name, new spec): opened by the decon panel's ONE
+  button "inspect each iteration" (ruling w caps the visible word "iterations" at one
+  appearance; test_viewer pins the panel's button list by EQUALITY). The QC solve is one
+  `project_well` over the Preview's own scope (ROI window + halo, else the centre field),
+  every channel. The window: XY MIP large, YZ band beside, XZ band below (bands scaled by
+  dz_um/pixel_size_um so they are geometrically honest), `_iter_nav.IterationSlider` reused
+  whole (turbo on its bar), one channel at a time via a combo, contrast latched per channel
+  at the final iteration's percentiles, "use k iterations" writes the panel's spin through
+  `set_param`. Closing frees the store.
+- **The main view carries no iteration UI**: the bottom slider, its store subscription and
+  dispose step are deleted from `_region_viewer` whole. The stated trade stands: a 3D or
+  per-plane look at a chosen k is the Preview button at that k (one re-solve).
+- The MIP is the QC instrument; the full-stack Preview is the result.
+
 ## Agent skills
 
 ### Issue tracker
