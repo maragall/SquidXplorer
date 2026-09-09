@@ -49,11 +49,8 @@ def test_the_operator_pages_and_the_sweep_are_gone_whole():
         assert not hasattr(OP, name), f"_op_panels still ships {name}"
 
 
-def test_the_sweep_module_is_gone_whole():
-    import importlib.util
-
-    assert importlib.util.find_spec("squidxplorer._decon_qc") is None, (
-        "_decon_qc (the QC sweep) is back; it was shelved whole")
+# (The _decon_qc absence pin died 2026-09-09: Julio asked the iteration QC back as a
+# separate tri-MIP window; tests/test_decon_iterations.py pins the revival.)
 
 
 def test_the_plate_publishes_no_qc_tab():

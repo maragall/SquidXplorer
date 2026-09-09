@@ -231,10 +231,16 @@ class DeconPanel(GenericOperatorPanel):
     SESSION setting (`_decon.set_session_ni`), not an operator kwarg, so it cannot be a
     Param; it survives the QC page's shelving as this one row.
 
-    The iteration STEPPER left this panel on 2026-09-09 (Julio: "you should do a slider
-    for the decon iterations that pops on the bottom. Like the fov's button makes that
-    slider."): it is the view's own bottom bar now, `RegionViewer`'s iteration axis over
-    `_decon`'s always-on capture store (`squidxplorer._iter_nav`)."""
+    Iteration QC is a BUTTON here and a separate WINDOW (Julio, 2026-09-09: "there
+    should be a button in the decon UI that opens another window with the MIP, and the
+    turbo colormap togle, and the xy and xz yz bands by it's side, and then with the
+    iterations slider"): `_decon_qc.start_qc` runs one Preview-scoped solve capturing
+    every iteration's three projections and opens `DeconQCWindow`; "use k iterations"
+    writes this panel's own spin through `set_param`."""
+
+    #: The QC worker and window, owned here so `shutdown` can join and close them.
+    _qc_worker = None
+    _qc_window = None
 
     def __init__(self, host):
         super().__init__(host, "decon")
@@ -280,10 +286,48 @@ class DeconPanel(GenericOperatorPanel):
         lab = QLabel("ni:")
         lab.setToolTip("Immersion refractive index; the one PSF input no Squid file records.")
         self.ni_combo.setToolTip(lab.toolTip())
+        # Singular ON PURPOSE: ruling w pins the word "iterations" to ONE appearance in
+        # the visible operator area (the declared param's own row).
+        from qtpy.QtWidgets import QPushButton
+
+        self.inspect_btn = QPushButton("inspect each iteration")
+        self.inspect_btn.setToolTip(
+            "Run one Preview-scoped decon solve capturing every iteration's XY, XZ and "
+            "YZ projections, and open the QC window to step them. Draw an ROI for a "
+            "faster inspection.")
+        self.inspect_btn.clicked.connect(self._inspect_iterations)
         at = self.v.indexOf(self.status)
         self.v.insertLayout(at, _row(lab, self.ni_combo))
         self.v.insertWidget(at + 1, self.ni_spin)
+        self.v.insertWidget(at + 2, self.inspect_btn)
         _apply_qss(self)
+
+    def _inspect_iterations(self, *_) -> None:
+        """The QC button: one scoped solve, then the tri-MIP window (`_decon_qc`)."""
+        manager = getattr(self.host, "_viewer_manager", None)
+        view = manager.active_view() if manager is not None else None
+        if view is None:
+            self.say("iteration QC: no view is open.")
+            return
+        from squidxplorer._decon_qc import start_qc
+
+        start_qc(self, view)
+
+    def shutdown(self) -> None:
+        """Join the QC worker and close its window; the plate calls this at app exit."""
+        worker, self._qc_worker = self._qc_worker, None
+        if worker is not None:
+            try:
+                if worker.isRunning():
+                    worker.wait(10_000)
+            except RuntimeError:
+                pass
+        window, self._qc_window = self._qc_window, None
+        if window is not None:
+            try:
+                window.close()
+            except RuntimeError:
+                pass
 
 
 
