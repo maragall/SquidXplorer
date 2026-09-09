@@ -1,4 +1,4 @@
-"""The 3D camera snap chips: XY/XZ/YZ/fit, in camera only, offered only on a volume tab."""
+"""The 3D camera snaps: in camera only, driven by the canvas gizmo on a volume tab."""
 
 from __future__ import annotations
 
@@ -53,9 +53,11 @@ def _volume_shell(mosaic):
     return _Shell(vol), vol
 
 
-def test_the_snap_chips_exist_only_on_a_volume_tab(qapp, napari_pane_stub, squid_dataset):
-    """A 2D tab has no 3D camera: the chips are HIDDEN there (not disabled clutter), and
-    ``note_volume_tab`` — the one fact that makes a view the 3D tab — shows them."""
+def test_the_camera_poses_are_a_gizmo_not_buttons(qapp, napari_pane_stub, squid_dataset):
+    """Julio, 2026-09-09: "the camera controls shouldn't be buttons." The XY/XZ/YZ/fit
+    chips are gone whole; the canvas gizmo owns the poses, hidden on a 2D tab and shown
+    by ``note_volume_tab`` (the one fact that makes a view the 3D tab). The orbit chip
+    STAYS with the same visibility rule: it plays a scripted sequence, not a camera pose."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -63,13 +65,15 @@ def test_the_snap_chips_exist_only_on_a_volume_tab(qapp, napari_pane_stub, squid
     assert v is not None
     _drain_until(qapp, lambda: v._pane is not None, timeout=10)
     try:
-        chips = v._snap_chips
-        assert [c.text() for c in chips] == ["XY", "XZ", "YZ", "fit", "orbit"]
-        assert all(c.isHidden() for c in chips), "a 2D tab offers the 3D snap chips"
+        assert not hasattr(v, "_snap_chips"), "the snap-chip bookkeeping is back"
+        giz = v._camera_gizmo
+        assert giz is not None, "the pane came up without a camera gizmo"
+        orbit = v._btn_orbit
+        assert orbit.text() == "orbit" and orbit.toolTip()
+        assert giz.isHidden() and orbit.isHidden(), "a 2D tab offers the 3D camera"
         v.note_volume_tab()
-        assert all(not c.isHidden() for c in chips), "a volume tab hides its own snap chips"
-        assert all(c.isEnabled() for c in chips)
-        assert all(c.toolTip() for c in chips), "a chip must say what it does"
+        assert not giz.isHidden(), "a volume tab hides its own camera gizmo"
+        assert not orbit.isHidden() and orbit.isEnabled()
     finally:
         shutdown_plate_window(qapp, win)
 
