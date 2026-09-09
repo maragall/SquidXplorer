@@ -120,45 +120,87 @@ def _tri(rng, k, h=24, w=30, z=4):
             "yz": (rng.random((z, h)) * 1000 + k).astype(np.float32)}
 
 
-def test_the_qc_windows_slider_swaps_all_three_projections_without_a_new_solve(monkeypatch):
-    """THE stepper pin, in the QC window: dragging to k shows iteration k's XY, XZ and YZ
-    while any solve attempt raises; use-k hands the DISPLAYED count out; closing frees."""
-    from squidxplorer._decon_qc import DeconQCWindow
+def _drain(app, pred, timeout=10):
+    import time
 
-    rng = np.random.default_rng(1)
-    caps = {"488": {k: _tri(rng, k) for k in (1, 2, 3)}}
-    adopted: list = []
-    window = DeconQCWindow(caps, z_ratio=2.0, subject="A1 field 0",
-                           on_use=adopted.append)
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        app.processEvents()
+        if pred():
+            return True
+    return False
+
+
+def test_the_qc_tab_holds_tri_mip_layers_with_iteration_as_a_dims_axis(
+        qapp, napari_pane_stub, squid_dataset, monkeypatch):
+    """THE stepper pin, as a DECK TAB (Julio: "It should be a tab in the napari GUI"):
+    the tri-MIPs are real adopted layers whose axis 0 is the iteration, napari's own dims
+    slider steps k for all of them with any solve attempt raising, the bands sit beside
+    and below with dz on their own scale, use-k hands out the shown count, and the tab's
+    ordinary dispose frees the pixels."""
+    import squidxplorer._viewer as V
+    from squidxplorer._decon_qc import QC_OP, open_qc_tab, qc_bbox_um
+    from tests.conftest import shutdown_plate_window
+
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    view = win._viewer_manager.open(list(win._order)[:1])
     try:
-        assert window.shown_k == 3, "the position follows the final iteration"
+        assert _drain(qapp, lambda: view._pane is not None)
+        region = view.current_region()
+        meta = view._meta
+        fov = int(meta["fovs_per_region"][region][0])
+        rng = np.random.default_rng(1)
+        caps = {"488": {k: _tri(rng, k) for k in (1, 2, 3)}}
+        adopted: list = []
+        child = open_qc_tab(view, caps, region, fov, None, on_use=adopted.append)
+        assert child is not None and child is not view
+        mosaic = child._pane.mosaic
+        model = mosaic.model
 
+        layers = mosaic.layers_for(QC_OP, "488")
+        assert len(layers) == 3, "three projections, one identity, three holders"
+        by_name = {ly.name.split()[2]: ly for ly in layers}
+        assert set(by_name) == {"xy", "xz", "yz"}
+        assert by_name["xy"].data.shape == (3, 1, 24, 30)
+        assert by_name["xz"].data.shape == (3, 1, 4, 30)
+        assert by_name["yz"].data.shape == (3, 1, 24, 4), "yz is transposed so y aligns"
+
+        px = float(meta["pixel_size_um"])
+        dz = float(meta.get("dz_um") or px)
+        x0, y0, x1, y1 = qc_bbox_um(meta, region, fov, None)
+        assert np.allclose(by_name["xy"].scale[-2:], (px, px))
+        assert np.allclose(by_name["xz"].scale[-2:], (dz, px)), "the band's z rides scale"
+        assert np.allclose(by_name["yz"].scale[-2:], (px, dz))
+        assert np.allclose(by_name["xy"].translate[-2:], (y0, x0))
+        assert by_name["xz"].translate[-2] > y1, "the XZ band sits below the MIP"
+        assert by_name["yz"].translate[-1] > x1, "the YZ band sits beside the MIP"
+
+        assert model.dims.axis_labels[0] == "iteration"
+        assert int(model.dims.current_step[0]) == 2, "the tab opens on the final iteration"
+        assert child._qc_use_button.text() == "use iteration 3"
+
+        # Stepping k is napari's own dims slicing over held arrays: no re-solve exists.
         def _no_solve(*_a, **_k):
-            raise AssertionError("the QC window triggered a re-solve")
+            raise AssertionError("the QC tab triggered a re-solve")
 
         monkeypatch.setattr(_decon, "_run", _no_solve)
-        window.slider.set_index_from_user(1)
-        assert window.shown_k == 2
-        for name in ("xy", "xz", "yz"):
-            assert np.array_equal(window.projection(name), caps["488"][2][name])
-        window.slider.set_index_from_user(0)
-        assert window.shown_k == 1
-        for name in ("xy", "xz", "yz"):
-            assert np.array_equal(window.projection(name), caps["488"][1][name])
-        assert not window.xy_label.pixmap().isNull()
-        assert not window.xz_label.pixmap().isNull()
-        assert not window.yz_label.pixmap().isNull()
+        model.dims.set_current_step(0, 0)
+        qapp.processEvents()
+        assert child._qc_use_button.text() == "use iteration 1"
+        for name, ly in by_name.items():
+            want = caps["488"][1][name].T if name == "yz" else caps["488"][1][name]
+            assert np.array_equal(np.asarray(ly.data[0, 0]), want), (
+                f"the {name} layer's k=1 slice must be iteration 1's own projection")
+        child._qc_use_button.click()
+        assert adopted == [1], "use k must hand out the SHOWN count"
 
-        window.slider.turbo_check.setChecked(True)   # turbo rides the slider's own bar
-        assert window._turbo
-        window.use_btn.click()
-        assert adopted == [1], "use k must hand out the DISPLAYED count"
-
-        window.close()
-        assert window._caps == {}, "closing the window frees the held projections"
+        pane = child._pane
+        child.dispose()
+        assert pane.shutdowns >= 1, "the tab's dispose must free its viewer and pixels"
     finally:
-        window.slider.shutdown()
-        window.deleteLater()
+        shutdown_plate_window(qapp, win)
 
 
 def test_use_k_writes_the_panels_iterations_spin():
