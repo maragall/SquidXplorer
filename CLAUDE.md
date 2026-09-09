@@ -1418,6 +1418,53 @@ how the halo's change"; "I need to see the turbo colormap"; "for now, we'll work
 - **Hand checks owed** (offscreen has no GL): the orbit's on-screen look, a recorded mp4,
   and `record_comparison` on a real window over the z-subset.
 
+## Same-day polish from Julio's live testing (2026-09-09, branches controls-fit + camera-gizmo + decon-capture-always)
+
+Supersedes parts of the section above, in Julio's own testing order:
+
+- **The camera poses are a GIZMO, not buttons** (Julio: "the camera controls shouldn't be
+  buttons. Maybe something in the top right corner like blender has", then "embeded in the
+  view like the microns ... not colorful"): `_camera_gizmo.py`, a transparent overlay on the
+  canvas top-right, volume tabs only - three 1.5 px white lines to bare X/Y/Z letters in the
+  scale bar's own color and 10 pt (taken from napari's scale-bar overlay source, not
+  invented), away handles dimmed, hover brightens only. Click a letter to snap (Z = XY top,
+  Y = XZ, X = YZ), center = fit, DRAG = orbit at 0.4 deg/px, every write through
+  `snap_camera` (STILL the one writer; the source-scan pin covers the module). The napari
+  `Camera` math lives in `_napari_view.camera_basis`, so napari stays behind the `_napari_*`
+  modules. The XY/XZ/YZ/fit chips are DELETED; the orbit chip stays. Hand check owed: the
+  live GL look and the drag feel.
+- **Iteration capture is ALWAYS ON and holds MIPs, not stacks** (Julio: "why would you not
+  capture by default?"): the per-iteration snapshot is `torch.amax` ON DEVICE - one float32
+  plane per k per channel (21 MB at 2304 squared, was 318 MB for the stack), so the checkbox
+  is deleted and every decon preview captures. The fit refusal counts planes on the device
+  arm and the petakit arm's TRANSIENT stacks honestly (petakit holds them until we reduce).
+  The stated trade: 3D or per-plane stepping at k means one re-solve. A SAVE run also lands
+  captures (no save-vs-preview fact exists at the operator seam; last field wins) - a flagged
+  behavior, not an accident.
+- **The stepper is a BOTTOM SLIDER** (Julio: "a slider for the decon iterations that pops on
+  the bottom. Like the fov's button makes that slider"): `_iter_nav.IterationSlider`, an
+  exact sibling of `_fov_nav.FovSlider` over `_region_nav.AxisPlayback` - pops when captures
+  land (label "iteration k/N", opens on the final k), instant repaints (frame_done
+  immediately, no gating), turbo as a compact checkbox ON the bar, hides when captures
+  clear, dispose joins its thread. The panel stepper row is deleted whole.
+- **The intensity controls never vanish** (Julio: "sometimes the intensity controls
+  dissapear when I toggle and click layers around"): napari's no-selection placeholder page
+  has sizeHint -1 and `fit_controls_container` capped the block at 1 px - a STABLE state via
+  a tree group-header click (multi-select keeps active None), deselect-all, or deleting the
+  selected layer; and a 2D/3D flip regrows the current page with no page signal. Now a
+  placeholder page keeps the previous cap and `follow_controls_pages` refits on BOTH
+  `currentChanged` and `dims.events.ndisplay`. Pinned across the 25 measured sequences.
+- **napari's dask-slicing context is NOT thread-safe, and two read-set pins inherit it**
+  (found chasing an order-dependent full-run failure): napari wraps every dask slice in a
+  process-wide `dask.config.set({'optimization.fuse.active': False})`; overlapping
+  enter/exit across the async slicer pool and the main thread can leave the global False
+  FOREVER, after which dask hands `_WindowedLevel` whole 2048 px chunks (every FOV) instead
+  of exact windows. Latent on main since async slicing (2026-08-24), bit-identical files;
+  proven by deterministic poisoning. The two exact-window pins in test_mosaic_source now pin
+  `optimization.fuse.active: True` in arrange (the `fused_slicing` fixture documents the
+  mechanism). The upstream napari race is NOT fixed here; a stuck-False global also degrades
+  non-napari computes (png export, contrast seeds) - filed as an action item.
+
 ## Agent skills
 
 ### Issue tracker
