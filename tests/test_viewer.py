@@ -2431,8 +2431,12 @@ def test_loading_a_profile_installs_one_field_per_channel_not_plane_zero(qapp, s
 
 
 
-def test_the_decon_panel_is_iterations_plus_ni_no_sweep(qapp, squid_dataset):
-    """The QC sweep is shelved (Julio, 2026-08-25): decon's inline panel is the declared iterations plus the NI row, and no sweep control survives on it."""
+def test_the_decon_panel_is_iterations_plus_ni_plus_the_qc_button(qapp, squid_dataset):
+    """decon's inline panel is EXACTLY the declared iterations, the NI row, and the one
+    "inspect each iteration" button (Julio, 2026-09-09: the button opens the tri-MIP QC
+    WINDOW). Not a sweep: the button runs ONE solve at the panel's own count and captures
+    its iterations; no auto-run over many counts survives, and nothing else grew here -
+    the 2026-08-25 shelf's guard, updated to the new ruling."""
     from squidxplorer._param_panel import DeconPanel
 
     root, _ = squid_dataset
@@ -2441,8 +2445,15 @@ def test_the_decon_panel_is_iterations_plus_ni_no_sweep(qapp, squid_dataset):
     tab = win.ensure_operator_panel("decon")
     assert isinstance(tab, DeconPanel)
     assert "iterations" in tab.widgets and hasattr(tab, "ni_spin")
-    assert not [b for b in tab.findChildren(QPushButton) if "iteration" in b.text().lower()], (
-        "a sweep stepper survived on the decon panel")
+    buttons = [b for b in tab.findChildren(QPushButton)]
+    assert [b.text() for b in buttons] == ["inspect each iteration"], (
+        f"the decon panel grew buttons beyond the QC entry: {[b.text() for b in buttons]}")
+    from qtpy.QtWidgets import QCheckBox, QSlider
+
+    assert not tab.findChildren(QSlider), "a sweep slider is back ON the panel"
+    assert not [c for c in tab.findChildren(QCheckBox)
+                if "turbo" in c.text().lower() or "capture" in c.text().lower()], (
+        "a stepper control survived on the panel; they live in the QC window")
     win.close()
 
 
