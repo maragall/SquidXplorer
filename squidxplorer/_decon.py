@@ -190,35 +190,60 @@ def lateral_halo_px(optics: OpticsParams) -> int:
 _NEVER_TILE_GB = float("inf")
 
 
-def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool):
+def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool,
+         snapshot_iters=None):
     """One call into RL: device selection, optional FFT-length padding, and an all-zero result guard.
 
-    The per-iteration ``snapshot_iters`` capture hook is DELETED with the QC sweep (Julio,
-    2026-08-25: "The sweep code should be shelved. I can just run on an ROI iteration by
-    iteration."); reinstating starts from git history.
+    ``snapshot_iters`` (petakit's own contract, reinstated from git history 2026-09-09) asks
+    ONE solve to capture the estimate after each named iteration; the return is then
+    ``{iter: volume}`` instead of one array. The stepper steps those captures back and
+    forth for free, never a re-solve per count. The captures are real bytes and join the
+    memory refusal's estimate.
     """
     volume = np.ascontiguousarray(volume, dtype=np.float32)
+    snaps = sorted({int(i) for i in snapshot_iters}) if snapshot_iters else None
+    if snaps is not None:
+        iterations = max(int(iterations), snaps[-1])
     device = _decon_gpu.select_device(volume.shape, gpu=gpu, psf_shape=psf.shape)
-    refusal = _decon_gpu.working_set_refusal(volume.shape, device, psf.shape)
+    extra = len(snaps) * volume.nbytes if snaps is not None else 0
+    note = f" plus {len(snaps)} held iteration snapshots" if snaps is not None else ""
+    refusal = _decon_gpu.working_set_refusal(volume.shape, device, psf.shape,
+                                             extra_bytes=extra, extra_note=note)
     if refusal:
         raise MemoryError(refusal)
     _decon_gpu.log_choice(volume.shape, gpu=gpu, psf_shape=psf.shape)
     if device is not None:
-        out = _decon_gpu.rl(volume, psf, iterations, device)
+        out = _decon_gpu.rl(volume, psf, iterations, device, snapshot_iters=snaps)
     else:
         petakit = _petakit()
         widths = (_decon_gpu.pad_plan(volume.shape, psf.shape)
                   if _decon_gpu.cpu_padding_enabled() else (0, 0, 0))
         padded = _decon_gpu._wrap_pad(volume, widths)
-        out = petakit.deconvolve(
-            np.ascontiguousarray(padded), psf,
-            method=METHOD, iterations=iterations, gpu=gpu,
-            avail_memory_gb=_NEVER_TILE_GB,
-        )
+        if snaps is not None:
+            import inspect
+
+            if "snapshot_iters" not in inspect.signature(petakit.engine.rl).parameters:
+                raise RuntimeError(
+                    "this petakit build's engine.rl takes no snapshot_iters, so a "
+                    "per-iteration capture cannot happen inside one solve. Update petakit "
+                    "(the pinned SHA in pyproject carries it); refusing to fall back to one "
+                    "full re-solve per iteration count without saying so.")
+            out = petakit.engine.rl(
+                np.ascontiguousarray(padded), psf,
+                n_iter=iterations, gpu=gpu, snapshot_iters=snaps,
+                avail_memory_gb=_NEVER_TILE_GB,
+            )
+        else:
+            out = petakit.deconvolve(
+                np.ascontiguousarray(padded), psf,
+                method=METHOD, iterations=iterations, gpu=gpu,
+                avail_memory_gb=_NEVER_TILE_GB,
+            )
         if any(widths):
             core = tuple(slice(w, w + n) for w, n in zip(widths, volume.shape))
-            out = out[core]
-    final = out
+            out = ({k: v[core] for k, v in out.items()} if snaps is not None
+                   else out[core])
+    final = out[snaps[-1]] if snaps is not None else out
     if np.any(volume) and not np.any(final):
         raise RuntimeError(
             "petakit returned an all-zero result for a non-empty input. That is the failure "
@@ -236,12 +261,16 @@ def deconvolve_stack(
     *,
     gpu: bool = True,
     project: bool = True,
+    snapshot_sink: Optional[Callable[[dict], None]] = None,
 ) -> np.ndarray:
     """True 3-D deconvolution of a whole z-stack with the full 3-D PSF.
 
     ``project=True`` (the historical default) returns the MIP; ``project=False`` returns the
     whole deconvolved stack — same shape as the input, the output the user examines plane by
     plane (the format contract: SquidXplorer writes in the format it ingests).
+
+    ``snapshot_sink`` receives ``{k: float32 stack}`` for EVERY iteration 1..*iterations*
+    of the ONE solve (the stepper's captures); the return is the final iteration, unchanged.
     """
     stack = planes if isinstance(planes, np.ndarray) else np.asarray(list(planes))
     if stack.ndim != 3 or stack.shape[0] < 1:
@@ -257,7 +286,13 @@ def deconvolve_stack(
     if optics.nz != stack.shape[0]:
         optics = OpticsParams(optics.na, optics.wavelength_um, optics.dxy_um,
                               optics.dz_um, int(stack.shape[0]), optics.ni)
-    out = _run(stack, make_psf(optics), iterations, gpu)
+    if snapshot_sink is None:
+        out = _run(stack, make_psf(optics), iterations, gpu)
+    else:
+        snaps = _run(stack, make_psf(optics), iterations, gpu,
+                     snapshot_iters=range(1, int(iterations) + 1))
+        snapshot_sink(snaps)
+        out = snaps[max(snaps)]
     return cast_like(out.max(axis=0) if project else out, dtype)
 
 
@@ -465,6 +500,88 @@ def rig_profile_notes(path) -> "list[str]":
     return notes
 
 
+# ---------------------------------------------------------------------------------------
+# The iteration capture store (Qt-free). Julio, 2026-09-05: "make sure that I could revert
+# the iterations so that I can see how the halo's change". A decon preview run, when armed,
+# keeps EVERY iteration of its ONE solve ({k: (Z, H, W) float32} per channel, trimmed to
+# the delivered window); the panel's stepper repaints from these, never a re-solve. The
+# LAST solve per channel wins, so a multi-FOV run leaves the last field's captures and the
+# stepper's own shape check names the mismatch. Reinstated in spirit from the shelved QC
+# sweep (bf982a2^); the storage is session memory, freed on disarm.
+# ---------------------------------------------------------------------------------------
+
+_capture_lock = threading.Lock()
+_capture_armed = False
+_captures: "dict[str, dict[int, np.ndarray]]" = {}
+_capture_subscribers: "list[Callable[[], None]]" = []
+
+
+def set_capture_iterations(on: bool) -> None:
+    """Arm or disarm per-iteration capture (session setting). Disarming FREES the captures."""
+    global _capture_armed
+    with _capture_lock:
+        _capture_armed = bool(on)
+        if not on:
+            _captures.clear()
+    _notify_captures()
+
+
+def capture_iterations() -> bool:
+    with _capture_lock:
+        return _capture_armed
+
+
+def iteration_captures() -> "dict[str, dict[int, np.ndarray]]":
+    """``{channel: {k: stack}}`` currently held. A per-call copy of the dicts; the stacks
+    themselves are shared and treated as read-only by every consumer."""
+    with _capture_lock:
+        return {c: dict(by_k) for c, by_k in _captures.items()}
+
+
+def clear_captures() -> None:
+    with _capture_lock:
+        _captures.clear()
+    _notify_captures()
+
+
+def subscribe_captures(callback: Callable[[], None]) -> None:
+    """*callback* fires after every store change, ON THE LANDING THREAD (a Qt subscriber
+    passes a Signal.emit, which marshals itself)."""
+    with _capture_lock:
+        _capture_subscribers.append(callback)
+
+
+def unsubscribe_captures(callback: Callable[[], None]) -> None:
+    with _capture_lock:
+        if callback in _capture_subscribers:
+            _capture_subscribers.remove(callback)
+
+
+def _notify_captures() -> None:
+    with _capture_lock:
+        subscribers = list(_capture_subscribers)
+    for callback in subscribers:
+        try:
+            callback()
+        except Exception as exc:                 # noqa: BLE001 - a dead subscriber, named
+            log.warning("capture subscriber failed: %s: %s", type(exc).__name__, exc)
+
+
+def _land_captures(channel: str, snaps: "dict[int, np.ndarray]") -> None:
+    """File one solve's trimmed captures under *channel* and say what is held."""
+    if not snaps:
+        return
+    with _capture_lock:
+        if not _capture_armed:
+            return
+        _captures[str(channel)] = {int(k): v for k, v in snaps.items()}
+        held = sum(v.nbytes for by_k in _captures.values() for v in by_k.values())
+    per = next(iter(snaps.values())).nbytes / 1e6
+    log.info("iteration capture: %s: %d snapshots x %.1f MB; %.1f MB held in all",
+             channel, len(snaps), per, held / 1e6)
+    _notify_captures()
+
+
 #: (acquisition path, channel) pairs whose copy-through has been said this process:
 #: project_well binds per FOV, and the fact is stated ONCE per acquisition, not per field.
 _COPIED_THROUGH_SAID: "set[tuple[str, str]]" = set()
@@ -500,12 +617,14 @@ def _decon_for_channel(path, channel: str, iterations: int):
             _COPIED_THROUGH_SAID.add(key)
             log.info("%s: no emission wavelength, copied unchanged, not deconvolved", channel)
         return _copy_through(str(channel), "no emission wavelength")
-    return decon_op(optics, iterations)
+    return decon_op(optics, iterations, capture_channel=str(channel))
 
 
 def decon_op(
     optics: Optional[OpticsParams] = None,
     iterations: int = DEFAULT_ITERATIONS,
+    *,
+    capture_channel: Optional[str] = None,
 ) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
     """Build THE deconvolution operator: the volume solve, z-consuming, depth-keeping.
 
@@ -515,13 +634,34 @@ def decon_op(
     as the volume solve's own degenerate case (measured equal; see the module docstring).
     ``keeps_depth`` on the callable is the declaration ``project_well`` and the acquisition
     writer honour.
+
+    *capture_channel* (the per-channel bind sets it) names the channel the iteration
+    capture store files under when capture is armed; the same solve serves both.
     """
     def _decon(planes: Iterable[np.ndarray]) -> np.ndarray:
-        return deconvolve_stack(planes, optics, iterations, project=False)
+        if capture_channel is None or not capture_iterations():
+            return deconvolve_stack(planes, optics, iterations, project=False)
+        pending: "dict[int, np.ndarray]" = {}
+        out = deconvolve_stack(planes, optics, iterations, project=False,
+                               snapshot_sink=pending.update)
+        _decon._pending_snaps = pending
+        return out
 
     _decon.__name__ = f"decon(rl,iterations={iterations})"
     _decon.consumes = frozenset({"z"})
     _decon.keeps_depth = True
+    if capture_channel is not None:
+        # The declaration ``project_well`` calls with ITS OWN trim slices after each solve,
+        # so a windowed capture is trimmed exactly as the delivered pixels were.
+        def _land(trim) -> None:
+            pending = getattr(_decon, "_pending_snaps", None)
+            _decon._pending_snaps = None
+            if pending:
+                _land_captures(capture_channel,
+                               {k: np.ascontiguousarray(v[(slice(None),) + tuple(trim)])
+                                for k, v in pending.items()})
+
+        _decon.land_snapshots = _land
     if optics is None:
         _decon.for_channel = lambda path, channel: _decon_for_channel(path, channel, iterations)
     else:

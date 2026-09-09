@@ -158,11 +158,11 @@ def working_set_refusal(shape, device: Optional[str] = None, psf_shape=None,
         return None
     where = f"torch/{device}" if device else "CPU"
     return (
-        f"a {tuple(int(n) for n in shape)} volume's whole-volume solve on {where} is "
+        f"deconvolving a {tuple(int(n) for n in shape)} volume whole on {where} is "
         f"estimated at ~{need / 1e9:.1f} GB (a measured {working_set_multiple(device)}x the "
         f"float32 volume bytes{extra_note}), against {avail / 1e9:.1f} GB available (one "
         f"solve may claim {MEMORY_FRACTION:.0%}). The solve never tiles: deconvolve a "
-        "smaller volume instead, an ROI (draw one for a windowed solve) or a z subset.")
+        "smaller volume instead, an ROI (draw one for a windowed run) or a z subset.")
 
 
 def _torch_device() -> Optional[str]:
@@ -287,24 +287,32 @@ def _otf_source(psf: np.ndarray, out_shape) -> np.ndarray:
     return np.roll(padded, -(np.array(p.shape) // 2), axis=(0, 1, 2))
 
 
-def rl(volume: np.ndarray, psf: np.ndarray, iterations: int, device: str):
+def rl(volume: np.ndarray, psf: np.ndarray, iterations: int, device: str,
+       snapshot_iters=None):
     """Biggs-Andrews accelerated Richardson-Lucy on *device*. Returns float32 ``(Z, Y, X)``.
 
-    The per-iteration ``snapshot_iters`` capture hook is DELETED with the QC sweep
-    (Julio, 2026-08-25); reinstating starts from git history.
+    ``snapshot_iters`` (petakit's own contract, reinstated from git history 2026-09-09): an
+    iterable of iteration counts; the return becomes ``{iter: volume}`` capturing the
+    estimate after each requested iteration of ONE solve. The loop runs to
+    ``max(iterations, max(snapshot_iters))``.
 
     ONE solve, the whole volume in memory (Julio, 2026-09-05). A volume over the device's
     budget never reaches this function: :func:`working_set_refusal` is the caller's refusal.
     """
     raw = np.maximum(np.asarray(volume, dtype=np.float32), 0)
     widths = (0, 0, 0) if padding_disabled() else pad_plan(raw.shape, psf.shape)
-    return _solve(raw, psf, iterations, device, widths)
+    return _solve(raw, psf, iterations, device, widths, snapshot_iters=snapshot_iters)
 
 
-def _solve(raw: np.ndarray, psf: np.ndarray, iterations: int, device: str, widths):
+def _solve(raw: np.ndarray, psf: np.ndarray, iterations: int, device: str, widths,
+           snapshot_iters=None):
     """One RL solve of *raw* (float32, non-negative) on *device*, wrap-padded by *widths*."""
     import torch
 
+    snaps = sorted({int(i) for i in snapshot_iters}) if snapshot_iters else None
+    if snaps is not None:
+        iterations = max(int(iterations), snaps[-1])
+    captured: Optional[dict] = {} if snaps is not None else None
     dims = (-3, -2, -1)
     image_np = _wrap_pad(raw, widths)
     shape = image_np.shape
@@ -347,6 +355,12 @@ def _solve(raw: np.ndarray, psf: np.ndarray, iterations: int, device: str, width
                 min=0,
             )
 
+            if snaps is not None and k in snaps:
+                captured[k] = (J_2[core].contiguous().to("cpu").numpy()
+                               .astype(np.float32, copy=False))
+
+        if snaps is not None:
+            return captured
         out = J_2[core].contiguous().to("cpu").numpy()
 
     return out.astype(np.float32, copy=False)

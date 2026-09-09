@@ -56,15 +56,6 @@ def test_the_sweep_module_is_gone_whole():
         "_decon_qc (the QC sweep) is back; it was shelved whole")
 
 
-def test_the_snapshot_capture_hook_is_gone():
-    import inspect
-
-    from squidxplorer import _decon, _decon_gpu
-
-    assert "snapshot_iters" not in inspect.signature(_decon._run).parameters
-    assert "snapshot_iters" not in inspect.signature(_decon_gpu.rl).parameters
-
-
 def test_the_plate_publishes_no_qc_tab():
     import squidxplorer._viewer as V
 

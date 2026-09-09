@@ -7,9 +7,13 @@ name. The fallback panel — the hand-written panels in ``_op_panels`` stay.
 from __future__ import annotations
 
 import re
+import weakref
 
 from typing import Any, Optional, Sequence
 
+import numpy as np
+
+from qtpy.QtCore import Signal
 from qtpy.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
@@ -21,6 +25,18 @@ from qtpy.QtWidgets import (
 from squidxplorer._op_panels import (
     KEEP_EVERY_PLANE, _SUB, _Panel, _apply_qss, _row, _wrapped, z_operator_choice,
 )
+
+
+def _qt_alive(widget) -> bool:
+    """Is this Qt object still there on the C++ side? (`is not None` says yes of a corpse.)"""
+    if widget is None:
+        return False
+    try:
+        from qtpy import sip
+
+        return not sip.isdeleted(widget)
+    except Exception:                            # noqa: BLE001 - no sip binding: assume alive
+        return True
 
 
 def _one_sentence(text) -> str:
@@ -224,14 +240,23 @@ class GenericOperatorPanel(_Panel):
         return None
 
 class DeconPanel(GenericOperatorPanel):
-    """``decon``'s declared params plus the one control that is not a Param: NI.
+    """``decon``'s declared params plus the controls that cannot be Params: NI, and the
+    iteration capture stepper.
 
     The immersion refractive index is the one PSF input no Squid file records (design
     principles: the user tweaks only what acquisition files cannot express). It is a
     SESSION setting (`_decon.set_session_ni`), not an operator kwarg, so it cannot be a
-    Param; it survives the QC page's shelving as this one row. The iteration choice is
-    made by hand now: draw an ROI, set iterations, Preview, repeat (the sweep is shelved,
-    Julio 2026-08-25)."""
+    Param; it survives the QC page's shelving as this one row.
+
+    The STEPPER (Julio, 2026-09-05: "make sure that I could revert the iterations so that
+    I can see how the halo's change"; "I need to see the turbo colormap"): with capture
+    armed, a Preview's ONE solve keeps every iteration (`_decon`'s capture store), and one
+    compact row, visible only while captures exist, steps k back and forth by repainting
+    the view's own decon layers with iteration k's MIP, never a re-solve. The turbo box
+    recolors those layers and puts their own colormap back."""
+
+    #: The capture store changed (fired from engine worker threads; Qt marshals the emit).
+    capturesChanged = Signal()
 
     def __init__(self, host):
         super().__init__(host, "decon")
@@ -280,7 +305,165 @@ class DeconPanel(GenericOperatorPanel):
         at = self.v.indexOf(self.status)
         self.v.insertLayout(at, _row(lab, self.ni_combo))
         self.v.insertWidget(at + 1, self.ni_spin)
+        self._build_stepper()
         _apply_qss(self)
+
+    # -- the iteration capture stepper -----------------------------------------------------
+    def _build_stepper(self) -> None:
+        from qtpy.QtWidgets import QHBoxLayout, QPushButton, QWidget
+
+        from squidxplorer._decon import (
+            capture_iterations, set_capture_iterations, subscribe_captures,
+            unsubscribe_captures,
+        )
+
+        self._shown_k = None
+        self._pre_turbo: dict = {}
+        # Singular ON PURPOSE: ruling w pins the word "iterations" to ONE appearance in
+        # the visible operator area (the declared param's own row).
+        self.capture_check = QCheckBox("capture each iteration")
+        self.capture_check.setChecked(capture_iterations())
+        self.capture_check.setToolTip(
+            "Preview keeps every RL iteration of its one solve, so the stepper can revisit "
+            "them without re-solving. The snapshots are held in memory until unticked.")
+        self.capture_check.toggled.connect(set_capture_iterations)
+
+        self.iter_prev = QPushButton("<")
+        self.iter_prev.setToolTip("Show the previous captured iteration.")
+        self.iter_next = QPushButton(">")
+        self.iter_next.setToolTip("Show the next captured iteration.")
+        for b in (self.iter_prev, self.iter_next):
+            b.setFixedWidth(26)
+        self.iter_label = QLabel("")
+        self.iter_label.setStyleSheet(_SUB)
+        self.turbo_check = QCheckBox("turbo")
+        self.turbo_check.setToolTip(
+            "View the stepped decon layers under the turbo colormap, so intensity "
+            "differences between iterations read clearly; untick to restore.")
+        self.iter_prev.clicked.connect(lambda *_: self._step(-1))
+        self.iter_next.clicked.connect(lambda *_: self._step(+1))
+        self.turbo_check.toggled.connect(self._on_turbo)
+
+        self._stepper_row = QWidget()
+        sr = QHBoxLayout(self._stepper_row)
+        sr.setContentsMargins(0, 0, 0, 0)
+        sr.setSpacing(6)
+        sr.addWidget(self.iter_prev)
+        sr.addWidget(self.iter_label, 1)
+        sr.addWidget(self.iter_next)
+        sr.addWidget(self.turbo_check)
+        self._stepper_row.setVisible(False)
+
+        at = self.v.indexOf(self.status)
+        self.v.insertWidget(at, self.capture_check)
+        self.v.insertWidget(at + 1, self._stepper_row)
+
+        self.capturesChanged.connect(self._refresh_stepper)
+        # The store must never hold a Qt object: a dead panel's bound emit measured a bus
+        # error (hero teardown, next test's disarm). A weakref + sip-alive wrapper emits
+        # only into a live panel and unsubscribes ITSELF the first time it finds a corpse.
+        ref = weakref.ref(self)
+
+        def _on_store_change():
+            panel = ref()
+            if panel is None or not _qt_alive(panel):
+                unsubscribe_captures(_on_store_change)
+                return
+            panel.capturesChanged.emit()
+
+        subscribe_captures(_on_store_change)
+        self._refresh_stepper()
+
+    def _capture_ks(self) -> list:
+        """The iteration counts every captured channel has (the steppable set)."""
+        from squidxplorer._decon import iteration_captures
+
+        caps = iteration_captures()
+        if not caps:
+            return []
+        ks = set.intersection(*(set(by_k) for by_k in caps.values()))
+        return sorted(ks)
+
+    def _refresh_stepper(self) -> None:
+        ks = self._capture_ks()
+        self._stepper_row.setVisible(bool(ks))
+        if not ks:
+            self._shown_k = None
+            return
+        if self._shown_k not in ks:
+            self._shown_k = ks[-1]
+        self.iter_label.setText(f"iteration {self._shown_k}/{ks[-1]}, MIP")
+
+    def _active_mosaic(self):
+        """The focused view's MosaicLayers, or None: the stepper repaints the view the
+        user is in, through the one layer model."""
+        manager = getattr(self.host, "_viewer_manager", None)
+        view = manager.active_view() if manager is not None else None
+        pane = getattr(view, "_pane", None)
+        return getattr(pane, "mosaic", None) if pane is not None else None
+
+    def _step(self, direction: int) -> None:
+        ks = self._capture_ks()
+        if not ks:
+            return
+        i = ks.index(self._shown_k) if self._shown_k in ks else len(ks) - 1
+        self._shown_k = ks[min(max(i + int(direction), 0), len(ks) - 1)]
+        self._show_iteration(self._shown_k)
+
+    def _show_iteration(self, k: int) -> None:
+        """Repaint the view's decon layers with iteration *k*'s MIP: a swap of held
+        pixels, never a re-solve."""
+        from squidxplorer._decon import iteration_captures
+        from squidxplorer._napari_view import full_res_level
+        from squidxplorer.projection import cast_like
+
+        caps = iteration_captures()
+        mosaic = self._active_mosaic()
+        if mosaic is None:
+            self.say("iteration stepper: no view is open to repaint.")
+            return
+        shown = 0
+        for channel, by_k in caps.items():
+            volume = by_k.get(int(k))
+            layer = mosaic.find("decon", channel)
+            if volume is None or layer is None:
+                continue
+            current = np.asarray(full_res_level(layer.data))
+            data = cast_like(volume.max(axis=0), current.dtype)
+            if tuple(current.shape) != tuple(data.shape):
+                self.say(
+                    f"iteration stepper: the decon layer for {channel} is "
+                    f"{tuple(current.shape)} px but the capture is {tuple(data.shape)}; "
+                    "preview an ROI inside one field and step again.")
+                continue
+            layer.data = data
+            shown += 1
+        if shown:
+            ks = self._capture_ks()
+            self.iter_label.setText(f"iteration {int(k)}/{ks[-1] if ks else int(k)}, MIP")
+
+    def _on_turbo(self, on: bool) -> None:
+        """Recolor the stepped layers with turbo (napari-native); untick restores each
+        layer's own colormap, remembered here."""
+        from squidxplorer._decon import iteration_captures
+
+        mosaic = self._active_mosaic()
+        if mosaic is None:
+            return
+        for channel in iteration_captures():
+            layer = mosaic.find("decon", channel)
+            if layer is None:
+                continue
+            try:
+                if on:
+                    self._pre_turbo[channel] = layer.colormap
+                    layer.colormap = "turbo"
+                else:
+                    previous = self._pre_turbo.pop(channel, None)
+                    if previous is not None:
+                        layer.colormap = previous
+            except Exception as exc:             # noqa: BLE001 - a recolor, never a crash
+                self.say(f"iteration stepper: {channel} could not be recolored: {exc}")
 
 
 class RegisterPanel(GenericOperatorPanel):

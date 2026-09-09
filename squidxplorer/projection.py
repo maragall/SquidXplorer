@@ -396,6 +396,11 @@ def project_well(
                     out[t_i, c_i, :] = stack[(slice(None),) + trim]
                 else:
                     out[t_i, c_i, k] = np.asarray(op(planes))[trim]  # streamed z; bounded memory
+            # A declared capture lands with the SAME trim the output got (`land_snapshots`
+            # on the callable): a windowed solve's snapshots are the delivered window.
+            land = getattr(op, "land_snapshots", None)
+            if callable(land):
+                land(trim)
     return out
 
 
