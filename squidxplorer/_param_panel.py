@@ -231,16 +231,14 @@ class DeconPanel(GenericOperatorPanel):
     SESSION setting (`_decon.set_session_ni`), not an operator kwarg, so it cannot be a
     Param; it survives the QC page's shelving as this one row.
 
-    Iteration QC is a BUTTON here and a separate WINDOW (Julio, 2026-09-09: "there
-    should be a button in the decon UI that opens another window with the MIP, and the
-    turbo colormap togle, and the xy and xz yz bands by it's side, and then with the
-    iterations slider"): `_decon_qc.start_qc` runs one Preview-scoped solve capturing
-    every iteration's three projections and opens `DeconQCWindow`; "use k iterations"
+    Iteration QC is a BUTTON here and a DECK TAB there (Julio, 2026-09-09: "It should be
+    a tab in the napari GUI. You leverage napari layers, decon sliders, the mip is just a
+    2d view of the ROI."): `_decon_qc.start_qc` runs one Preview-scoped solve capturing
+    every iteration's three projections and opens the QC tab, whose "use iteration k"
     writes this panel's own spin through `set_param`."""
 
-    #: The QC worker and window, owned here so `shutdown` can join and close them.
+    #: The QC solve worker, owned here so `shutdown` can join it at app exit.
     _qc_worker = None
-    _qc_window = None
 
     def __init__(self, host):
         super().__init__(host, "decon")
@@ -293,7 +291,7 @@ class DeconPanel(GenericOperatorPanel):
         self.inspect_btn = QPushButton("inspect each iteration")
         self.inspect_btn.setToolTip(
             "Run one Preview-scoped decon solve capturing every iteration's XY, XZ and "
-            "YZ projections, and open the QC window to step them. Draw an ROI for a "
+            "YZ projections, and open the QC tab to step them. Draw an ROI for a "
             "faster inspection.")
         self.inspect_btn.clicked.connect(self._inspect_iterations)
         at = self.v.indexOf(self.status)
@@ -314,18 +312,13 @@ class DeconPanel(GenericOperatorPanel):
         start_qc(self, view)
 
     def shutdown(self) -> None:
-        """Join the QC worker and close its window; the plate calls this at app exit."""
+        """Join the QC worker; the plate calls this at app exit. The QC TAB is a view
+        like any other: the deck's own close path disposes it."""
         worker, self._qc_worker = self._qc_worker, None
         if worker is not None:
             try:
                 if worker.isRunning():
                     worker.wait(10_000)
-            except RuntimeError:
-                pass
-        window, self._qc_window = self._qc_window, None
-        if window is not None:
-            try:
-                window.close()
             except RuntimeError:
                 pass
 

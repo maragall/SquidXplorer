@@ -561,8 +561,8 @@ class RegionViewer(QMainWindow):
         self._time_point_bar.on_problem(self._say)
         self._time_point_bar.set_count(int((self._meta or {}).get("n_t", 1) or 1))
         lay.addWidget(self._time_point_bar)
-        # (The decon iteration axis left this window on 2026-09-09: iteration QC lives in
-        # its own window now, `_decon_qc.DeconQCWindow`, with `_iter_nav`'s slider inside.)
+        # (Iteration QC left this window on 2026-09-09: it is a deck TAB now, tri-MIP
+        # layers with iteration as a dims axis, `_decon_qc.open_qc_tab`.)
 
         self.setCentralWidget(central)
 
