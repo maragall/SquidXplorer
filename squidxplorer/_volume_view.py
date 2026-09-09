@@ -344,13 +344,15 @@ SNAP_ANGLES = {
 }
 
 
-def snap_camera(win, plane: str) -> None:
-    """Snap the volume's camera to an axis plane ("xy", "xz", "yz"), or refit it ("fit").
+def snap_camera(win, plane, *, settle: bool = True) -> None:
+    """Snap the volume's camera to an axis plane ("xy", "xz", "yz"), an explicit
+    (rx, ry, rz) degrees triple, or refit it ("fit").
 
     IN CAMERA only: the angles, then the volume's own framing; "fit" is the framing alone,
     so a user's rotation survives it. A pure rotation moves neither zoom nor center, so the
     pane's camera-settle (wired to exactly those two events) may never fire; the brick
-    refinement runs here directly, the settle's own work.
+    refinement runs here directly, the settle's own work. ``settle=False`` writes the angles
+    alone - the camera script's pan frames, whose step's own snap re-frames and refines.
     """
     vol = win._native3d
     frame = getattr(vol, "frame", None)
@@ -358,7 +360,15 @@ def snap_camera(win, plane: str) -> None:
         win._say("camera snap: no 3D volume is up in this view.")
         return
     if plane != "fit":
-        angles = SNAP_ANGLES.get(plane)
+        if isinstance(plane, str):
+            angles = SNAP_ANGLES.get(plane)
+        else:
+            try:
+                angles = tuple(float(v) for v in plane)
+            except (TypeError, ValueError):
+                angles = None
+            if angles is not None and len(angles) != 3:
+                angles = None
         if angles is None:
             win._say(f"camera snap: unknown plane '{plane}'.")
             return
@@ -367,6 +377,8 @@ def snap_camera(win, plane: str) -> None:
         except Exception as exc:                     # noqa: BLE001 - named, never silent
             win._say(f"camera snap: could not turn the camera ({exc}).")
             return
+    if not settle:
+        return
     frame()
     refresh_bricks(win)
 

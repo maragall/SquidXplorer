@@ -676,7 +676,10 @@ class RegionViewer(QMainWindow):
                        lambda: _volume_view.snap_camera(self, "yz")),
             self._chip("fit", "Refit the volume to the canvas; the angles stay.",
                        lambda: _volume_view.snap_camera(self, "fit")),
+            self._chip("orbit", "Play the demo camera orbit over this volume.",
+                       self._play_orbit),
         ]
+        self._btn_orbit = self._snap_chips[-1]
         for chip in self._snap_chips:
             chip.setVisible(self._is_volume_tab)
         chips += self._snap_chips
@@ -712,6 +715,25 @@ class RegionViewer(QMainWindow):
         for chip in getattr(self, "_snap_chips", ()):
             if _alive(chip):
                 chip.setVisible(True)
+
+    def _play_orbit(self) -> None:
+        """Play the canned demo orbit live in this view; the chip disables while it runs."""
+        from squidxplorer._camera_script import demo_orbit_steps, run_camera_script
+
+        if getattr(self, "_orbit_running", False):
+            return
+        self._orbit_running = True
+        btn = getattr(self, "_btn_orbit", None)
+        if btn is not None and _alive(btn):
+            btn.setEnabled(False)
+        try:
+            run_camera_script(self, demo_orbit_steps())
+        except ValueError as exc:
+            self._say(str(exc))
+        finally:
+            self._orbit_running = False
+            if btn is not None and _alive(btn):
+                btn.setEnabled(True)
 
     _AT_DEFAULTS_QSS = "color:#8b949e;font-size:10px;border:none;"
     _PROGRESS_QSS = (

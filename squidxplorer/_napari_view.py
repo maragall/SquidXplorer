@@ -547,6 +547,14 @@ class MosaicLayers:
         want = MosaicKey(str(op), str(channel))
         return [ly for ly, k in self._parked.values() if k == want]
 
+    def parked_ops(self) -> list[str]:
+        """Ops whose identities are parked under a volume, park order, deduplicated."""
+        out: list[str] = []
+        for _ly, k in self._parked.values():
+            if k.op not in out:
+                out.append(k.op)
+        return out
+
     def drop_layer(self, layer: Any) -> None:
         """Remove one layer while leaving its identity alive; unlinks before removing."""
         self._parked.pop(id(layer), None)
