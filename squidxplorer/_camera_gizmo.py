@@ -2,11 +2,17 @@
 corner showing the live 3D orientation (Julio, 2026-09-09: "the camera controls shouldn't
 be buttons. Maybe something in the top right corner like blender has").
 
-Three colored axis handles, projected through the CURRENT ``camera.angles`` so the gizmo
-turns with the volume (it repaints on ``camera.events.angles``, so a scripted orbit turns
-it too). Click an axis handle to snap to the view looking down it (Z is the XY top view,
-Y is XZ, X is YZ: the existing presets), click the center to refit, drag anywhere on the
-disc to orbit live. Every camera write goes through :func:`_volume_view.snap_camera`, the
+Drawn EMBEDDED, like the scale bar (Julio, 2026-09-09: "embeded in the view like the
+microns but you can click the angles. Should be simple, not colorful"): a fully
+transparent background and three thin axis lines from a small center dot, each ending in
+a bare X/Y/Z letter, all in the scale bar's own look on the dark canvas (napari's
+uncolored, unboxed scale bar renders 1 - background: white, 10 pt). No disc, no Blender
+colors, no filled balls; away-facing handles are dimmer, hover only brightens. The
+handles project through the CURRENT ``camera.angles`` so the gizmo turns with the volume
+(it repaints on ``camera.events.angles``, so a scripted orbit turns it too). Click an
+axis handle to snap to the view looking down it (Z is the XY top view, Y is XZ, X is YZ:
+the existing presets), click the center to refit, drag anywhere on the gizmo's circle to
+orbit live. Every camera write goes through :func:`_volume_view.snap_camera`, the
 app's ONE writer of ``camera.angles`` (source-scan-pinned); a drag is a pure rotation, so
 the release triggers ``refresh_bricks`` itself, exactly as ``snap_camera``'s docstring
 requires.
@@ -27,7 +33,7 @@ import math
 from typing import Optional
 
 import numpy as np
-from qtpy.QtCore import QEvent, Qt
+from qtpy.QtCore import QEvent, QPointF, Qt
 from qtpy.QtGui import QColor, QFont, QPainter, QPen
 from qtpy.QtWidgets import QWidget
 
@@ -52,8 +58,17 @@ DRAG_DEG_PER_PX = 0.4
 #: A press that moves less than this is a click, not a drag.
 DRAG_START_PX = 3
 
-#: Blender-like axis colors, as (r, g, b).
-AXIS_COLORS = {"x": (230, 80, 80), "y": (110, 180, 60), "z": (70, 130, 230)}
+#: The scale bar's look, taken, not invented: napari's uncolored, unboxed scale bar
+#: paints 1 - background on the app's dark canvas (white) at font_size 10 pt.
+FG_RGB = (255, 255, 255)
+FONT_PT = 10
+#: Alphas: quiet at rest, dimmer facing away, slightly brighter under the cursor.
+NEAR_ALPHA = 190
+FAR_ALPHA = 80
+HOVER_ALPHA = 255
+#: Stroke width of the axis lines: thin, drawn into the view (the hit radius stays
+#: HANDLE_R_PX regardless of how thin the drawing is).
+LINE_W = 1.5
 
 #: Click-to-snap: each handle lands the preset view looking DOWN its axis.
 AXIS_SNAP = {"z": "xy", "y": "xz", "x": "yz"}
@@ -63,18 +78,13 @@ _AXIS_WORLD = {"x": (0.0, 0.0, 1.0), "y": (0.0, 1.0, 0.0), "z": (1.0, 0.0, 0.0)}
 
 
 def camera_basis(angles) -> tuple:
-    """``(right, up, forward)`` unit vectors in napari world (z, y, x) for a camera at
-    *angles*, off napari's own ``Camera`` model (its Euler math, not a reimplementation).
-    ``up`` points up on the canvas; ``forward`` points from the camera INTO the scene.
+    """``(right, up, forward)`` in napari world (z, y, x): ``_napari_view``'s, which takes
+    it off napari's own ``Camera`` model (napari stays behind the ``_napari_*`` modules).
+    Pinned at the XY top view: right must be world +x (screen x grows right).
     """
-    from napari.components import Camera
+    from squidxplorer._napari_view import camera_basis as basis
 
-    cam = Camera(angles=tuple(float(v) for v in angles))
-    forward = np.asarray(cam.view_direction, dtype=float)
-    up = np.asarray(cam.up_direction, dtype=float)
-    # Pinned at the XY top view: right must be world +x (screen x grows right).
-    right = np.cross(forward, up)
-    return right, up, forward
+    return basis(angles)
 
 
 def project_axes(angles, length_px: float = AXIS_LEN_PX) -> dict:
@@ -272,38 +282,32 @@ class CameraGizmo(QWidget):
         try:
             p.setRenderHint(QPainter.Antialiasing, True)
             c = GIZMO_PX / 2.0
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(20, 20, 20, 110 if self._hover or self._press else 70))
-            p.drawEllipse(1, 1, GIZMO_PX - 2, GIZMO_PX - 2)
             font = QFont(self.font())
-            font.setPixelSize(10)
-            font.setBold(True)
+            font.setPointSizeF(FONT_PT)
             p.setFont(font)
+            r, g, b = FG_RGB
             offsets = project_axes(angles)
-            # Far first, near last, so a near handle paints over a far one.
+            # Far first, near last, so a near letter paints over a far line.
             for name, (dx, dy, depth) in sorted(
                     offsets.items(), key=lambda kv: -kv[1][2]):
-                r, g, b = AXIS_COLORS[name]
                 near = depth <= 0.0
-                alpha = 235 if near else 110
-                hx, hy = c + dx, c + dy
-                pen = QPen(QColor(r, g, b, alpha))
-                pen.setWidthF(2.0)
-                p.setPen(pen)
-                p.drawLine(int(c), int(c), int(hx), int(hy))
-                p.setPen(Qt.NoPen)
-                p.setBrush(QColor(r, g, b, alpha))
-                p.drawEllipse(int(hx - HANDLE_R_PX), int(hy - HANDLE_R_PX),
-                              2 * HANDLE_R_PX, 2 * HANDLE_R_PX)
-                if near:
-                    p.setPen(QColor(20, 20, 20, 230))
-                    p.drawText(int(hx - HANDLE_R_PX), int(hy - HANDLE_R_PX),
-                               2 * HANDLE_R_PX, 2 * HANDLE_R_PX,
-                               Qt.AlignCenter, name.upper())
-            hover_center = self._hover == "center"
-            p.setPen(QPen(QColor(255, 255, 255, 200 if hover_center else 120), 1.5))
-            p.setBrush(QColor(255, 255, 255, 70 if hover_center else 35))
-            p.drawEllipse(int(c - CENTER_R_PX), int(c - CENTER_R_PX),
-                          2 * CENTER_R_PX, 2 * CENTER_R_PX)
+                alpha = (HOVER_ALPHA if self._hover == name
+                         else NEAR_ALPHA if near else FAR_ALPHA)
+                color = QColor(r, g, b, alpha)
+                length = math.hypot(dx, dy)
+                if length > 2 * HANDLE_R_PX:
+                    # The line stops short so it never strikes through the letter.
+                    t = (length - HANDLE_R_PX + 1) / length
+                    pen = QPen(color)
+                    pen.setWidthF(LINE_W)
+                    p.setPen(pen)
+                    p.drawLine(QPointF(c, c), QPointF(c + dx * t, c + dy * t))
+                p.setPen(color)
+                p.drawText(int(c + dx - HANDLE_R_PX), int(c + dy - HANDLE_R_PX),
+                           2 * HANDLE_R_PX, 2 * HANDLE_R_PX, Qt.AlignCenter, name.upper())
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(r, g, b,
+                              HOVER_ALPHA if self._hover == "center" else NEAR_ALPHA))
+            p.drawEllipse(QPointF(c, c), 2.0, 2.0)
         finally:
             p.end()
