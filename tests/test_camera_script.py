@@ -65,7 +65,7 @@ def test_the_script_walks_its_poses_in_order_and_dwell_counts_after_residency(mo
         CS.Step((45.0, 45.0, 45.0), dwell_s=3),
         CS.Step("xz", dwell_s=3),
         CS.Step("yz"),
-    ], sleep=sleep, wait_ready=wait_ready)
+    ], transition_s=0.0, sleep=sleep, wait_ready=wait_ready)
 
     kinds = [e[0] for e in events]
     assert kinds == ["ready", "dwell", "ready", "dwell", "ready", "dwell", "ready"]
@@ -145,3 +145,112 @@ def test_an_explicit_triple_reaches_the_camera_through_snap_camera(mosaic):
     assert tuple(cam.angles) == pytest.approx((10.0, 20.0, 30.0))
     assert tuple(cam.center) == pytest.approx(center) and float(cam.zoom) == pytest.approx(zoom)
     assert shell.said == [], shell.said
+
+
+def test_a_live_run_pans_between_poses_at_the_stated_pace(mosaic):
+    """The orbit plays smoothly LIVE too: pan frames between poses, one 1/fps wait each."""
+    shell, vol = _volume_shell(mosaic)
+    vol.refresh = lambda *a, **k: None
+    sleeps = []
+    CS.run_camera_script(shell, [CS.Step("xy"), CS.Step("yz", dwell_s=1)],
+                         fps=10, transition_s=0.5,
+                         sleep=sleeps.append, wait_ready=lambda _w: True)
+    assert sleeps == [0.1, 0.1, 0.1, 0.1, 1.0], sleeps
+
+
+def test_a_zoom_step_multiplies_the_framed_zoom(mosaic):
+    """``Step.zoom`` fills the frame after the snap's own fit; a zoom-less step stays at fit."""
+    shell, vol = _volume_shell(mosaic)
+    vol.refresh = lambda *a, **k: None
+    CS.run_camera_script(shell, [CS.Step("xy")],
+                         wait_ready=lambda _w: True, sleep=lambda _s: None)
+    fitted = float(vol._viewer.camera.zoom)
+    CS.run_camera_script(shell, [CS.Step("xy", zoom=1.15)],
+                         wait_ready=lambda _w: True, sleep=lambda _s: None)
+    assert float(vol._viewer.camera.zoom) == pytest.approx(fitted * 1.15)
+
+
+def test_the_demo_orbit_storyboard_holds_its_35_degree_cone(mosaic):
+    """The canned SOP demo: opens XY, visits XZ and YZ, ends back on the hero; every
+    oblique pose lands on the 35 degree cone (tilt off z by ``camera.view_direction``)
+    at azimuths 30 -> 80 -> 130, zoomed to fill; axial poses stay at fit."""
+    steps = CS.demo_orbit_steps()
+    assert steps[0].pose == "xy" and steps[0].zoom is None
+    names = [s.pose for s in steps if isinstance(s.pose, str)]
+    assert names == ["xy", "xz", "yz"]
+    assert steps[-1].pose == CS.OBLIQUE_HERO
+
+    shell, vol = _volume_shell(mosaic)
+    vol.refresh = lambda *a, **k: None
+    azimuths = []
+    for step in steps:
+        if isinstance(step.pose, str):
+            continue
+        assert step.zoom == pytest.approx(CS.DEMO_ZOOM)
+        from squidxplorer import _volume_view
+
+        _volume_view.snap_camera(shell, step.pose, settle=False)
+        vd = np.asarray(vol._viewer.camera.view_direction, dtype=float)
+        tilt = np.degrees(np.arccos(min(1.0, abs(vd[0]))))
+        assert tilt == pytest.approx(35.0, abs=0.2), f"{step.pose} tilts {tilt:.1f}"
+        azimuths.append(round(float(np.degrees(np.arctan2(-vd[2], vd[1])))))
+    assert azimuths == [30, 80, 130, 30]
+
+
+def _comparison_scene(mosaic, op="decon"):
+    """Raw flat layers AND an operator volume in ONE viewer: both identities live."""
+    from .conftest import build_flat_scene
+
+    build_flat_scene(mosaic, "raw", ("488",))
+    vol = build_volume_scene(mosaic, op, ("488",), bricks=1)
+    vol._viewer.dims.ndisplay = 3
+    return _Shell(vol), vol
+
+
+def test_the_comparison_is_two_passes_composed_with_visibility_restored(mosaic):
+    """Pass A raw-only, pass B result-only, same steps so the camera matches by
+    construction; equal frame counts, composite width 2w + divider, and the user's
+    visibility comes back exactly."""
+    shell, vol = _comparison_scene(mosaic)
+    vol.refresh = lambda *a, **k: None
+    before = [(ly.name, bool(ly.visible)) for ly in mosaic.model.layers]
+    seen = []
+
+    def capture():
+        raw = mosaic.find("raw", "488")
+        seen.append((bool(raw.visible if raw is not None else False),
+                     any(ly.visible for ly in mosaic.layers_for("decon", "488"))))
+        return np.zeros((6, 8, 3), np.uint8)
+
+    frames = []
+
+    def writer(gen, out_path, fps):
+        frames.extend(gen)
+        return str(out_path), len(frames)
+
+    result = CS.record_comparison(
+        shell, "cmp.mp4", steps=[CS.Step("xy", dwell_s=0.5)], fps=4,
+        capture=capture, wait_ready=lambda _w: True, sleep=lambda _s: None, writer=writer)
+
+    half = len(seen) // 2
+    assert seen[:half] and all(s == (True, False) for s in seen[:half]), seen
+    assert all(s == (False, True) for s in seen[half:]), seen
+    assert result.n_frames == half == 2
+    assert all(f.shape == (6, 8 + CS.DIVIDER_PX + 8, 3) for f in frames)
+    assert [(ly.name, bool(ly.visible)) for ly in mosaic.model.layers] == before
+    assert shell.said == [], shell.said
+
+
+def test_the_comparison_refuses_a_missing_side_by_name(mosaic):
+    from napari.components import ViewerModel
+
+    from squidxplorer._napari_view import MosaicLayers
+
+    shell, _vol = _volume_shell(mosaic)            # raw volume only: no operator side
+    with pytest.raises(ValueError, match="no operator result"):
+        CS.record_comparison(shell, "cmp.mp4", steps=[CS.Step("xy")])
+
+    op_only = MosaicLayers(ViewerModel())
+    vol2 = build_volume_scene(op_only, "decon", ("488",), bricks=1)
+    with pytest.raises(ValueError, match="no raw layer"):
+        CS.record_comparison(_Shell(vol2), "cmp.mp4", steps=[CS.Step("xy")])

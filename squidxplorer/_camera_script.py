@@ -26,6 +26,8 @@ DEFAULT_TRANSITION_S = 1.0
 #: How long the residency wait may pump before giving up (the dwell still runs).
 BRICK_WAIT_S = 30.0
 
+_RAW_OP = "raw"
+
 Pose = Union[str, tuple]
 
 
@@ -37,12 +39,14 @@ class Step:
     triple. While recording, ``dwell_s`` is seconds OF MOVIE at the stated fps (at least one
     frame, so a dwell-less final pose still appears); live, it is a wall-clock wait.
     ``transition_s`` overrides the script-wide pan time into this pose; the first step never
-    pans in - the movie opens at its pose.
+    pans in - the movie opens at its pose. ``zoom`` multiplies the framed zoom after the
+    snap (zoom is not an angle, so the one-writer rule does not cover it).
     """
 
     pose: Pose
     dwell_s: float = 0.0
     transition_s: Optional[float] = None
+    zoom: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -166,14 +170,21 @@ def _execute(win, vol, parsed: Sequence[Step], *, fps: int, transition_s: float,
     prev: Optional[tuple] = None
     for step in parsed:
         target = pose_angles(step.pose)
-        if record and target is not None and prev is not None:
+        if target is not None and prev is not None:
             t = transition_s if step.transition_s is None else float(step.transition_s)
             for angles in transition_angles(prev, target, int(round(t * fps))):
                 # settle=False: a pan frame turns the camera alone; the step's own snap
                 # below re-frames and refines the bricks.
                 _volume_view.snap_camera(win, angles, settle=False)
-                yield capture()
+                if record:
+                    yield capture()
+                else:
+                    sleep(1.0 / fps)         # live: the pan plays at the recording's own pace
         _volume_view.snap_camera(win, step.pose if isinstance(step.pose, str) else target)
+        if step.zoom is not None:
+            cam = vol._viewer.camera
+            cam.zoom = float(cam.zoom) * float(step.zoom)
+            _volume_view.refresh_bricks(win)     # the zoom moved the stride the camera needs
         wait_ready(win)
         if record:
             for _ in range(dwell_frames(step.dwell_s, fps)):
@@ -245,3 +256,123 @@ def run_camera_script(
 def record_camera_script(win, steps: Sequence, out_path, **kwargs) -> ScriptResult:
     """The console entry: record *steps* over *win*'s open 3D volume into *out_path*."""
     return run_camera_script(win, steps, out_path=out_path, **kwargs)
+
+
+#: The demo's oblique hero angle: a 35 degree tilt off the XY top-down, yawed to azimuth 30
+#: (tuned on a real ViewerModel: tilt 35.0, azimuth 30.1 by ``camera.view_direction``).
+OBLIQUE_HERO = (0.0, 16.7, 58.8)
+
+#: Fill factor on the oblique poses; axial views stay at the frame's own fit.
+DEMO_ZOOM = 1.15
+
+
+def demo_orbit_steps() -> list:
+    """The canned SOP fly-around, ~22 s recorded at the default fps.
+
+    XY top-down fit 2.5 s; slow 2 s pan to the oblique hero (35 degrees off XY, azimuth
+    30), 3 s; an orbit - the azimuth sweeps 30 -> 80 -> 130 on the same 35 degree cone
+    over 6 s of pan (each waypoint tuned on a real ViewerModel to hold tilt 35.0 +/- 0.1);
+    XZ 2.5 s (the axial view); YZ 2.5 s; back to the hero for 2 s.
+    """
+    return [
+        Step("xy", dwell_s=2.5),
+        Step(OBLIQUE_HERO, dwell_s=3.0, transition_s=2.0, zoom=DEMO_ZOOM),
+        Step((0.0, 34.4, 82.9), transition_s=3.0, zoom=DEMO_ZOOM),     # azimuth 80
+        Step((0.0, 26.1, 114.3), transition_s=3.0, zoom=DEMO_ZOOM),    # azimuth 130
+        Step("xz", dwell_s=2.5),
+        Step("yz", dwell_s=2.5),
+        Step(OBLIQUE_HERO, dwell_s=2.0, transition_s=2.0, zoom=DEMO_ZOOM),
+    ]
+
+
+#: Width of the gray bar between the two halves of a comparison frame.
+DIVIDER_PX = 4
+
+
+def _show_only(mosaic, op: str) -> None:
+    """Light every layer of *op*'s identities and darken every other op's, programmatically."""
+    with mosaic.programmatic():
+        for other in mosaic.ops():
+            want = str(other) == str(op)
+            for ch in mosaic.channels(other):
+                for ly in mosaic.layers_for(other, ch):
+                    ly.visible = want
+
+
+def _side_by_side(a: np.ndarray, b: np.ndarray, divider_px: int) -> np.ndarray:
+    h = min(int(a.shape[0]), int(b.shape[0]))
+    divider = np.full((h, int(divider_px), 3), 64, np.uint8)
+    return np.concatenate([a[:h], divider, b[:h]], axis=1)
+
+
+def record_comparison(
+    win,
+    out_path,
+    steps: Optional[Sequence] = None,
+    *,
+    fps: int = DEFAULT_FPS,
+    transition_s: float = DEFAULT_TRANSITION_S,
+    divider_px: int = DIVIDER_PX,
+    capture: Optional[Callable[[], np.ndarray]] = None,
+    sleep: Callable[[float], None] = _pump_sleep,
+    wait_ready: Callable[..., bool] = wait_bricks_resident,
+    writer: Optional[Callable] = None,
+) -> ScriptResult:
+    """Record raw beside the operator result: two passes of the SAME steps over the SAME
+    view (camera and zoom identical by construction), raw-only visible on the left pass,
+    the operator identity on the right, composed frame by frame into one .mp4.
+
+    Contrast latches once PER PASS on that pass's own visible layers, so each modality is
+    honestly windowed rather than sharing one window. The user's layer visibility is
+    restored afterwards, success or failure. *steps* defaults to :func:`demo_orbit_steps`.
+    """
+    vol = getattr(win, "_native3d", None)
+    mosaic = getattr(vol, "_mosaic", None)
+    if vol is None or mosaic is None:
+        raise ValueError("comparison: no 3D volume is up in this view. Open 3D first.")
+    if not mosaic.channels(_RAW_OP):
+        raise ValueError("comparison: no raw layer in this view to put beside the result.")
+    others = [op for op in mosaic.ops() if str(op) != _RAW_OP]
+    if not others:
+        raise ValueError("comparison: no operator result in this view. Run an operator, "
+                         "then record the comparison.")
+    op = getattr(vol, "_op", None)
+    if op not in others:
+        if len(others) > 1:
+            raise ValueError(f"comparison: several operator layers here ({sorted(others)}); "
+                             f"show the one to compare and click 3D again.")
+        op = others[0]
+    steps = list(steps) if steps is not None else demo_orbit_steps()
+
+    passes: dict = {}
+
+    def _collector(name):
+        def _write(frames, _path, fps):          # noqa: ARG001 - the writer seam's signature
+            passes[name] = [np.asarray(f) for f in frames]
+            return "", len(passes[name])
+        return _write
+
+    snapshot = [(ly, bool(getattr(ly, "visible", False))) for ly in mosaic.ours()]
+    try:
+        for name, show in (("raw", _RAW_OP), ("op", op)):
+            _show_only(mosaic, show)
+            run_camera_script(win, steps, out_path=out_path, fps=fps,
+                              transition_s=transition_s, capture=capture, sleep=sleep,
+                              wait_ready=wait_ready, writer=_collector(name))
+    finally:
+        with mosaic.programmatic():
+            for ly, was in snapshot:
+                try:
+                    ly.visible = was
+                except Exception:                # noqa: BLE001 - the layer may be gone
+                    pass
+    a, b = passes["raw"], passes["op"]
+    if len(a) != len(b):
+        raise ValueError(f"comparison: the two passes disagree, {len(a)} raw frame(s) "
+                         f"against {len(b)}; the canvas changed mid-recording.")
+    if writer is None:
+        from squidxplorer._video import write_mp4 as writer
+    composed = (_side_by_side(fa, fb, divider_px) for fa, fb in zip(a, b))
+    path, n = writer(composed, out_path, fps=fps)
+    return ScriptResult(path=str(path), n_frames=int(n),
+                        poses=tuple(as_step(s).pose for s in steps))
