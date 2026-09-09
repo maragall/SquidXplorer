@@ -504,17 +504,8 @@ def test_decon_over_an_nz1_acquisition_writes_a_one_plane_copy(tmp_path):
                                 DEFAULT_ITERATIONS, project=False)[0]
     np.testing.assert_array_equal(out, expected)
 
-# --- the QC sweep's capture hook is GONE (shelved with the sweep, 2026-08-25) -----------------
-
-def test_the_snapshot_capture_hook_is_gone_with_the_sweep():
-    """Julio: "The sweep code should be shelved."""
-    import inspect
-
-    from squidxplorer import _decon, _decon_gpu
-
-    assert "snapshot_iters" not in inspect.signature(_decon._run).parameters
-    assert "snapshot_iters" not in inspect.signature(_decon_gpu.rl).parameters
-
+# (The snapshot_iters absence pins died 2026-09-09: Julio asked the capture back for the
+# viewer-native iteration stepper; tests/test_decon_iterations.py pins the revival.)
 
 def test_iterations_is_a_declared_param_on_the_decon_registration():
     """THE one place the QC's chosen count lands: the surviving operator declares ``iterations``, so operator_kwargs / recipes / the declaration probe all carry it."""

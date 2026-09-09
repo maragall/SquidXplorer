@@ -547,6 +547,18 @@ class BrickedVolume:
         except Exception:                               # noqa: BLE001 - already gone
             pass
 
+    def latch_contrast(self) -> dict:
+        """Seed every channel's window from its live layer: the camera script's one latch,
+        so a brick read mid-recording cannot re-auto-window (the _video latched rule)."""
+        for ch in self._channels:
+            try:
+                clim = self._mosaic.contrast(ch)
+            except Exception:                           # noqa: BLE001 - no layer yet: keep seed
+                clim = None
+            if clim is not None:
+                self._contrast_by[ch] = tuple(clim)
+        return dict(self._contrast_by)
+
     # -- timing --------------------------------------------------------------------------
     def _note_first_pixels(self) -> None:
         if self._t_first is None and self._t_open is not None:

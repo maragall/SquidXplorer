@@ -64,12 +64,42 @@ def test_the_snap_chips_exist_only_on_a_volume_tab(qapp, napari_pane_stub, squid
     _drain_until(qapp, lambda: v._pane is not None, timeout=10)
     try:
         chips = v._snap_chips
-        assert [c.text() for c in chips] == ["XY", "XZ", "YZ", "fit"]
+        assert [c.text() for c in chips] == ["XY", "XZ", "YZ", "fit", "orbit"]
         assert all(c.isHidden() for c in chips), "a 2D tab offers the 3D snap chips"
         v.note_volume_tab()
         assert all(not c.isHidden() for c in chips), "a volume tab hides its own snap chips"
         assert all(c.isEnabled() for c in chips)
         assert all(c.toolTip() for c in chips), "a chip must say what it does"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_the_orbit_chip_plays_the_demo_live_and_disables_while_it_runs(
+        qapp, napari_pane_stub, squid_dataset, monkeypatch):
+    """One chip, volume tabs only, no recording: it PLAYS ``demo_orbit_steps()`` in place
+    and cannot be double-started (disabled for the run's whole duration)."""
+    from squidxplorer import _camera_script
+
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    v = win._viewer_manager.open([list(win._order)[0]])
+    _drain_until(qapp, lambda: v._pane is not None, timeout=10)
+    try:
+        v.note_volume_tab()
+        calls = []
+
+        def fake_run(w, steps, **kw):
+            calls.append((w, [s.pose for s in steps], v._btn_orbit.isEnabled()))
+            return _camera_script.ScriptResult(None, 0, ())
+
+        monkeypatch.setattr(_camera_script, "run_camera_script", fake_run)
+        v._play_orbit()
+        assert len(calls) == 1
+        w, poses, enabled_during = calls[0]
+        assert w is v and poses == [s.pose for s in _camera_script.demo_orbit_steps()]
+        assert enabled_during is False, "the chip stayed clickable while the orbit ran"
+        assert v._btn_orbit.isEnabled(), "the chip never came back after the run"
     finally:
         shutdown_plate_window(qapp, win)
 

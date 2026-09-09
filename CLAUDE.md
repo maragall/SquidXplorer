@@ -871,9 +871,8 @@ measured 2.33 GiB peak per FOV on this Mac, 15z x 3ch x 2050^2, one FOV in fligh
   volume solve; `"decon3d"` is refused BY NAME with a pointer to `decon`
   (`_engine._resolve_operator`). The decon card (QC panel) is unchanged — it always ran the
   3-D solve. Backends (2026-08-25): petakit CuPy on NVIDIA, `_decon_gpu` torch/MPS on Apple
-  Silicon (z-tiled over `min(recommended_max_memory, free RAM)` with petakit's own tile plan;
-  the tiled solve equals petakit's tiled solve to 1 count and is NOT the whole solve, up to
-  25% of peak at seams with a 95-plane PSF, the log line says so), petakit numpy elsewhere.
+  Silicon, petakit numpy elsewhere. **The solve NEVER TILES** (2026-09-09, superseding the
+  z-tiled MPS arm): see the decon-iterations entry below.
 - **Every decon preview is the FULL solve; the tab decides what is DISPLAYED** (Julio,
   2026-08-26: "Make the 2D preview show plane of the 3D solve. That's what a researcher
   should expect."; and "Decon is expensive. If they want to preview fast, then have them
@@ -1362,6 +1361,62 @@ Julio's green light. The rules and facts:
   Contrast only, never the manual latch or a colormap: a stain-LUT plate look survives.
   `_apply_channel_visibility` replays saved visibility inside `programmatic()` so a
   window-open replay never reads as a gesture.
+
+## Decon iterations, no tiling, and the camera script (2026-09-09, branches decon-iterations + camera-script)
+
+Julio's directives after the demo planning call, verbatim: "the most important thing is that
+you can't chunk the 3D volume when you do 3d decon. It has to run in one step and put the
+whole volume into memory"; "make sure that I could revert the iterations so that I can see
+how the halo's change"; "I need to see the turbo colormap"; "for now, we'll work on the mip";
+"No ML stuff for now". The rules:
+
+- **The volume solve never tiles.** The `_decon_gpu` z-tiling arm is DELETED whole and
+  petakit's internal tiler is pinned off (`avail_memory_gb=inf`); a volume whose working set
+  does not fit is a NAMED refusal BEFORE any plane is read (pinned with a counting reader),
+  stating shape, estimated GB, the multiple, available memory (one solve may claim 80%) and
+  the way out (an ROI or a z subset). The multiple is MEASURED, not petakit's estimate:
+  torch/MPS peaks at 21-22x the float32 volume bytes (`GPU_WORKING_SET_MULTIPLE = 22`),
+  petakit CPU 13-15x (`CPU_WORKING_SET_MULTIPLE = 16`); petakit's own 40 B/voxel understates
+  both. `MemoryError` joined `_engine._NOT_A_WELL_FAULT`: a machine-wide refusal is never a
+  per-well skip. CUDA is MPS-calibrated until Julio's Linux box measures it.
+- **Iteration inspection is back, viewer-native** (reinstated from `bf982a2^` per the
+  reinstate-from-history rule; the old visualization was shelved for side-panel clunk and
+  this adds no panel): a "capture each iteration" checkbox in the decon panel, then one
+  compact `[<] iteration k/N, MIP [>] [turbo]` row shown only while captures exist. Capture
+  rides ONE solve (final iteration bit-identical to a plain run, pinned); stepping k repaints
+  the decon layers with iteration k's MIP with NO re-solve (pinned by making any solve raise
+  during the step); turbo is napari's native colormap with per-layer restore; held snapshot
+  bytes are stated in one INFO line per channel and counted inside the fit refusal. An
+  ROI-scoped capture holds exactly the delivered window. The capture store holds no Qt object
+  (a dead panel's bound emit measured a bus error; weakref + sip-alive, self-unsubscribing).
+  MIP-only on purpose; a 3D tab's bricks are not re-stepped.
+- **The camera has a scriptable API** (`_camera_script.py`): `Step{pose, dwell_s,
+  transition_s, zoom}` sequences over `run_camera_script(view, steps, out_path=None)` —
+  poses are the XY/XZ/YZ/fit presets or explicit angle triples, every write still through
+  `snap_camera` (extended for triples; STILL the one writer of `camera.angles`,
+  source-scan-pinned), dwell counts only after brick residency, recording latches contrast
+  once (`BrickedVolume.latch_contrast`) and streams into `_video.write_mp4`, transitions
+  interpolate per-axis Euler shortest-arc (waypoints every ~50 degrees, not slerp, stated).
+  `demo_orbit_steps()` is the tuned SOP (~22 s: XY 2.5 s, oblique hero at measured 35 degree
+  tilt / zoom 1.15, a 100 degree orbit over 6 s, XZ 2.5 s - the axial money shot for decon
+  halos - YZ 2.5 s, return); the "orbit" chip (volume tabs only, disabled while running)
+  plays it live. `record_comparison(view, out)` is the CEO's side-by-side: the SAME steps
+  run twice - camera and zoom identical BY CONSTRUCTION, no camera-link machinery - pass A
+  raw only, pass B the operator result only, frames hstacked with a 4 px divider, each pass
+  latching its own honest window (stated in the docstring), visibility and the tab's
+  original volume restored in a finally. On a live volume tab each pass REBUILDS the volume
+  over its identity through the `_show_result_volume` chain (no second open path);
+  refusals (no raw, no result, ambiguous, z-reducing result) are settled before the camera
+  moves. Entry points are console + the orbit chip; a script-definition GUI was refused by
+  the one-column rules on purpose.
+- **The z-subset test acquisition**: `~/Downloads/25x_C4_z15_dz=3_subset/` holds the central
+  15 z of 25x_C4 (bit-identical planes, hardlinked sidecars, both Nz-declaring files edited,
+  456 MiB new bytes; script is a scratchpad one-off). Per-channel volume 0.30 GiB -> ~6.5 GB
+  MPS estimate: solves whole on the 16 GB Mac, where the full 46-z set (~20 GB) correctly
+  refuses. Hardlinks cannot z-subset a single multi-page OME-TIFF; that is why it is an
+  extraction.
+- **Hand checks owed** (offscreen has no GL): the orbit's on-screen look, a recorded mp4,
+  and `record_comparison` on a real window over the z-subset.
 
 ## Agent skills
 

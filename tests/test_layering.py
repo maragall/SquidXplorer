@@ -19,6 +19,8 @@ GUI_MODULES = frozenset({
     "_fontscale",        # lives outside `_viewer` only to avoid a circular import
     "_brick_view",       # the in-window 3D renderer; owns a QThread reading bricks off the UI
                           # thread. The Qt-free half (geometry, stride, budget policy) is `_bricks`.
+    "_camera_script",    # the camera-script EXECUTOR: pumps the Qt loop while waiting on the
+                          # brick loader. The planning half (poses, interpolation, dwell) is pure.
     "_gallery_window",   # Gallery View's window; its producer `_gallery` is Qt-free on purpose
     "_ingest",           # the acquisition-open pipeline, cut out of `_viewer` (2026-08-13)
     "_acqset_gui",       # the QThread over `_acqset.run_over_set`; `_acqset` itself is Qt-free
