@@ -212,7 +212,30 @@ def _pyr_meta(nz=6, frame=(256, 256), px=1.0, n=16):
     return meta
 
 
-def test_deep_zoom_gets_native_pixels_on_demand():
+@pytest.fixture
+def fused_slicing():
+    """PIN dask's slice fusion for the exact-window read-set pins, instead of inheriting
+    machine state.
+
+    The exact-window behavior these pins measure IS dask's getter fusion, gated by the
+    GLOBAL config key ``optimization.fuse.active``. napari legitimately sets it to False
+    inside a ``dask.config.set`` context on EVERY dask-layer slice (napari#718,
+    ``napari/utils/_dask_utils.py``), and under async slicing two overlapping contexts on
+    two threads restore out of order and leave False STUCK in the process (measured: enter
+    T1, enter T2, exit T1, exit T2 ends with the global at False). Any earlier test that
+    sliced a dask-backed layer can therefore poison this one: with fusion off, a 100x100
+    window pulls its whole 2048 px chunk (FOVs 0-7 of the 16) and a one-chunk coarse rung
+    pulls every FOV — the order-dependent failure of 2026-09-09. The app itself is
+    unaffected in kind: napari slices our pyramids under that same context by design, and
+    the chunk grain is the documented honest fallback (the nz > 1 rule).
+    """
+    import dask
+
+    with dask.config.set({"optimization.fuse.active": True}):
+        yield
+
+
+def test_deep_zoom_gets_native_pixels_on_demand(fused_slicing):
     """Fine rungs below the cap go down to NATIVE, and a window materialises only the chunk under it — a slice reads the FOVs of that chunk, never the region."""
     from squidxplorer._mosaic_source import fuse_region_pyramid
 
@@ -258,7 +281,7 @@ def test_the_raw_preview_returns_a_pyramid_of_strictly_decreasing_levels():
             f"levels must strictly decrease: {above.shape} -> {below.shape}")
 
 
-def test_a_viewport_window_at_a_COARSE_rung_reads_only_the_fovs_under_it():
+def test_a_viewport_window_at_a_COARSE_rung_reads_only_the_fovs_under_it(fused_slicing):
     """THE customer freeze (452-FOV set, 2026-08-19): a coarse rung used to be one whole-region delayed fuse, so napari's synchronous draw decoded EVERY FOV"""
     from squidxplorer._mosaic_source import fuse_region_pyramid
 
