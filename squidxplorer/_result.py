@@ -39,6 +39,12 @@ class Substance:
     ``kind`` is what the pixels MEAN (the operator registry's ``produces`` declaration), carried on
     the result so a sink doesn't have to go back to the registry. It picks the napari layer type:
     ``"intensity"`` is windowed and colormapped, ``"labels"`` is integer ids with no window.
+
+    ``depth_label`` is what the DEPTH AXIS means: ``"z"`` (acquired planes, scaled by dz on
+    display) for every ordinary result, or ``"iteration"`` (the QC result: one plane per RL
+    iteration of one solve, unit scale). One honest fact, declared here so the delivery path
+    reads it off the result instead of guessing from shape (Julio, 2026-09-09: chaining an
+    operation whose result carries an iteration axis).
     """
 
     channels: "tuple[str, ...]"
@@ -46,6 +52,7 @@ class Substance:
     dtype: str
     pixel_size_um: float
     kind: str = "intensity"
+    depth_label: str = "z"
 
     def __post_init__(self) -> None:
         chans = tuple(str(c) for c in self.channels)
@@ -154,6 +161,10 @@ class Result:
     @property
     def kind(self) -> str:
         return self.substance.kind
+
+    @property
+    def depth_label(self) -> str:
+        return self.substance.depth_label
 
     def declares(self, channel: str) -> bool:
         return str(channel) in self.substance.channels

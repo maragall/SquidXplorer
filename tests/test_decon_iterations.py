@@ -1,6 +1,7 @@
-"""The iteration QC (Julio, 2026-09-09: MIPs are the QC; the window steps them): tri-MIP
-captures ride ONE solve, the QC window's slider swaps all three projections without a
-re-solve, "use k" writes the panel, an ordinary preview lands NOTHING, and teardown frees
+"""The iteration QC as a CHAINED OPERATION (Julio, 2026-09-09): tri-MIP captures ride
+ONE solve through the ordinary dispatch, the result lands as ordinary layers in a
+layers-only child whose depth axis is the iteration, napari's own slider steps k and the
+DISPLAYED slice actually lands, an ordinary preview lands NOTHING, and teardown frees
 the store."""
 
 from __future__ import annotations
@@ -92,19 +93,30 @@ def test_an_ordinary_preview_lands_no_captures(monkeypatch):
     assert iteration_captures() == {}
 
 
-def test_the_qc_solve_lands_tri_captures_and_take_frees_the_store(monkeypatch):
-    """The QC path: run_qc_solve arms around one project_well, every channel captured
-    with all three projections; take_captures hands them over and empties the store."""
+def test_the_qc_solve_is_the_ordinary_dispatch_and_take_frees_the_store(monkeypatch):
+    """THE fold pin (Julio: "it looks like logic is being duplicated"): run_qc_solve
+    rides run_operator_once - the Preview's own dispatch - with capture armed; every
+    channel lands all three projections; take_captures empties the store."""
     pytest.importorskip("petakit")
-    from squidxplorer._decon import clear_optics, decon_op
+    from squidxplorer import _dispatch
+    from squidxplorer._decon import clear_optics
     from squidxplorer._decon_qc import run_qc_solve
 
     monkeypatch.setenv(_decon_gpu.ENV_VAR, "cpu")
+    rode_dispatch = {"n": 0}
+    real = _dispatch.run_operator_once
+
+    def counted(*a, **k):
+        rode_dispatch["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(_dispatch, "run_operator_once", counted)
     _override_optics()
     try:
-        run_qc_solve(_Reader(), "A1", 0, None, decon_op(None, 2), 0)
+        run_qc_solve(_Reader(), "A1", 0, None, {"iterations": 2})
     finally:
         clear_optics()
+    assert rode_dispatch["n"] == 1, "the QC solve must ride the one dispatch path"
     caps = take_captures()
     assert sorted(caps) == ["488"]
     assert sorted(caps["488"]) == [1, 2]
@@ -131,15 +143,16 @@ def _drain(app, pred, timeout=10):
     return False
 
 
-def test_the_qc_tab_holds_tri_mip_layers_with_iteration_as_a_dims_axis(
+def test_the_chained_qc_result_lands_as_layers_and_its_slices_actually_land(
         qapp, napari_pane_stub, squid_dataset, monkeypatch):
-    """THE stepper pin, as a DECK TAB (Julio: "It should be a tab in the napari GUI"):
-    the tri-MIPs are real adopted layers whose axis 0 is the iteration, napari's own dims
-    slider steps k for all of them with any solve attempt raising, the bands sit beside
-    and below with dz on their own scale, use-k hands out the shown count, and the tab's
-    ordinary dispose frees the pixels."""
+    """THE delivered-chain pin, carrying the measured defect of 2026-09-09: the shipped
+    (N, 1, H, W) shape beside a z-ful raw shared world axis 1 and napari sliced the
+    size-1 axis at raw's z point, out of range forever, so no QC slice ever landed and
+    every slider read dead. Now: a LAYERS-ONLY child (no raw, no mosaic load), uniform
+    (iteration, y, x) dims, ordinary delivery - and the pin asserts the DISPLAYED slice
+    lands for the stepped k, which the old pins never checked."""
     import squidxplorer._viewer as V
-    from squidxplorer._decon_qc import QC_OP, open_qc_tab, qc_bbox_um
+    from squidxplorer._decon_qc import QC_XY, QC_XZ, QC_YZ, deliver_qc, qc_bbox_um
     from tests.conftest import shutdown_plate_window
 
     root, _ = squid_dataset
@@ -151,71 +164,58 @@ def test_the_qc_tab_holds_tri_mip_layers_with_iteration_as_a_dims_axis(
         region = view.current_region()
         meta = view._meta
         fov = int(meta["fovs_per_region"][region][0])
+        fh, fw = (int(v) for v in meta["frame_shape"])    # a real capture spans the field
+        nz = 2
         rng = np.random.default_rng(1)
-        caps = {"488": {k: _tri(rng, k) for k in (1, 2, 3)}}
-        adopted: list = []
-        child = open_qc_tab(view, caps, region, fov, None, on_use=adopted.append)
+        caps = {"488": {k: _tri(rng, k, h=fh, w=fw, z=nz) for k in (1, 2, 3)}}
+        child = deliver_qc(view, caps, region, fov, None)
         assert child is not None and child is not view
+        assert child._layers_only and child._worker is None, "no raw mosaic load, ever"
         mosaic = child._pane.mosaic
         model = mosaic.model
-
-        layers = mosaic.layers_for(QC_OP, "488")
-        assert len(layers) == 3, "three projections, one identity, three holders"
-        by_name = {ly.name.split()[2]: ly for ly in layers}
-        assert set(by_name) == {"xy", "xz", "yz"}
-        assert by_name["xy"].data.shape == (3, 1, 24, 30)
-        assert by_name["xz"].data.shape == (3, 1, 4, 30)
-        assert by_name["yz"].data.shape == (3, 1, 24, 4), "yz is transposed so y aligns"
+        assert "raw" not in mosaic.ops(), "the QC tab holds only the delivered layers"
 
         px = float(meta["pixel_size_um"])
         dz = float(meta.get("dz_um") or px)
         x0, y0, x1, y1 = qc_bbox_um(meta, region, fov, None)
-        assert np.allclose(by_name["xy"].scale[-2:], (px, px))
-        assert np.allclose(by_name["xz"].scale[-2:], (dz, px)), "the band's z rides scale"
-        assert np.allclose(by_name["yz"].scale[-2:], (px, dz))
-        assert np.allclose(by_name["xy"].translate[-2:], (y0, x0))
-        assert by_name["xz"].translate[-2] > y1, "the XZ band sits below the MIP"
-        assert by_name["yz"].translate[-1] > x1, "the YZ band sits beside the MIP"
-
+        xy = mosaic.find(QC_XY, "488")
+        xz = mosaic.find(QC_XZ, "488")
+        yz = mosaic.find(QC_YZ, "488")
+        assert xy.data.shape == (3, fh, fw)
+        assert xz.data.shape == (3, nz, fw)
+        assert yz.data.shape == (3, fh, nz), "yz is transposed so y aligns"
+        assert np.allclose(xy.scale, (1.0, px, px)), "the iteration axis is unit scale"
+        assert np.allclose(xz.scale, (1.0, dz, px)), "the band's z rides its own scale"
+        assert np.allclose(yz.scale, (1.0, px, dz))
+        assert np.allclose(xy.translate[-2:], (y0, x0))
+        assert xz.translate[-2] > y1, "the XZ band sits below the MIP"
+        assert yz.translate[-1] > x1, "the YZ band sits beside the MIP"
+        assert all(ly.visible for ly in (xy, xz, yz)), "all three panels open lit"
+        for band in (xz, yz):
+            assert band.metadata.get("contrast_unlinked"), "a band owns its window"
+            assert str(band.interpolation2d) == "linear", "a stretched band renders linear"
+        assert band not in mosaic._link_set("488")
+        assert model.dims.ndim == 3, "uniform (iteration, y, x): no axis mixing exists"
         assert model.dims.axis_labels[0] == "iteration"
-        assert int(model.dims.current_step[0]) == 2, "the tab opens on the final iteration"
-        assert child._qc_use_button.text() == "use iteration 3"
+        assert int(model.dims.current_step[0]) == 2, "opens on the final iteration"
 
-        # Stepping k is napari's own dims slicing over held arrays: no re-solve exists.
         def _no_solve(*_a, **_k):
-            raise AssertionError("the QC tab triggered a re-solve")
+            raise AssertionError("stepping the QC tab triggered a re-solve")
 
         monkeypatch.setattr(_decon, "_run", _no_solve)
         model.dims.set_current_step(0, 0)
-        qapp.processEvents()
-        assert child._qc_use_button.text() == "use iteration 1"
-        for name, ly in by_name.items():
-            want = caps["488"][1][name].T if name == "yz" else caps["488"][1][name]
-            assert np.array_equal(np.asarray(ly.data[0, 0]), want), (
-                f"the {name} layer's k=1 slice must be iteration 1's own projection")
-        child._qc_use_button.click()
-        assert adopted == [1], "use k must hand out the SHOWN count"
+        assert _drain(qapp, lambda: np.array_equal(
+            np.asarray(xy._slice.image.view),
+            cast_like(caps["488"][1]["xy"], np.dtype(np.uint16))), timeout=5), (
+            "the DISPLAYED slice must land for the stepped k (the 2026-09-09 defect)")
+        assert _drain(qapp, lambda: np.array_equal(
+            np.asarray(xz._slice.image.view),
+            cast_like(caps["488"][1]["xz"], np.dtype(np.uint16))), timeout=5)
 
         pane = child._pane
         child.dispose()
-        assert pane.shutdowns >= 1, "the tab's dispose must free its viewer and pixels"
+        assert pane.shutdowns >= 1, "the tab's ordinary dispose frees its viewer"
     finally:
         shutdown_plate_window(qapp, win)
 
 
-def test_use_k_writes_the_panels_iterations_spin():
-    """The adoption seam: the window's on_use goes through DeconPanel.set_param, the
-    run's single source of truth."""
-    from squidxplorer._param_panel import DeconPanel
-
-    class _Host:
-        def say(self, text):
-            self.said = text
-
-    panel = DeconPanel(_Host())
-    try:
-        assert panel.set_param("iterations", 7) is None
-        assert int(panel.widgets["iterations"].value()) == 7
-        assert hasattr(panel, "inspect_btn"), "the QC button is the decon UI's entry"
-    finally:
-        panel.deleteLater()

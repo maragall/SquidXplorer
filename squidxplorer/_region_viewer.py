@@ -316,8 +316,18 @@ class RegionViewer(QMainWindow):
         parent_id: Optional[int] = None,
         settings: "Optional[ViewSettings]" = None,
         fovs: bool = False,
+        layers_only: bool = False,
     ) -> None:
         super().__init__(parent)
+        if layers_only and fovs:
+            raise ValueError(
+                "layers_only=True hosts delivered layers and never fuses a mosaic; a FOV "
+                "walk steps the camera across a mosaic. A window cannot be both.")
+        #: A LAYERS-ONLY view never fuses the raw mosaic: its scene is exactly what a
+        #: caller delivers into it (the iteration QC tab; Julio, 2026-09-09). One gate,
+        #: `_load_mosaic`, so the initial load, region changes and timepoint reloads all
+        #: honor it.
+        self._layers_only = bool(layers_only)
         self._reader = reader
         self._meta = meta
         #: WHAT THIS WINDOW WAS OPENED OVER. Historical and immutable — not "where it can go now",
@@ -561,8 +571,8 @@ class RegionViewer(QMainWindow):
         self._time_point_bar.on_problem(self._say)
         self._time_point_bar.set_count(int((self._meta or {}).get("n_t", 1) or 1))
         lay.addWidget(self._time_point_bar)
-        # (Iteration QC left this window on 2026-09-09: it is a deck TAB now, tri-MIP
-        # layers with iteration as a dims axis, `_decon_qc.open_qc_tab`.)
+        # (Iteration QC left this window on 2026-09-09: a chained operation delivered
+        # into a layers-only child, iteration as the depth axis, `_decon_qc.deliver_qc`.)
 
         self.setCentralWidget(central)
 
@@ -1556,11 +1566,15 @@ class RegionViewer(QMainWindow):
                 levels, bbox = cropped
                 data = levels if multiscale else levels[0]
             try:
+                # The depth axis is what the RESULT declares: acquired z (scaled by dz) for
+                # every ordinary result, or an ITERATION axis (unit scale) for the QC
+                # result - one plane per RL count, never a geometric depth.
+                depth_scale = dz if result.depth_label == "z" else 1.0
                 mosaic.add_result(
                     result.kind, str(op), channel, data,
                     colormap=_colormap_for(channel, (self._meta or {}).get("channels")),
                     bbox_um=bbox,
-                    z_scale_um=(dz if int(result.z_depth) > 1 else None),
+                    z_scale_um=(depth_scale if int(result.z_depth) > 1 else None),
                     visible=bool(visible),
                     multiscale=multiscale,
                 )
@@ -1578,7 +1592,9 @@ class RegionViewer(QMainWindow):
                 fit = getattr(mosaic, "reset_view", None)
                 if callable(fit):
                     fit()
-            if bool(visible) and int(result.z_depth) > 1 and self._render_mode == "3d":
+            if (bool(visible) and int(result.z_depth) > 1 and self._render_mode == "3d"
+                    and result.depth_label == "z"):
+                # An iteration axis is not a geometric depth: never bricked as a volume.
                 self._show_result_volume(str(op))
         return added
 
@@ -2269,6 +2285,8 @@ class RegionViewer(QMainWindow):
     # -- drive _load_mosaic / _on_plane / _on_done by name, and _on_plane unbound over a duck. ----
     def _load_mosaic(self, region: Optional[str]) -> None:
         """Fuse one region's FOVs into this pane. See `_mosaic_playback.load_mosaic`."""
+        if getattr(self, "_layers_only", False):
+            return                               # a layers-only view holds delivered layers only
         _mosaic_playback.load_mosaic(self, region)
 
     def _worker_ended(self, worker) -> None:
@@ -2844,19 +2862,22 @@ class ViewerManager(QObject):
 
     def open_child(self, regions: Sequence[str], *, roi_bbox: Optional[tuple] = None,
                    parent_id: Optional[int] = None, luts: Optional[dict] = None,
-                   fovs: bool = False) -> Optional[RegionViewer]:
+                   fovs: bool = False, layers_only: bool = False,
+                   title: Optional[str] = None) -> Optional[RegionViewer]:
         """Open a CHILD window from a parent window (the next level of the tree).
 
         ``fovs=True`` opens a FOV WALK instead: the same regions, uncropped, with a slider that
         steps the camera across the region's fields. It is mutually exclusive with ``roi_bbox``
-        and ``RegionViewer.__init__`` refuses the combination by name rather than picking one."""
+        and ``RegionViewer.__init__`` refuses the combination by name rather than picking one.
+        ``layers_only=True`` opens a view that never fuses the raw mosaic: its scene is what
+        the caller delivers (the iteration QC tab)."""
         regions = [str(r) for r in regions if r]
         if not regions:
             return None
-        base = RegionViewer._view_label(regions)
-        title = f"{base}  ◂ view {parent_id}" if parent_id is not None else base
-        return self._spawn(regions, title=title, roi_bbox=roi_bbox, parent_id=parent_id, luts=luts,
-                           fovs=fovs)
+        base = title or RegionViewer._view_label(regions)
+        full = f"{base}  ◂ view {parent_id}" if parent_id is not None else base
+        return self._spawn(regions, title=full, roi_bbox=roi_bbox, parent_id=parent_id, luts=luts,
+                           fovs=fovs, layers_only=layers_only)
 
     def _baseline_for(self, parent_id: Optional[int]) -> "dict[str, Any]":
         """The settings a NEW window opens with: the global defaults, with ``_INHERIT`` reading the opener."""
@@ -2879,7 +2900,7 @@ class ViewerManager(QObject):
     def _spawn(self, regions: "list[str]", *, title: Optional[str] = None,
                roi_bbox: Optional[tuple] = None,
                parent_id: Optional[int] = None, luts: Optional[dict] = None,
-               fovs: bool = False) -> Optional[RegionViewer]:
+               fovs: bool = False, layers_only: bool = False) -> Optional[RegionViewer]:
         if self._reader is None or self._meta is None:
             log.warning("open() called before a dataset was loaded; ignoring.")
             return None
@@ -2888,6 +2909,8 @@ class ViewerManager(QObject):
         n = len(regions)
         if fovs:
             what = "FOVs in "
+        elif layers_only:
+            what = "layers over "
         elif roi_bbox is not None:
             what = "ROI in "
         else:
@@ -2904,6 +2927,7 @@ class ViewerManager(QObject):
             manager=self, roi_bbox=roi_bbox,
             operator_specs=self.operator_specs, run_operator=self.run_operator,
             parent_id=parent_id, settings=ViewSettings(baseline), fovs=fovs,
+            layers_only=layers_only,
         )
         win.open_clock = clock
         win.closed.connect(self._on_window_closed)
