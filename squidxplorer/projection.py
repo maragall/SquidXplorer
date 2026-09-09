@@ -375,6 +375,15 @@ def project_well(
 
                 def _read(z, t, _ch=channel, _w=(hr0, hr1, hc0, hc1)):
                     return read_window(reader, region, fov, _ch, z, t, _w)
+            # A declared memory refusal fires BEFORE any plane is read: the operator states
+            # the solve it would run does not fit (`refuse_solve` on the callable, like
+            # `halo_px`). MemoryError is never a per-well fault (_engine._NOT_A_WELL_FAULT).
+            refuse = getattr(op, "refuse_solve", None)
+            if callable(refuse):
+                depth = len(z_levels) if "z" in consumes else 1
+                why = refuse((depth, read_h, read_w))
+                if why:
+                    raise MemoryError(why)
             for k, group in enumerate(z_groups):
                 planes = (_read(z_level, t_src) for z_level in group)
                 if keeps_depth:
@@ -387,6 +396,11 @@ def project_well(
                     out[t_i, c_i, :] = stack[(slice(None),) + trim]
                 else:
                     out[t_i, c_i, k] = np.asarray(op(planes))[trim]  # streamed z; bounded memory
+            # A declared capture lands with the SAME trim the output got (`land_snapshots`
+            # on the callable): a windowed solve's snapshots are the delivered window.
+            land = getattr(op, "land_snapshots", None)
+            if callable(land):
+                land(trim)
     return out
 
 

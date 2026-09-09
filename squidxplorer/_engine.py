@@ -115,7 +115,9 @@ class Operator:
 
 
 # Environment faults on_error must not absorb: they raise identically for every well.
-_NOT_A_WELL_FAULT = (ImportError, MissingDependency)
+# MemoryError joined 2026-09-09: a whole-volume solve over the machine's memory is the
+# MACHINE's refusal, the same for every well, never a corrupt-well skip.
+_NOT_A_WELL_FAULT = (ImportError, MissingDependency, MemoryError)
 
 # THE operator table — name -> Operator. `consumes` is the dispatch; nothing branches on a name.
 # (Shelved 2026-08-24: `keepz` — keeping every z plane is spelled `z_operator=None` on stitch

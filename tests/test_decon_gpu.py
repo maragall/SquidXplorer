@@ -368,17 +368,14 @@ def test_an_unknown_env_value_fails_loud_rather_than_guessing(monkeypatch):
         _decon_gpu.select_device((1, 256, 256))
 
 
-# --- the device budget and z tiling ------------------------------------------------------------
-# The budget is the DEVICE's, and a volume over it is solved in z tiles with petakit's own
-# overlap rule (tests/test_engine.py in petakit pins the CPU half of the same rule).
-
-#: One 256 x 256 plane's working set, petakit's estimate.
-PLANE_BYTES = 256 * 256 * _decon_gpu.BYTES_PER_VOXEL
+# --- the device budget and the no-tiling rule --------------------------------------------------
+# The budget is the DEVICE's, and a volume over it is never tiled: it solves whole on the
+# CPU pool when the system can hold it, and is a NAMED refusal when nothing can.
 
 
-def _budget_for(planes: int) -> float:
-    """A budget that fits exactly *planes* planes of 256 x 256 and not twice as many."""
-    return planes * PLANE_BYTES * 1.05
+def _budget_for(shape, device) -> float:
+    """A budget that fits exactly one whole solve of *shape* on *device* and not two."""
+    return _decon_gpu.working_set_bytes(shape, device) * 1.05
 
 
 def _force_budget(monkeypatch, budget: float) -> None:
@@ -408,88 +405,72 @@ def test_without_the_mps_query_the_system_ram_rule_stands_in(monkeypatch):
     assert _decon_gpu._device_free_bytes("mps") == 6e9
 
 
-def test_the_tile_plan_is_petakits_halve_then_border_rule():
-    """(48, 256, 256) against a budget of 24 planes: petakit halves 48 -> 24, borders the
-    tile by min(support // 2 + 2, 24 // 3) = 8 and keeps 8 planes per tile, 6 tiles."""
+def test_a_solve_that_would_have_tiled_solves_whole_or_refuses_by_name(monkeypatch):
+    """THE no-tiling pin (Julio, 2026-09-05: the solve runs in one step, whole volume in
+    memory), on the old tiling boundary: a (48, 256, 256) volume over half the device
+    budget, which the deleted z-tiler cut into 6 tiles.
+
+    Over the DEVICE's budget but inside the system's: the device stands down and the CPU
+    pool takes ONE whole solve (proven on the pixels: it equals petakit told memory is
+    infinite, i.e. petakit's own never-tile branch). Over EVERY budget: a MemoryError
+    naming the shape, the estimated bytes with the measured multiple, the machine's
+    available memory, and the ROI / z-subset way out."""
     shape = (48, 256, 256)
-    assert _decon_gpu.tile_plan(shape, budget=_budget_for(24), support_z=95) == (8, 8)
-    assert _decon_gpu.tile_count(48, (8, 8)) == 6
-    assert _decon_gpu.tile_plan(shape, budget=_budget_for(12), support_z=95) == (4, 4)
-    assert _decon_gpu.tile_count(48, (4, 4)) == 12
-    # a narrow PSF asks for a narrower border, never under three planes
-    assert _decon_gpu.tile_plan(shape, budget=_budget_for(24), support_z=1) == (18, 3)
-    assert _decon_gpu.tile_plan(shape, budget=_budget_for(48), support_z=95) is None
-    assert _decon_gpu.tile_count(48, None) == 1
-
-
-def test_a_volume_whose_smallest_tile_is_still_over_budget_goes_to_petakit(monkeypatch):
-    """A 4-plane tile is petakit's floor; under it the volume is not this device's to run."""
-    pytest.importorskip("torch")
-    _force_budget(monkeypatch, _budget_for(2))
-    with pytest.raises(MemoryError, match="4-plane tile"):
-        _decon_gpu.tile_plan((64, 256, 256), budget=_budget_for(2), support_z=9)
-    assert _decon_gpu.select_device((64, 256, 256)) is None
-    assert "z-tiler" in _decon_gpu.describe((64, 256, 256))
-
-
-def test_a_volume_over_budget_is_no_longer_declined_but_tiled(monkeypatch):
-    _device_or_skip()
-    _force_budget(monkeypatch, _budget_for(24))
-    assert _decon_gpu.select_device((48, 256, 256)) is not None
-    assert not _decon_gpu.fits_in_memory((48, 256, 256), _decon_gpu._torch_device())
-
-
-def test_describe_names_the_device_and_the_tile_count(monkeypatch):
     device = _device_or_skip()
-    psf = make_psf(DEFAULT_OPTICS)
-    _force_budget(monkeypatch, _budget_for(24))
-    line = _decon_gpu.describe((48, 256, 256), psf_shape=psf.shape, psf=psf)
-    assert f"torch/{device}, 6 z tiles" in line
-    assert "approximate" in line, "a z-tiled RL is not the whole solve and the line must say so"
-    whole = _decon_gpu.describe((24, 256, 256), psf_shape=psf.shape, psf=psf)
-    assert "z tiles" not in whole
+    # Half of one whole solve on the device: the old code tiled here; the device must refuse.
+    _force_budget(monkeypatch, _budget_for(shape, device) / 2)
+    assert _decon_gpu.select_device(shape) is None
+    line = _decon_gpu.describe(shape)
+    assert "never tiled" in line and "CPU" in line
+
+    # The CPU arm is petakit pinned whole: identical to petakit's own never-tile branch.
+    from squidxplorer import _decon
+
+    volume = _phantom((12, 128, 128), seed=2)
+    psf = make_psf(OpticsParams(DEFAULT_OPTICS.na, DEFAULT_OPTICS.wavelength_um,
+                                DEFAULT_OPTICS.dxy_um, DEFAULT_OPTICS.dz_um, 12))
+    monkeypatch.setenv(_decon_gpu.ENV_VAR, "cpu")
+    ours = _decon._run(volume, psf, ITERATIONS, gpu=False)
+    theirs = petakit.deconvolve(volume, psf, method=METHOD, iterations=ITERATIONS,
+                                gpu=False, avail_memory_gb=float("inf"))
+    assert float(np.abs(ours - theirs).max()) == 0.0
+
+    # Over every budget: the refusal, before any backend allocation, with its numbers.
+    _force_budget(monkeypatch, _budget_for(shape, None) / 2)
+    with pytest.raises(MemoryError) as exc:
+        _decon._run(_phantom(shape, seed=2), psf, ITERATIONS, gpu=False)
+    said = str(exc.value)
+    assert "(48, 256, 256)" in said
+    assert f"{_decon_gpu.CPU_WORKING_SET_MULTIPLE}x" in said
+    assert "GB available" in said and "never tiles" in said
+    assert "ROI" in said and "z subset" in said
 
 
-def test_a_tiled_solve_on_the_device_is_petakits_tiled_solve():
-    """Same plan, same tiles, same numbers: the backend property holds for the tiled path.
+def test_the_refusal_fires_before_any_plane_is_read(monkeypatch, tmp_path):
+    """`refuse_solve` is a declaration the engine reads BEFORE the first plane: a reader
+    whose reads are counted sees ZERO reads when the solve cannot fit."""
+    from squidxplorer._decon import DEFAULT_OPTICS as _O
+    from squidxplorer._decon import decon_op
+    from squidxplorer.projection import project_well
 
-    petakit tiles with budget ``avail * 0.7``, so its ``avail_memory_gb`` is our budget / 0.7."""
-    device = _device_or_skip()
-    psf = make_psf(DEFAULT_OPTICS)
-    volume = _phantom((48, 256, 256), seed=2)
-    budget = _budget_for(24)
-    import unittest.mock as mock
+    _force_budget(monkeypatch, 1.0)              # nothing fits
 
-    with mock.patch.object(_decon_gpu, "_device_free_bytes",
-                           lambda d: budget / _decon_gpu.MEMORY_FRACTION):
-        assert _decon_gpu.tile_plan(volume.shape, budget=_decon_gpu.budget_bytes(device),
-                                    support_z=_decon_gpu.psf_support_z(psf),
-                                    psf_shape=psf.shape) == (8, 8)
-        ours = _decon_gpu.rl(volume, psf, ITERATIONS, device)
-    theirs = petakit.deconvolve(volume, psf, method=METHOD, iterations=ITERATIONS, gpu=False,
-                                avail_memory_gb=budget / 0.7 / 1e9)
-    peak = float(np.abs(theirs).max())
-    assert float(np.abs(ours - theirs).max()) / peak <= TOLERANCE
-    _assert_quantised_agreement(cast_like(ours, np.dtype(np.uint16)),
-                                cast_like(theirs, np.dtype(np.uint16)))
+    class _CountingReader:
+        metadata = {
+            "regions": ["A1"], "fovs_per_region": {"A1": [0]},
+            "channels": [{"name": "488"}], "z_levels": [0, 1, 2, 3],
+            "n_t": 1, "frame_shape": (64, 64), "dtype": "uint16",
+        }
+        reads = 0
 
+        def read(self, region, fov, channel, z, t=0):
+            type(self).reads += 1
+            return np.zeros((64, 64), np.uint16)
 
-def test_tiling_is_not_the_whole_solve_and_nobody_may_claim_it_is(monkeypatch):
-    """Measured: with petakit's rule (border capped at a third of the tile, here 8 planes
-    against a 95-plane PSF support) the tiled result differs from the whole solve by up to
-    25% of peak on the puncta planes. That is petakit's CPU behaviour too; the log line
-    names the tiling so a user can tell. This test keeps the number honest."""
-    device = _device_or_skip()
-    psf = make_psf(DEFAULT_OPTICS)
-    volume = _phantom((48, 256, 256), seed=2)
-    _force_budget(monkeypatch, _budget_for(48))
-    whole = _decon_gpu.rl(volume, psf, ITERATIONS, device)
-    _force_budget(monkeypatch, _budget_for(24))
-    tiled = _decon_gpu.rl(volume, psf, ITERATIONS, device)
-    gap = float(np.abs(tiled - whole).max()) / float(np.abs(whole).max())
-    assert gap > TOLERANCE, (
-        f"tiled and whole agree to {gap:.2e} of peak; if tiling became exact the "
-        "'approximate' wording in describe() is a lie and should go")
+    op = decon_op(OpticsParams(_O.na, _O.wavelength_um, _O.dxy_um, _O.dz_um, 4), 2)
+    with pytest.raises(MemoryError, match="never tiles"):
+        project_well(_CountingReader(), "A1", 0, op, time_point=0)
+    assert _CountingReader.reads == 0
 
 
 def test_selection_degrades_silently_when_torch_is_absent(monkeypatch):
