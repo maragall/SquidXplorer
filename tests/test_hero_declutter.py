@@ -682,6 +682,65 @@ def test_the_layer_controls_container_takes_only_what_its_page_needs(qapp):
     assert stack.maximumHeight() == tall.sizeHint().height()
 
 
+def test_the_controls_cap_survives_toggling_and_clicking_layers(qapp):
+    """Julio, live 2026-09: "sometimes the intensity controls disappear when I toggle and
+    click layers around." Measured: napari's no-selection placeholder (a bare QFrame,
+    invalid hint) capped the stack at 1 px on a tree group click (clear + multi-select,
+    active None), on deselect-all and on delete-the-selected-layer, and the state persists
+    while the multi-selection stands; a 2D/3D flip regrew the current page in place
+    (137 -> 193 px) with no currentChanged, clipping the 3D rows. The invariant: with an
+    image page current the cap is at least that page's hint, and the placeholder keeps the
+    previous cap."""
+    import numpy as np
+
+    from napari._qt.layer_controls.qt_layer_controls_container import (
+        QtLayerControlsContainer)
+    from napari.components import ViewerModel
+
+    from squidxplorer._napari_pane import fit_controls_container, follow_controls_pages
+
+    viewer = ViewerModel()
+    container = QtLayerControlsContainer(viewer)
+    follow_controls_pages(container, viewer.dims)     # the pane's own wiring
+    fit_controls_container(container)
+    container.show()
+    qapp.processEvents()
+
+    plane = np.zeros((8, 8), dtype=np.uint16)
+    a = viewer.add_image(plane, name="raw 488")
+    b = viewer.add_image(plane, name="raw 561")
+    sel = viewer.layers.selection
+
+    def cap_holds(step):
+        cur = container.currentWidget()
+        assert container.maximumHeight() >= cur.sizeHint().height(), (
+            f"{step}: cap {container.maximumHeight()} px under the page's "
+            f"{cur.sizeHint().height()} px, the controls are collapsed")
+
+    sel.active = a
+    cap_holds("select raw 488")
+    image_cap = container.maximumHeight()
+
+    sel.clear()
+    sel.update([a, b])                          # the tree's group-header click
+    assert container.currentWidget() is container.empty_widget
+    assert container.maximumHeight() == image_cap, (
+        "the no-selection placeholder must keep the previous cap, not collapse the block")
+    sel.active = a
+    cap_holds("single click after the group click")
+
+    viewer.layers.remove(a)                     # delete the selected layer
+    assert container.maximumHeight() >= image_cap, (
+        "deleting the selected layer collapsed the block")
+    sel.active = b
+    cap_holds("select after the delete")
+
+    viewer.dims.ndisplay = 3                    # regrows the page, no currentChanged
+    cap_holds("2D to 3D flip")
+    viewer.dims.ndisplay = 2
+    cap_holds("back to 2D")
+
+
 # --- ruling p: the left column's height goes to the layer list, our docks are content-sized --
 # Live on 2888349 (coordinator's screenshot): ~130 px blank under the operators band, ~80 px
 # blank under the layer controls, the layer list squeezed to two rows, and the log band gone
