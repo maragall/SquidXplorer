@@ -31,8 +31,36 @@ DECON_SETS = {
 }
 RAW_WINDOW = (135.0, 1109.0)
 DECON_FLOOR = 95.0
+#: Peak-matched scheme (the CEO's "same highest signal both sides"): each side's ceiling
+#: is its OWN 99.9th-percentile 561 z-MIP peak, floor the raw look's own floor fraction.
+FLOOR_FRACTION = RAW_WINDOW[0] / RAW_WINDOW[1]
+PEAK_PCT = 99.9
 POSE_NAMES = ("hero", "xz")              # the QC'd poses; xy skipped on Julio's word
 DIVIDER_PX = 4
+
+
+def channel_mip(source: Path) -> np.ndarray:
+    """The 561 z-MIP over every field of *source*, one (Y, X) array per field, stacked."""
+    from volume_figure import ONLY_CHANNEL, _norm
+
+    from squidxplorer.reader import open_reader
+
+    reader = open_reader(source)
+    meta = reader.metadata
+    name = next(c["name"] for c in meta["channels"] if _norm(c["name"]) == ONLY_CHANNEL)
+    mips = []
+    for region, fovs in meta["fovs_per_region"].items():
+        for fov in fovs:
+            stack = np.stack([reader.read(region, fov, name, z)
+                              for z in range(meta["n_z"])])
+            mips.append(stack.max(axis=0))
+    return np.stack(mips)
+
+
+def peak_window(source: Path) -> tuple:
+    """(floor, ceiling) mapping [FLOOR_FRACTION * peak, peak] onto the display range."""
+    peak = float(np.percentile(channel_mip(source), PEAK_PCT))
+    return (FLOOR_FRACTION * peak, peak)
 
 
 def figure_pass(source: Path, prefix: str, window: tuple, out_dir: Path) -> int:
@@ -90,16 +118,17 @@ def compose(out_dir: Path) -> list:
     import imageio.v3 as iio
 
     paths = []
-    for key in DECON_SETS:
-        for pose in POSE_NAMES:
-            a = iio.imread(out_dir / f"raw_{pose}.png")
-            b = iio.imread(out_dir / f"{key}_{pose}.png")
-            h = min(a.shape[0], b.shape[0])
-            divider = np.full((h, DIVIDER_PX, 3), 64, np.uint8)
-            out = out_dir / f"compare_{key}_{pose}.png"
-            iio.imwrite(out, np.concatenate([a[:h], divider, b[:h]], axis=1))
-            paths.append(out)
-            print(f"composed {out}", flush=True)
+    for suffix in ("", "_pm"):
+        for key in DECON_SETS:
+            for pose in POSE_NAMES:
+                a = iio.imread(out_dir / f"raw{suffix}_{pose}.png")
+                b = iio.imread(out_dir / f"{key}{suffix}_{pose}.png")
+                h = min(a.shape[0], b.shape[0])
+                divider = np.full((h, DIVIDER_PX, 3), 64, np.uint8)
+                out = out_dir / f"compare_{key}_{pose}{suffix}.png"
+                iio.imwrite(out, np.concatenate([a[:h], divider, b[:h]], axis=1))
+                paths.append(out)
+                print(f"composed {out}", flush=True)
     return paths
 
 
@@ -116,17 +145,24 @@ def main(argv: list) -> int:
         src, prefix, lo, hi = args.pass_args
         return figure_pass(Path(src), prefix, (float(lo), float(hi)), args.out_dir)
 
+    sources = {"raw": RAW_SET, **DECON_SETS}
     windows = {"raw": RAW_WINDOW}
     for key in DECON_SETS:
         windows[key] = (DECON_FLOOR, RAW_WINDOW[1])
     print(f"decon floor {DECON_FLOOR:.0f}, ceiling {RAW_WINDOW[1]:.0f}; "
           f"raw window {RAW_WINDOW}", flush=True)
+    for key, source in sources.items():
+        windows[f"{key}_pm"] = pm = peak_window(source)
+        print(f"{key} peak-matched window ({pm[0]:.1f}, {pm[1]:.1f}): the "
+              f"{PEAK_PCT} pct 561 z-MIP peak, floor at the raw look's "
+              f"{FLOOR_FRACTION:.4f} of it", flush=True)
 
-    for prefix, source in (("raw", RAW_SET), *DECON_SETS.items()):
+    for prefix, window in windows.items():
+        source = sources[prefix.removesuffix("_pm")]
         if all(p.exists() for p in _pass_pngs(args.out_dir, prefix)):
             print(f"reusing existing {prefix} stills", flush=True)
             continue
-        if not run_pass_subprocess(source, prefix, windows[prefix], args.out_dir):
+        if not run_pass_subprocess(source, prefix, window, args.out_dir):
             print(f"FAIL: the {prefix} pass left no complete stills", flush=True)
             return 1
     compose(args.out_dir)
