@@ -28,8 +28,9 @@ sys.path.insert(0, str(HERE))
 DEFAULT_ACQ = Path("/Users/julioamaragall/Downloads/25x_C4_dz=3_2026-08-14_16-51-15.744692")
 DEFAULT_CHANNEL = "Fluorescence_561_nm_Ex"
 FLOOR_WINDOW = (95.0, 1109.0)
-# TODO-Julio: the default scheme is whichever Julio picks judging the eight figures.
-DEFAULT_SCHEME = "shared"
+# Julio's pick over the eight figures: floor. The shared 1109 ceiling already renders
+# both peaks identically; the lowered decon floor restores the drained background.
+DEFAULT_SCHEME = "floor"
 
 
 def run_stage(name: str, cmd: list) -> None:
