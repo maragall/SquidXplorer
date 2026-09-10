@@ -115,13 +115,15 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("source", type=Path, help="Squid acquisition folder to deconvolve")
     parser.add_argument("--iterations", type=int, default=3)
+    parser.add_argument("--suffix", default="",
+                        help="output-name suffix, e.g. _i2 -> decon46_i2_<source>")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the tile plan and estimates, solve nothing")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
     source = args.source.resolve()
-    out_dir = source.parent / f"decon46_{source.name}"
+    out_dir = source.parent / f"decon46{args.suffix}_{source.name}"
     if out_dir.exists():
         raise SystemExit(f"refusing to overwrite existing output: {out_dir}")
 

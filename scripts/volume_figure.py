@@ -79,7 +79,7 @@ def _centered_roi_um(meta: dict, region: str, side_px: int) -> tuple:
     return (cx - half, cy - half, cx + half, cy + half)
 
 
-def boot_561_volume(source: Path, prefix: str):
+def boot_561_volume(source: Path, prefix: str, contrast: tuple = CONTRAST_561):
     """Boot the app over *source* and open the whole-FOV 561-only volume.
 
     Returns (app, win, view, names, target, fallback) on success, None after printing the
@@ -125,7 +125,7 @@ def boot_561_volume(source: Path, prefix: str):
         return None
     for name in names:
         mosaic.set_channel_visible(name, name == target)
-    mosaic.set_contrast(target, *CONTRAST_561)
+    mosaic.set_contrast(target, *contrast)
     _pump(app, 0.5)
 
     # Whole region = the whole 2304 px FOV; no drawn ROI, so no interactive clamp applies.
@@ -155,7 +155,7 @@ def boot_561_volume(source: Path, prefix: str):
     # channel toggle resolves over the live brick layers (the G7 channel-toggle path).
     for name in names:
         mosaic.set_channel_visible(name, name == target)
-    mosaic.set_contrast(target, *CONTRAST_561)
+    mosaic.set_contrast(target, *contrast)
     _pump(app, 0.3)
     return app, win, view, names, target, fallback
 
