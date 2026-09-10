@@ -59,6 +59,19 @@ def plan_grid(n_z: int, height: int, width: int, halo: int, psf_shape,
         "or deconvolve a z subset instead.")
 
 
+def _release_gpu() -> None:
+    """MPS's caching allocator holds freed blocks across solves; without this release the
+    run drains the machine (measured 6.8 -> 1.8 GB inside one channel) and select_device
+    falls to a CPU path that refuses."""
+    try:
+        import torch
+
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:                        # noqa: BLE001 - no torch = nothing cached
+        pass
+
+
 def solve_tiled(stack: np.ndarray, optics, halo: int, grid: int,
                 iterations: int) -> np.ndarray:
     """Tile stack (Z, Y, X) laterally, solve each window whole in z, paste trimmed cores."""
@@ -73,6 +86,7 @@ def solve_tiled(stack: np.ndarray, optics, halo: int, grid: int,
             solved = _decon.deconvolve_stack(
                 stack[:, er0:er1, ec0:ec1], optics, iterations, project=False)
             out[:, r0:r1, c0:c1] = solved[:, r0 - er0:r1 - er0, c0 - ec0:c1 - ec0]
+            _release_gpu()
     return out
 
 
