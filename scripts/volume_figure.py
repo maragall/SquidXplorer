@@ -79,13 +79,15 @@ def _centered_roi_um(meta: dict, region: str, side_px: int) -> tuple:
     return (cx - half, cy - half, cx + half, cy + half)
 
 
-def run_pass(source: Path, prefix: str) -> int:
-    import imageio.v3 as iio
-    import psutil
+def boot_561_volume(source: Path, prefix: str):
+    """Boot the app over *source* and open the whole-FOV 561-only volume.
 
+    Returns (app, win, view, names, target, fallback) on success, None after printing the
+    failure. Shared with scripts/record_volume_comparison.py; the sequence (hide before
+    open, re-assert after) carries the two hard-won brick-visibility fixes.
+    """
     from squidxplorer import _viewer, _volume_view
 
-    avail0 = psutil.virtual_memory().available
     _viewer.enable_hidpi()
     app = _viewer.qt_app([])
     win = _viewer.PlateWindow(str(source), default_layout=True, tabbed_views=True)
@@ -101,7 +103,7 @@ def run_pass(source: Path, prefix: str) -> int:
         time.sleep(0.02)
     if view is None:
         print("FAIL: the default view never opened", flush=True)
-        return 1
+        return None
 
     mosaic = view._pane.mosaic
     names = [c["name"] for c in (view._meta or {}).get("channels", [])]
@@ -112,7 +114,7 @@ def run_pass(source: Path, prefix: str) -> int:
     got = mosaic.channels("raw")
     if len(got) < len(names):
         print(f"FAIL: raw mosaic loaded {got} of {names}", flush=True)
-        return 1
+        return None
 
     # 561 visible and windowed on the 2D layers BEFORE open_3d: the bricks seed from this
     # scene, taking each hidden identity's visibility with them (loads still cover every
@@ -120,7 +122,7 @@ def run_pass(source: Path, prefix: str) -> int:
     target = next((n for n in names if _norm(n) == ONLY_CHANNEL), None)
     if target is None:
         print(f"FAIL: channel {ONLY_CHANNEL} not among {names}", flush=True)
-        return 1
+        return None
     for name in names:
         mosaic.set_channel_visible(name, name == target)
     mosaic.set_contrast(target, *CONTRAST_561)
@@ -145,7 +147,7 @@ def run_pass(source: Path, prefix: str) -> int:
         _volume_view.open_3d(view)
         if view._native3d is None:
             print("FAIL: the fallback ROI volume did not open either", flush=True)
-            return 1
+            return None
         _wait_resident(view, f"{prefix} open (fallback ROI)")
 
     # Re-assert 561-only AFTER the open: the identity moved onto the bricks at open, and a
@@ -155,7 +157,34 @@ def run_pass(source: Path, prefix: str) -> int:
         mosaic.set_channel_visible(name, name == target)
     mosaic.set_contrast(target, *CONTRAST_561)
     _pump(app, 0.3)
+    return app, win, view, names, target, fallback
 
+
+def teardown(app, win, view, names) -> None:
+    """Restore every channel before teardown: closing over hidden 2D layers segfaulted at
+    exit (measured, exit 139 after the captures); the all-visible closes exited 0."""
+    from squidxplorer import _volume_view
+
+    mosaic = view._pane.mosaic
+    for name in names:
+        mosaic.set_channel_visible(name, True)
+    _pump(app, 0.3)
+    _volume_view.close_native3d(view)
+    win.close()
+    _pump(app, 0.5)
+
+
+def run_pass(source: Path, prefix: str) -> int:
+    import imageio.v3 as iio
+    import psutil
+
+    from squidxplorer import _volume_view
+
+    avail0 = psutil.virtual_memory().available
+    booted = boot_561_volume(source, prefix)
+    if booted is None:
+        return 1
+    app, win, view, names, target, fallback = booted
     vol = view._native3d
     for pose_name, pose, zoom in POSES:
         _volume_view.snap_camera(view, pose)
@@ -173,14 +202,7 @@ def run_pass(source: Path, prefix: str) -> int:
 
     print(f"memory: available {avail0 / 1e9:.1f} -> "
           f"{psutil.virtual_memory().available / 1e9:.1f} GB", flush=True)
-    # Restore every channel before teardown: closing over hidden 2D layers segfaulted at
-    # exit (measured, exit 139 after the captures); the all-visible closes exited 0.
-    for name in names:
-        mosaic.set_channel_visible(name, True)
-    _pump(app, 0.3)
-    _volume_view.close_native3d(view)
-    win.close()
-    _pump(app, 0.5)
+    teardown(app, win, view, names)
     return 0
 
 
