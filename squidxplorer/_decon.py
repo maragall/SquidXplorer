@@ -237,7 +237,7 @@ def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool,
     else:
         petakit = _petakit()
         widths = (_decon_gpu.pad_plan(volume.shape, psf.shape)
-                  if _decon_gpu.cpu_padding_enabled() else (0, 0, 0))
+                  if _decon_gpu.cpu_padding_enabled() else ((0, 0),) * 3)
         padded = _decon_gpu._wrap_pad(volume, widths)
         if snaps is not None:
             import inspect
@@ -264,8 +264,8 @@ def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool,
                 method=METHOD, iterations=iterations, gpu=gpu,
                 avail_memory_gb=_NEVER_TILE_GB,
             )
-        if any(widths):
-            core = tuple(slice(w, w + n) for w, n in zip(widths, volume.shape))
+        if any(map(any, widths)):
+            core = tuple(slice(lo, lo + n) for (lo, _hi), n in zip(widths, volume.shape))
             out = out[core]
             if mips is not None:
                 # Each projection keeps the two axes its collapse left standing.

@@ -30,7 +30,7 @@ PAD_ENV_VAR = "SQUIDXPLORER_DECON_PAD"
 #: Opt-in: also pad the petakit CPU path (off by default — it changes the numbers by ~1e-04 of peak).
 PAD_CPU_ENV_VAR = "SQUIDXPLORER_DECON_PAD_CPU"
 
-#: How much longer a padded axis may get before padding stops being worth it.
+#: How much past the wrap-exact minimum a padded axis may grow before padding is declined.
 MAX_PAD_GROWTH = 1.15
 
 #: MEASURED working-set multiples of the float32 volume bytes, one whole RL solve.
@@ -219,7 +219,7 @@ def effective_shape(shape, psf_shape=None) -> tuple[int, ...]:
     shape = tuple(int(n) for n in shape)
     if psf_shape is None or padding_disabled():
         return shape
-    return tuple(n + 2 * w for n, w in zip(shape, pad_plan(shape, psf_shape)))
+    return tuple(n + lo + hi for n, (lo, hi) in zip(shape, pad_plan(shape, psf_shape)))
 
 
 def padding_disabled() -> bool:
@@ -242,21 +242,30 @@ def fast_len(n: int) -> int:
     return n
 
 
-def pad_plan(shape, psf_shape) -> tuple[int, ...]:
-    """Wrap-pad width per axis, so every transform runs at a 7-smooth length. 0 = leave alone.
+def pad_plan(shape, psf_shape) -> tuple[tuple[int, int], ...]:
+    """``(before, after)`` wrap-pad per axis, so every transform runs at a 7-smooth length.
 
-    Already-smooth axes are untouched; otherwise the pad is at least the PSF's extent (which
-    makes the wrap exact), rounded up to :func:`fast_len`, unless growth exceeds
-    :data:`MAX_PAD_GROWTH`.
+    Already-smooth axes are untouched ``(0, 0)``; otherwise each side pads at least the
+    PSF's extent (which makes the wrap exact) and the padded length lands EXACTLY on
+    :func:`fast_len` - the sides split an odd remainder, because halving-and-flooring one
+    shared width landed one short of the fast length (measured: 433 padded to 479, a
+    PRIME, so the smoothness guard stood MPS down to CPU silently). Growth is measured
+    against the wrap-exact minimum ``n + 2*psf``; past :data:`MAX_PAD_GROWTH` the axis is
+    left alone.
     """
-    widths = []
+    plans = []
     for n, k in zip((int(s) for s in shape), (int(s) for s in psf_shape)):
         if is_smooth(n):
-            widths.append(0)
+            plans.append((0, 0))
             continue
-        target = fast_len(n + 2 * min(k, n))
-        widths.append(0 if target > n * MAX_PAD_GROWTH else (target - n) // 2)
-    return tuple(widths)
+        floor_len = n + 2 * min(k, n)
+        target = fast_len(floor_len)
+        if target > floor_len * MAX_PAD_GROWTH:
+            plans.append((0, 0))
+            continue
+        before = (target - n) // 2
+        plans.append((before, target - n - before))
+    return tuple(plans)
 
 
 def _wrap_pad(volume: np.ndarray, widths) -> np.ndarray:
@@ -265,9 +274,9 @@ def _wrap_pad(volume: np.ndarray, widths) -> np.ndarray:
     Wrap is the only mode that preserves petakit's circular convolution; zero-pad or
     edge-replication would change the answer at the rim.
     """
-    if not any(widths):
+    if not any(map(any, widths)):
         return volume
-    return np.pad(volume, [(w, w) for w in widths], mode="wrap")
+    return np.pad(volume, [tuple(w) for w in widths], mode="wrap")
 
 
 def _otf_source(psf: np.ndarray, out_shape) -> np.ndarray:
@@ -302,7 +311,7 @@ def rl(volume: np.ndarray, psf: np.ndarray, iterations: int, device: str,
     budget never reaches this function: :func:`working_set_refusal` is the caller's refusal.
     """
     raw = np.maximum(np.asarray(volume, dtype=np.float32), 0)
-    widths = (0, 0, 0) if padding_disabled() else pad_plan(raw.shape, psf.shape)
+    widths = ((0, 0),) * 3 if padding_disabled() else pad_plan(raw.shape, psf.shape)
     return _solve(raw, psf, iterations, device, widths, snapshot_iters=snapshot_iters)
 
 
@@ -319,7 +328,7 @@ def _solve(raw: np.ndarray, psf: np.ndarray, iterations: int, device: str, width
     image_np = _wrap_pad(raw, widths)
     shape = image_np.shape
     # The TRUE region inside the padded array (the whole array when nothing was padded).
-    core = tuple(slice(w, w + n) for w, n in zip(widths, raw.shape))
+    core = tuple(slice(lo, lo + n) for (lo, _hi), n in zip(widths, raw.shape))
     dev = torch.device(device)
 
     with _device_lock:
@@ -379,9 +388,9 @@ def _pad_note(shape, psf_shape=None) -> str:
     if psf_shape is None or padding_disabled():
         return ""
     widths = pad_plan(shape, psf_shape)
-    if not any(widths):
+    if not any(map(any, widths)):
         return ""
-    padded = tuple(int(n) + 2 * w for n, w in zip(shape, widths))
+    padded = tuple(int(n) + lo + hi for n, (lo, hi) in zip(shape, widths))
     grew = float(np.prod(padded)) / float(np.prod([int(n) for n in shape]))
     return f", transform padded to {padded} (+{grew - 1:.1%} area) for a 7-smooth FFT"
 
@@ -405,6 +414,15 @@ def describe(shape, *, gpu: bool = True, psf_shape=None) -> str:
     torch_device = _torch_device()
     if torch_device is None:
         return "decon backend: CPU (no torch GPU device)"
+    rough = [int(n) for n in effective_shape(shape, psf_shape)[1:] if not is_smooth(int(n))]
+    if rough:
+        # The smoothness stand-down, SAID: it used to fall through to the bare
+        # "petakit CPU" line (Julio's 15x433x417 ROI, 2026-09-09).
+        why = (f"{PAD_ENV_VAR} is off" if padding_disabled()
+               else "the growth cap declines the pad")
+        return ("decon backend: petakit CPU (y/x length(s) "
+                f"{', '.join(str(n) for n in rough)} have no fast Metal FFT and "
+                f"{why}; Bluestein loses to the CPU pool)")
     if not fits_in_memory(shape, torch_device, psf_shape):
         return (f"decon backend: CPU (a whole {tuple(shape)} solve is over torch/"
                 f"{torch_device}'s budget; the CPU pool takes it whole, never tiled)")
