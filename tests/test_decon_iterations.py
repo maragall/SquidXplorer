@@ -241,3 +241,59 @@ def test_the_chained_qc_result_lands_as_layers_and_its_slices_actually_land(
         shutdown_plate_window(qapp, win)
 
 
+def test_the_press_reads_the_live_decon_panel_not_the_buttons_own_instance(
+        qapp, napari_pane_stub, squid_dataset, monkeypatch):
+    """THE press-time pin (Julio, 2026-09-09: "I set 4 iterations and it only did two"):
+    captures == the decon panel's LIVE spin at press time + 1 (the raw anchor), read
+    through the same operator_kwargs_for Preview uses - regardless of the dropdown's
+    selection (his screenshot showed Maximum Intensity Project) and of WHICH DeconPanel
+    instance owns the pressed button (a stale instance used to run its own values)."""
+    pytest.importorskip("petakit")
+    monkeypatch.setenv(_decon_gpu.ENV_VAR, "cpu")
+    import squidxplorer._decon_qc as Q
+    import squidxplorer._viewer as V
+    from squidxplorer._decon import clear_optics
+    from squidxplorer._param_panel import DeconPanel
+    from tests.conftest import shutdown_plate_window
+
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    view = win._viewer_manager.open(list(win._order)[:1])
+    _override_optics()
+    try:
+        assert _drain(qapp, lambda: view._pane is not None)
+        combo = view._op_combo
+        combo.setCurrentIndex(next(i for i in range(combo.count())
+                                   if combo.itemData(i) == "mip"))
+        qapp.processEvents()
+        live = win.ensure_operator_panel("decon")
+        live.widgets["iterations"].setValue(4)       # the spin at press time
+        stale = DeconPanel(win)                      # a second instance, spin still at 3
+
+        ran: dict = {}
+        real = Q.run_qc_solve
+
+        def spy(reader, region, fov, window, parameters):
+            ran["parameters"] = dict(parameters or {})
+            return real(reader, region, fov, window, parameters)
+
+        delivered: dict = {}
+        monkeypatch.setattr(Q, "run_qc_solve", spy)
+        monkeypatch.setattr(Q, "deliver_qc",
+                            lambda v, caps, region, fov, window: delivered.update(
+                                ks={c: sorted(by_k) for c, by_k in caps.items()}))
+        stale.inspect_btn.click()
+        assert _drain(qapp, lambda: stale.inspect_btn.isEnabled(), timeout=60), \
+            "the QC solve never landed"
+        assert ran["parameters"] == {"iterations": 4}, (
+            "the press must run the LIVE panel's spin, not the pressed instance's")
+        assert delivered.get("ks"), "the QC must capture"
+        for channel, ks in delivered["ks"].items():
+            assert ks == [0, 1, 2, 3, 4], (
+                f"{channel}: captures {ks} are not spin (4) + the raw anchor")
+    finally:
+        clear_optics()
+        shutdown_plate_window(qapp, win)
+
+

@@ -247,10 +247,25 @@ def start_qc(panel, view) -> None:
     except Exception as exc:                     # noqa: BLE001 - a refusal, said not raised
         panel.say(f"iteration QC: {exc}")
         return
+    # THE kwargs read Preview uses (operator_kwargs_for, the ONE reader of the live
+    # panel): never this button's own instance, which can be stale while the plate
+    # files a newer panel (Julio, 2026-09-09: "I set 4 iterations and it only did two").
+    reader_kwargs = getattr(getattr(panel, "host", None), "operator_kwargs_for", None)
+    try:
+        parameters = dict(reader_kwargs("decon") or {}) if callable(reader_kwargs) else {}
+    except ValueError as exc:                    # a refused setting: said, never defaults
+        panel.say(f"iteration QC: {exc}")
+        return
+    if not parameters:                           # no plate, no filed panel: the button's own
+        parameters = dict(panel.kwargs() or {})
+    from squidxplorer._decon import DEFAULT_ITERATIONS
+
     what = (f"{region} field {fov}"
             + (f", {window[3] - window[2]}x{window[1] - window[0]} px window" if window
                else ", whole field"))
-    log.info("iteration QC: solving %s, every channel, capturing each iteration", what)
+    log.info("iteration QC: solving %s at %s iteration(s) plus the raw anchor, every "
+             "channel, capturing each iteration", what,
+             parameters.get("iterations", DEFAULT_ITERATIONS))
 
     def _land():
         panel.inspect_btn.setEnabled(True)
@@ -268,7 +283,7 @@ def start_qc(panel, view) -> None:
         panel.inspect_btn.setEnabled(True)
         panel.say(f"iteration QC: {msg}")
 
-    qc = QCWorker(reader, region, fov, window, panel.kwargs() or {}, parent=panel)
+    qc = QCWorker(reader, region, fov, window, parameters, parent=panel)
     qc.done.connect(_land)
     qc.failed.connect(_fail)
     panel._qc_worker = qc
