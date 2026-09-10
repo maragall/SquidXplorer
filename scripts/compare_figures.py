@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """Raw-beside-decon comparison stills at the QC'd poses (hero, XZ), 561 only, real GL.
 
-The decon floor is DERIVED, not tasted: the decon drained background flux into puncta, so
-under raw's own (135, 1109) window the decon side renders near-binary. Per decon set, the
-floor is the 561 z-MIP quantile at raw's below-135 pixel fraction, so both sides black out
-the same fraction of the field; the ceiling stays raw's 1109 (clipping is measured and
-reported, never silently rewindowed). One boot per source through volume_figure's shared
-machinery; composites are raw | decon with a 4 px divider.
+The decon floor is a VISUAL call, decided at 95: matching the raw side's below-135 pixel
+fraction on the 561 z-MIP was measured a no-op (it lands at 135.0 for i1, 136.0 for i2,
+because Richardson-Lucy conserves the flat background level), so Julio's "a bit more down"
+is applied directly. Ceiling stays raw's 1109 on both sides; raw stays (135, 1109). One
+boot per source through volume_figure's shared machinery; composites are raw | decon with
+a 4 px divider.
 
 Usage: python scripts/compare_figures.py --out-dir DIR   # replaces a running instance
 """
@@ -30,33 +30,9 @@ DECON_SETS = {
     "i2": RAW_SET.parent / f"decon46_i2_{RAW_SET.name}",
 }
 RAW_WINDOW = (135.0, 1109.0)
+DECON_FLOOR = 95.0
 POSE_NAMES = ("hero", "xz")              # the QC'd poses; xy skipped on Julio's word
 DIVIDER_PX = 4
-
-
-def channel_mip(source: Path) -> np.ndarray:
-    """The 561 z-MIP over every field of *source*, one (Y, X) array per field, stacked."""
-    from volume_figure import ONLY_CHANNEL, _norm
-
-    from squidxplorer.reader import open_reader
-
-    reader = open_reader(source)
-    meta = reader.metadata
-    name = next(c["name"] for c in meta["channels"] if _norm(c["name"]) == ONLY_CHANNEL)
-    mips = []
-    for region, fovs in meta["fovs_per_region"].items():
-        for fov in fovs:
-            stack = np.stack([reader.read(region, fov, name, z)
-                              for z in range(meta["n_z"])])
-            mips.append(stack.max(axis=0))
-    return np.stack(mips)
-
-
-def derived_floor(raw_mip: np.ndarray, decon_mip: np.ndarray, raw_floor: float) -> tuple:
-    """(floor, raw_fraction, decon_fraction_at_floor): match below-floor pixel fractions."""
-    frac = float(np.mean(raw_mip < raw_floor))
-    floor = float(np.quantile(decon_mip, frac))
-    return floor, frac, float(np.mean(decon_mip < floor))
 
 
 def figure_pass(source: Path, prefix: str, window: tuple, out_dir: Path) -> int:
@@ -140,22 +116,16 @@ def main(argv: list) -> int:
         src, prefix, lo, hi = args.pass_args
         return figure_pass(Path(src), prefix, (float(lo), float(hi)), args.out_dir)
 
-    raw_mip = channel_mip(RAW_SET)
-    ceil = RAW_WINDOW[1]
-    print(f"raw 561 z-MIP: {np.mean(raw_mip < RAW_WINDOW[0]) * 100:.2f}% below "
-          f"{RAW_WINDOW[0]:.0f}, {np.mean(raw_mip > ceil) * 100:.2f}% above {ceil:.0f}",
-          flush=True)
     windows = {"raw": RAW_WINDOW}
-    for key, path in DECON_SETS.items():
-        mip = channel_mip(path)
-        floor, frac, got = derived_floor(raw_mip, mip, RAW_WINDOW[0])
-        print(f"{key} floor {floor:.1f}: raw fraction below {RAW_WINDOW[0]:.0f} is "
-              f"{frac * 100:.2f}%, {key} fraction below {floor:.1f} is {got * 100:.2f}%; "
-              f"{np.mean(mip > ceil) * 100:.2f}% above the shared ceiling {ceil:.0f}",
-              flush=True)
-        windows[key] = (floor, ceil)
+    for key in DECON_SETS:
+        windows[key] = (DECON_FLOOR, RAW_WINDOW[1])
+    print(f"decon floor {DECON_FLOOR:.0f}, ceiling {RAW_WINDOW[1]:.0f}; "
+          f"raw window {RAW_WINDOW}", flush=True)
 
     for prefix, source in (("raw", RAW_SET), *DECON_SETS.items()):
+        if all(p.exists() for p in _pass_pngs(args.out_dir, prefix)):
+            print(f"reusing existing {prefix} stills", flush=True)
+            continue
         if not run_pass_subprocess(source, prefix, windows[prefix], args.out_dir):
             print(f"FAIL: the {prefix} pass left no complete stills", flush=True)
             return 1
