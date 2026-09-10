@@ -30,14 +30,14 @@ FPS = 12
 RESIDENCY_TIMEOUT_S = 300.0
 
 
-def record_pass(source: Path, out_mp4: Path, seed: int) -> int:
+def record_pass(source: Path, out_mp4: Path, seed: int, window: tuple) -> int:
     """One booted app, one recorded orbit; runs alone in its own process (one GL app)."""
     import volume_figure as vf
 
     from squidxplorer._camera_script import (random_orbit_steps, run_camera_script,
                                              wait_bricks_resident)
 
-    booted = vf.boot_561_volume(source, source.name)
+    booted = vf.boot_561_volume(source, source.name, contrast=window)
     if booted is None:
         return 1
     app, win, view, names, target, fallback = booted
@@ -99,20 +99,37 @@ def compose(a_path: Path, b_path: Path, out_path: Path) -> tuple[int, tuple]:
 def main(argv: list) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    ap.add_argument("--pass", dest="pass_args", nargs=2, metavar=("SOURCE", "OUT_MP4"),
+    ap.add_argument("--decon-source", type=Path, default=DECON_SET,
+                    help="the decon sibling acquisition for the right side")
+    ap.add_argument("--decon-window", type=float, nargs=2, metavar=("LO", "HI"),
+                    default=None, help="decon-side contrast; default: the shared window")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="composed .mp4 path; default: Desktop, named by the seed")
+    ap.add_argument("--pass", dest="pass_args", nargs=4,
+                    metavar=("SOURCE", "OUT_MP4", "LO", "HI"),
                     help="internal: run one recording pass in this process")
     args = ap.parse_args(argv)
 
     if args.pass_args:
-        return record_pass(Path(args.pass_args[0]), Path(args.pass_args[1]), args.seed)
+        src, out, lo, hi = args.pass_args
+        return record_pass(Path(src), Path(out), args.seed, (float(lo), float(hi)))
 
-    print(f"seed {args.seed}", flush=True)
+    from volume_figure import CONTRAST_561
+
+    decon_window = tuple(args.decon_window) if args.decon_window else CONTRAST_561
+    print(f"seed {args.seed}, decon {args.decon_source.name}, "
+          f"decon window {decon_window}", flush=True)
     import tempfile
     tmp = Path(tempfile.gettempdir()) / "squidxplorer_comparison"
     tmp.mkdir(exist_ok=True)
+    windows = {"raw": CONTRAST_561, "decon": decon_window}
     outs = {}
-    for name, source in (("raw", RAW_SET), ("decon", DECON_SET)):
-        out = tmp / f"{name}_seed{args.seed}.mp4"
+    for name, source in (("raw", RAW_SET), ("decon", args.decon_source)):
+        w = windows[name]
+        # The reuse key carries the pass's identity: set name and window, so a cached
+        # recording from another scheme or another decon solve is never reused.
+        tag = f"{source.name[:24]}_w{int(w[0])}-{int(w[1])}"
+        out = tmp / f"{name}_seed{args.seed}_{tag}.mp4"
         if _readable_frames(out) > 0:
             print(f"reusing existing {out}", flush=True)
             outs[name] = out
@@ -121,7 +138,8 @@ def main(argv: list) -> int:
         subprocess.run(["pkill", "-f", "squidxplorer._viewer import main"], check=False)
         time.sleep(2)
         rc = subprocess.run([sys.executable, str(Path(__file__).resolve()),
-                             "--seed", str(args.seed), "--pass", str(source), str(out)],
+                             "--seed", str(args.seed), "--pass", str(source), str(out),
+                             str(w[0]), str(w[1])],
                             check=False).returncode
         if rc != 0:
             # A teardown crash AFTER the recording still leaves a whole, readable mp4.
@@ -133,7 +151,7 @@ def main(argv: list) -> int:
                 return rc
         outs[name] = out
 
-    final = DESKTOP / f"raw_vs_decon_561_seed{args.seed}.mp4"
+    final = args.out or DESKTOP / f"raw_vs_decon_561_seed{args.seed}.mp4"
     n, shape = compose(outs["raw"], outs["decon"], final)
     size_mb = final.stat().st_size / 1e6
     print(f"composed {final}: {n} frame(s), {n / FPS:.1f} s at {FPS} fps, "
