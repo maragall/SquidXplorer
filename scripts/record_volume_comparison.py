@@ -49,8 +49,27 @@ def record_pass(source: Path, out_mp4: Path, seed: int) -> int:
         view, steps, out_path=str(out_mp4), fps=FPS,
         wait_ready=lambda w: wait_bricks_resident(w, timeout_s=RESIDENCY_TIMEOUT_S))
     print(f"pass {source.name}: {result.n_frames} frame(s) -> {result.path}", flush=True)
+    # Let the last snap's brick refresh settle before closing: closing over a busy loader
+    # segfaulted after the recording (measured, exit -11 with the mp4 already whole).
+    wait_bricks_resident(view, timeout_s=60.0)
+    vf._pump(app, 1.0)
     vf.teardown(app, win, view, names)
     return 0
+
+
+def _readable_frames(path: Path) -> int:
+    """Frames imageio can count in *path*; 0 for a missing or unreadable file."""
+    if not path.exists():
+        return 0
+    try:
+        import imageio.v2 as imageio
+
+        reader = imageio.get_reader(str(path))
+        n = int(reader.count_frames())
+        reader.close()
+        return n
+    except Exception:                        # noqa: BLE001 - unreadable = not reusable
+        return 0
 
 
 def compose(a_path: Path, b_path: Path, out_path: Path) -> tuple[int, tuple]:
@@ -94,6 +113,10 @@ def main(argv: list) -> int:
     outs = {}
     for name, source in (("raw", RAW_SET), ("decon", DECON_SET)):
         out = tmp / f"{name}_seed{args.seed}.mp4"
+        if _readable_frames(out) > 0:
+            print(f"reusing existing {out}", flush=True)
+            outs[name] = out
+            continue
         # The app caps real windows at one instance; Julio approved replacing his.
         subprocess.run(["pkill", "-f", "squidxplorer._viewer import main"], check=False)
         time.sleep(2)
@@ -101,8 +124,13 @@ def main(argv: list) -> int:
                              "--seed", str(args.seed), "--pass", str(source), str(out)],
                             check=False).returncode
         if rc != 0:
-            print(f"FAIL: the {name} pass exited {rc}", flush=True)
-            return rc
+            # A teardown crash AFTER the recording still leaves a whole, readable mp4.
+            if _readable_frames(out) > 0:
+                print(f"WARNING: the {name} pass exited {rc} at teardown; "
+                      f"its recording is whole, continuing", flush=True)
+            else:
+                print(f"FAIL: the {name} pass exited {rc}", flush=True)
+                return rc
         outs[name] = out
 
     final = DESKTOP / f"raw_vs_decon_561_seed{args.seed}.mp4"
