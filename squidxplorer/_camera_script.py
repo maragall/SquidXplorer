@@ -285,6 +285,61 @@ def demo_orbit_steps() -> list:
     ]
 
 
+def pose_for(tilt_deg: float, azimuth_deg: float) -> tuple:
+    """The (0, ry, rz) triple whose ``camera.view_direction`` tilts *tilt_deg* off the z
+    axis at *azimuth_deg* in the (y, x) plane: napari's rx=0 forward vector is
+    (-cos(ry)sin(rz), cos(ry)cos(rz), -sin(ry)), inverted exactly (the demo waypoints'
+    hand-tuned mapping, closed form)."""
+    tilt = np.radians(float(tilt_deg))
+    az = np.radians(float(azimuth_deg))
+    ry = np.arcsin(np.sin(tilt) * np.sin(az))
+    rz = np.arccos(np.clip(np.sin(tilt) * np.cos(az) / np.cos(ry), -1.0, 1.0))
+    return (0.0, round(float(np.degrees(ry)), 2), round(float(np.degrees(rz)), 2))
+
+
+#: The seeded orbit's envelope: the proven demo_orbit_steps shape with drawn numbers.
+ORBIT_TILT_DEG = (30.0, 40.0)
+ORBIT_START_AZ_DEG = (20.0, 45.0)
+ORBIT_SWEEP_DEG = (80.0, 140.0)
+ORBIT_ZOOM = (1.1, 1.2)
+ORBIT_DWELL_S = (2.5, 3.5)
+ORBIT_WAYPOINT_DEG = 50.0
+
+
+def random_orbit_steps(seed: int) -> list:
+    """A seeded orbit inside demo_orbit_steps' proven envelope: XY 2.5 s open; a hero pose
+    (tilt 30-40 off XY, azimuth 20-45, zoom 1.1-1.2, dwell 2.5-3.5 s); an 80-140 degree
+    orbit (direction random) as waypoints every ~50 degrees, 2.5-3.5 s pans, all on the
+    drawn tilt; XZ 2.5 s, YZ 2.5 s, back to the hero.
+
+    Sync across comparison passes is STRUCTURAL - one list runs both passes - so the seed
+    buys reproducibility and variety across videos, not the sync. One seed, one list.
+    """
+    rng = np.random.default_rng(int(seed))
+    tilt = rng.uniform(*ORBIT_TILT_DEG)
+    az0 = rng.uniform(*ORBIT_START_AZ_DEG)
+    zoom = round(float(rng.uniform(*ORBIT_ZOOM)), 3)
+    hero_dwell = round(float(rng.uniform(*ORBIT_DWELL_S)), 2)
+    sweep = rng.uniform(*ORBIT_SWEEP_DEG)
+    direction = 1.0 if rng.random() < 0.5 else -1.0
+    n_way = max(1, int(round(sweep / ORBIT_WAYPOINT_DEG)))
+    hero = pose_for(tilt, az0)
+    steps = [
+        Step("xy", dwell_s=2.5),
+        Step(hero, dwell_s=hero_dwell, transition_s=2.0, zoom=zoom),
+    ]
+    for i in range(1, n_way + 1):
+        pan = round(float(rng.uniform(*ORBIT_DWELL_S)), 2)
+        steps.append(Step(pose_for(tilt, az0 + direction * sweep * i / n_way),
+                          transition_s=pan, zoom=zoom))
+    steps += [
+        Step("xz", dwell_s=2.5),
+        Step("yz", dwell_s=2.5),
+        Step(hero, dwell_s=2.0, transition_s=2.0, zoom=zoom),
+    ]
+    return steps
+
+
 #: Width of the gray bar between the two halves of a comparison frame.
 DIVIDER_PX = 4
 

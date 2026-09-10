@@ -197,6 +197,34 @@ def test_the_demo_orbit_storyboard_holds_its_35_degree_cone(mosaic):
     assert azimuths == [30, 80, 130, 30]
 
 
+def test_random_orbit_steps_are_seed_reproducible_and_hold_the_envelope():
+    """One seed, one list (two calls equal); different seeds differ; every oblique pose's
+    tilt, checked by ``camera_basis``'s own view direction, lands on that script's drawn
+    tilt inside the 30-40 degree envelope; the shape is the proven demo storyboard."""
+    from squidxplorer._napari_view import camera_basis
+
+    a, b = CS.random_orbit_steps(4242), CS.random_orbit_steps(4242)
+    assert a == b, "one seed must yield one list"
+    assert CS.random_orbit_steps(7) != a, "different seeds must differ"
+
+    assert a[0].pose == "xy" and a[0].dwell_s == 2.5
+    assert [s.pose for s in a if isinstance(s.pose, str)] == ["xy", "xz", "yz"]
+    assert a[-1].pose == a[1].pose, "the script must return to its hero"
+
+    for seed in (4242, 7, 99):
+        steps = CS.random_orbit_steps(seed)
+        obliques = [s for s in steps if not isinstance(s.pose, str)]
+        tilts = []
+        for step in obliques:
+            forward = camera_basis(step.pose)[2]
+            tilts.append(np.degrees(np.arccos(min(1.0, abs(float(forward[0]))))))
+            lo, hi = CS.ORBIT_ZOOM
+            assert lo <= step.zoom <= hi
+        assert all(CS.ORBIT_TILT_DEG[0] - 0.2 <= t <= CS.ORBIT_TILT_DEG[1] + 0.2
+                   for t in tilts), tilts
+        assert max(tilts) - min(tilts) < 0.2, "the orbit must hold ONE drawn tilt"
+
+
 def _comparison_scene(mosaic, op="decon"):
     """Raw flat layers AND an operator volume in ONE viewer: both identities live."""
     from .conftest import build_flat_scene
