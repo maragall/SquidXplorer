@@ -22,6 +22,9 @@ sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))            # volume_figure's shared boot/teardown
 
 RAW_SET = Path("/Users/julioamaragall/Downloads/25x_C4_dz=3_2026-08-14_16-51-15.744692")
+#: (H, W) physical canvas pixels, asserted EXACT on both passes: fit-derived zoom depends
+#: on canvas geometry, so an unpinned canvas made the two sides render at different scales.
+CANVAS_PX = (1504, 2090)
 DECON_SET = Path("/Users/julioamaragall/Downloads/"
                  "decon46_25x_C4_dz=3_2026-08-14_16-51-15.744692")
 DESKTOP = Path("/Users/julioamaragall/Desktop")
@@ -30,12 +33,97 @@ FPS = 12
 RESIDENCY_TIMEOUT_S = 300.0
 
 
-def record_pass(source: Path, out_mp4: Path, seed: int, window: tuple) -> int:
-    """One booted app, one recorded orbit; runs alone in its own process (one GL app)."""
+def _pin_canvas(app, view, vol) -> None:
+    """Resize the view's window until the GL canvas is EXACTLY CANVAS_PX; refuse else."""
     import volume_figure as vf
 
-    from squidxplorer._camera_script import (random_orbit_steps, run_camera_script,
+    h = w = -1
+    for _ in range(8):
+        shot = vol._viewer.screenshot(canvas_only=True, flash=False)
+        h, w = int(shot.shape[0]), int(shot.shape[1])
+        if (h, w) == CANVAS_PX:
+            print(f"canvas pinned {w}x{h}", flush=True)
+            return
+        ratio = float(view.window().devicePixelRatioF() or 1.0)
+        top = view.window()
+        top.resize(top.width() + int(round((CANVAS_PX[1] - w) / ratio)),
+                   top.height() + int(round((CANVAS_PX[0] - h) / ratio)))
+        vf._pump(app, 0.4)
+    raise SystemExit(f"canvas pin failed: got {w}x{h}, "
+                     f"wanted {CANVAS_PX[1]}x{CANVAS_PX[0]}")
+
+
+def _content_bbox(frame, thresh: int = 8) -> tuple:
+    """(r0, r1, c0, c1) of pixels above *thresh* in any channel: the rendered extent."""
+    import numpy as np
+
+    mask = (np.asarray(frame)[..., :3] > thresh).any(axis=2)
+    rows, cols = np.flatnonzero(mask.any(axis=1)), np.flatnonzero(mask.any(axis=0))
+    if not len(rows):
+        raise SystemExit("preflight: a captured frame is entirely black")
+    return int(rows[0]), int(rows[-1]), int(cols[0]), int(cols[-1])
+
+
+def preflight_pass(source: Path, out_png: Path, window: tuple, seed: int,
+                   camera_path: Path, apply_state: bool) -> int:
+    """One boot, pinned canvas, ONE hero-pose frame. Side A (apply_state=False) derives
+    the seed's hero state and records it; side B applies it verbatim."""
+    import json
+
+    import imageio.v3 as iio
+    import volume_figure as vf
+
+    from squidxplorer import _volume_view
+    from squidxplorer._camera_script import (_canvas_rgb, random_orbit_steps,
                                              wait_bricks_resident)
+
+    booted = vf.boot_561_volume(source, source.name, contrast=window)
+    if booted is None:
+        return 1
+    app, win, view, names, target, fallback = booted
+    vol = view._native3d
+    _pin_canvas(app, view, vol)
+    cam = vol._viewer.camera
+    if apply_state:
+        st = json.loads(camera_path.read_text())
+        cam.center = tuple(st["center"])
+        cam.zoom = float(st["zoom"])
+        cam.angles = tuple(st["angles"])
+        _volume_view.refresh_bricks(view)
+    else:
+        hero = random_orbit_steps(seed)[1]
+        _volume_view.snap_camera(view, tuple(hero.pose))
+        if hero.zoom is not None:
+            cam.zoom = float(cam.zoom) * float(hero.zoom)
+            _volume_view.refresh_bricks(view)
+        camera_path.write_text(json.dumps(
+            {"center": [float(v) for v in cam.center], "zoom": float(cam.zoom),
+             "angles": [float(v) for v in cam.angles]}))
+    wait_bricks_resident(view, timeout_s=RESIDENCY_TIMEOUT_S)
+    vf._pump(app, 0.5)
+    frame = _canvas_rgb(vol)
+    iio.imwrite(out_png, frame)
+    print(f"preflight {source.name}: frame {frame.shape[1]}x{frame.shape[0]} "
+          f"-> {out_png}", flush=True)
+    vf.teardown(app, win, view, names)
+    return 0
+
+
+def record_pass(source: Path, out_mp4: Path, seed: int, window: tuple,
+                camera_path: Path, replay: bool) -> int:
+    """One booted app, one recorded orbit; runs alone in its own process (one GL app).
+
+    Pass A (replay=False) records its per-frame camera state (center, zoom, angles) to
+    *camera_path*; pass B (replay=True) applies that state verbatim before EACH capture,
+    never re-deriving fit or zoom, so the two sides' cameras are identical by
+    construction. The canvas is pinned to CANVAS_PX on both passes first.
+    """
+    import json
+
+    import volume_figure as vf
+
+    from squidxplorer._camera_script import (_canvas_rgb, random_orbit_steps,
+                                             run_camera_script, wait_bricks_resident)
 
     booted = vf.boot_561_volume(source, source.name, contrast=window)
     if booted is None:
@@ -44,10 +132,46 @@ def record_pass(source: Path, out_mp4: Path, seed: int, window: tuple) -> int:
     if fallback:
         print(f"WARNING: {source.name} rendered the FALLBACK ROI, not the full FOV",
               flush=True)
+    vol = view._native3d
+    _pin_canvas(app, view, vol)
+    cam = vol._viewer.camera
+    states = json.loads(camera_path.read_text()) if replay else []
+    k = 0
+    applied_err = 0.0
+
+    def capture():
+        nonlocal k, applied_err
+        if replay:
+            st = states[k]
+            # Replay writes the recorded state directly; the one-writer rule covers the
+            # app's own modules, and pass A's states all came through snap_camera.
+            cam.center = tuple(st["center"])
+            cam.zoom = float(st["zoom"])
+            cam.angles = tuple(st["angles"])
+            got = [*cam.center, cam.zoom, *cam.angles]
+            want = [*st["center"], st["zoom"], *st["angles"]]
+            applied_err = max(applied_err,
+                              max(abs(float(a) - float(b)) for a, b in zip(got, want)))
+        frame = _canvas_rgb(vol)
+        if not replay:
+            states.append({"center": [float(v) for v in cam.center],
+                           "zoom": float(cam.zoom),
+                           "angles": [float(v) for v in cam.angles]})
+        k += 1
+        return frame
+
     steps = random_orbit_steps(seed)
     result = run_camera_script(
-        view, steps, out_path=str(out_mp4), fps=FPS,
+        view, steps, out_path=str(out_mp4), fps=FPS, capture=capture,
         wait_ready=lambda w: wait_bricks_resident(w, timeout_s=RESIDENCY_TIMEOUT_S))
+    assert result.n_frames == len(states), (
+        f"{result.n_frames} frame(s) against {len(states)} camera state(s)")
+    if replay:
+        print(f"replayed {len(states)} camera state(s), "
+              f"max apply error {applied_err:.3e}", flush=True)
+    else:
+        camera_path.write_text(json.dumps(states))
+        print(f"recorded {len(states)} camera state(s) -> {camera_path}", flush=True)
     print(f"pass {source.name}: {result.n_frames} frame(s) -> {result.path}", flush=True)
     # Let the last snap's brick refresh settle before closing: closing over a busy loader
     # segfaulted after the recording (measured, exit -11 with the mp4 already whole).
@@ -55,6 +179,69 @@ def record_pass(source: Path, out_mp4: Path, seed: int, window: tuple) -> int:
     vf._pump(app, 1.0)
     vf.teardown(app, win, view, names)
     return 0
+
+
+def _kill_running() -> None:
+    # The app caps real windows at one instance; Julio approved replacing his.
+    subprocess.run(["pkill", "-f", "squidxplorer._viewer import main"], check=False)
+    time.sleep(2)
+
+
+def preflight(tmp: Path, sources: dict, windows: dict, seed: int) -> None:
+    """ONE pinned hero frame per side under ONE camera state, compared precisely BEFORE
+    any full pass records: equal canvas sizes, content bbox corners within 1 px. A
+    mismatch is a named refusal and no video is recorded."""
+    import imageio.v3 as iio
+
+    camera = tmp / f"preflight_seed{seed}.camera.json"
+    pngs = {}
+    for name, replay in (("raw", False), ("decon", True)):
+        png = tmp / f"preflight_{name}_seed{seed}.png"
+        png.unlink(missing_ok=True)
+        _kill_running()
+        w = windows[name]
+        cmd = [sys.executable, str(Path(__file__).resolve()), "--seed", str(seed),
+               "--preflight", str(sources[name]), str(png), str(w[0]), str(w[1]),
+               str(camera)]
+        if replay:
+            cmd.append("--replay")
+        rc = subprocess.run(cmd, check=False).returncode
+        if not png.exists():
+            raise SystemExit(f"preflight: the {name} side exited {rc} with no frame")
+        if rc != 0:
+            print(f"WARNING: the {name} preflight exited {rc} at teardown; "
+                  f"its frame is whole, continuing", flush=True)
+        pngs[name] = png
+    a, b = iio.imread(pngs["raw"]), iio.imread(pngs["decon"])
+    if a.shape != b.shape:
+        raise SystemExit(f"preflight REFUSAL: canvas sizes differ, "
+                         f"raw {a.shape} vs decon {b.shape}; no video recorded")
+    ba, bb = _content_bbox(a), _content_bbox(b)
+    print(f"preflight canvas {a.shape[1]}x{a.shape[0]} both sides; content bbox "
+          f"(r0, r1, c0, c1) raw {ba}, decon {bb}", flush=True)
+    worst = max(abs(x - y) for x, y in zip(ba, bb))
+    if worst > 1:
+        raise SystemExit(f"preflight REFUSAL: content bboxes disagree by {worst} px "
+                         f"(raw {ba}, decon {bb}); no video recorded")
+    print(f"preflight PASS: bbox corners agree within {worst} px", flush=True)
+
+
+def _halves_check(path: Path, n: int) -> None:
+    """Decode frame 0 and a mid-orbit frame; report each half's content bbox."""
+    import imageio.v2 as imageio
+    import numpy as np
+
+    from squidxplorer._camera_script import DIVIDER_PX
+
+    reader = imageio.get_reader(str(path))
+    for idx in (0, n // 2):
+        f = np.asarray(reader.get_data(idx))
+        left = f[:, :CANVAS_PX[1]]
+        right = f[:, CANVAS_PX[1] + DIVIDER_PX:]
+        bl, br = _content_bbox(left), _content_bbox(right)
+        print(f"frame {idx}: left bbox {bl}, right bbox {br}, max corner diff "
+              f"{max(abs(x - y) for x, y in zip(bl, br))} px", flush=True)
+    reader.close()
 
 
 def _readable_frames(path: Path) -> int:
@@ -105,14 +292,24 @@ def main(argv: list) -> int:
                     default=None, help="decon-side contrast; default: the shared window")
     ap.add_argument("--out", type=Path, default=None,
                     help="composed .mp4 path; default: Desktop, named by the seed")
-    ap.add_argument("--pass", dest="pass_args", nargs=4,
-                    metavar=("SOURCE", "OUT_MP4", "LO", "HI"),
+    ap.add_argument("--pass", dest="pass_args", nargs=5,
+                    metavar=("SOURCE", "OUT_MP4", "LO", "HI", "CAMERA_JSON"),
                     help="internal: run one recording pass in this process")
+    ap.add_argument("--preflight", dest="preflight_args", nargs=5,
+                    metavar=("SOURCE", "OUT_PNG", "LO", "HI", "CAMERA_JSON"),
+                    help="internal: capture one pinned hero frame in this process")
+    ap.add_argument("--replay", action="store_true",
+                    help="internal: apply CAMERA_JSON verbatim instead of recording it")
     args = ap.parse_args(argv)
 
     if args.pass_args:
-        src, out, lo, hi = args.pass_args
-        return record_pass(Path(src), Path(out), args.seed, (float(lo), float(hi)))
+        src, out, lo, hi, camera = args.pass_args
+        return record_pass(Path(src), Path(out), args.seed, (float(lo), float(hi)),
+                           Path(camera), args.replay)
+    if args.preflight_args:
+        src, out, lo, hi, camera = args.preflight_args
+        return preflight_pass(Path(src), Path(out), (float(lo), float(hi)), args.seed,
+                              Path(camera), args.replay)
 
     from volume_figure import CONTRAST_561
 
@@ -123,24 +320,31 @@ def main(argv: list) -> int:
     tmp = Path(tempfile.gettempdir()) / "squidxplorer_comparison"
     tmp.mkdir(exist_ok=True)
     windows = {"raw": CONTRAST_561, "decon": decon_window}
+    sources = {"raw": RAW_SET, "decon": args.decon_source}
+    # The reuse key carries the pass's identity: set name and window, so a cached
+    # recording from another scheme or another decon solve is never reused.
+    pass_out = {
+        name: tmp / (f"{name}_seed{args.seed}_{sources[name].name[:24]}"
+                     f"_w{int(windows[name][0])}-{int(windows[name][1])}.mp4")
+        for name in ("raw", "decon")}
+    camera_json = pass_out["raw"].with_suffix(".camera.json")
+
+    preflight(tmp, sources, windows, args.seed)
+
     outs = {}
-    for name, source in (("raw", RAW_SET), ("decon", args.decon_source)):
-        w = windows[name]
-        # The reuse key carries the pass's identity: set name and window, so a cached
-        # recording from another scheme or another decon solve is never reused.
-        tag = f"{source.name[:24]}_w{int(w[0])}-{int(w[1])}"
-        out = tmp / f"{name}_seed{args.seed}_{tag}.mp4"
-        if _readable_frames(out) > 0:
+    for name in ("raw", "decon"):
+        source, out, w = sources[name], pass_out[name], windows[name]
+        if _readable_frames(out) > 0 and camera_json.exists():
             print(f"reusing existing {out}", flush=True)
             outs[name] = out
             continue
-        # The app caps real windows at one instance; Julio approved replacing his.
-        subprocess.run(["pkill", "-f", "squidxplorer._viewer import main"], check=False)
-        time.sleep(2)
-        rc = subprocess.run([sys.executable, str(Path(__file__).resolve()),
-                             "--seed", str(args.seed), "--pass", str(source), str(out),
-                             str(w[0]), str(w[1])],
-                            check=False).returncode
+        _kill_running()
+        cmd = [sys.executable, str(Path(__file__).resolve()),
+               "--seed", str(args.seed), "--pass", str(source), str(out),
+               str(w[0]), str(w[1]), str(camera_json)]
+        if name == "decon":
+            cmd.append("--replay")
+        rc = subprocess.run(cmd, check=False).returncode
         if rc != 0:
             # A teardown crash AFTER the recording still leaves a whole, readable mp4.
             if _readable_frames(out) > 0:
@@ -153,6 +357,7 @@ def main(argv: list) -> int:
 
     final = args.out or DESKTOP / f"raw_vs_decon_561_seed{args.seed}.mp4"
     n, shape = compose(outs["raw"], outs["decon"], final)
+    _halves_check(final, n)
     size_mb = final.stat().st_size / 1e6
     print(f"composed {final}: {n} frame(s), {n / FPS:.1f} s at {FPS} fps, "
           f"{shape[1]}x{shape[0]} px, {size_mb:.1f} MB", flush=True)
