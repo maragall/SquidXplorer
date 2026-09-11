@@ -200,7 +200,10 @@ def preflight(tmp: Path, sources: dict, windows: dict, seed: int) -> None:
     import imageio.v3 as iio
 
     camera = tmp / f"preflight_seed{seed}.camera.json"
-    pngs = {name: tmp / f"preflight_{name}_seed{seed}.png" for name in ("raw", "decon")}
+    # The frame cache is keyed on the window: a look change re-captures.
+    pngs = {name: tmp / (f"preflight_{name}_seed{seed}"
+                         f"_w{int(windows[name][0])}-{int(windows[name][1])}.png")
+            for name in ("raw", "decon")}
     if camera.exists() and all(p.exists() for p in pngs.values()):
         print("reusing existing preflight frames", flush=True)
     else:
@@ -326,8 +329,10 @@ def main(argv: list) -> int:
     ap.add_argument("--seed", type=int, default=DEFAULT_SEED)
     ap.add_argument("--decon-source", type=Path, default=DECON_SET,
                     help="the decon sibling acquisition for the right side")
-    ap.add_argument("--decon-window", type=float, nargs=2, metavar=("LO", "HI"),
-                    default=None, help="decon-side contrast; default: the shared window")
+    ap.add_argument("--window", type=float, nargs=2, metavar=("LO", "HI"),
+                    default=None,
+                    help="the ONE comparison window, applied to BOTH sides; "
+                         "default: volume_figure's raw 561 window")
     ap.add_argument("--out", type=Path, default=None,
                     help="composed .mp4 path; default: Desktop, named by the seed")
     ap.add_argument("--pass", dest="pass_args", nargs=5,
@@ -351,13 +356,16 @@ def main(argv: list) -> int:
 
     from volume_figure import CONTRAST_561
 
-    decon_window = tuple(args.decon_window) if args.decon_window else CONTRAST_561
+    # The rule: the comparison window is IDENTICAL on both sides. Asymmetric floors
+    # bias apparent sharpness (verified by pixel-matching the halves when the sides
+    # read as swapped: raw at 135 rendered punchier than decon at 95).
+    window = tuple(args.window) if args.window else CONTRAST_561
     print(f"seed {args.seed}, decon {args.decon_source.name}, "
-          f"decon window {decon_window}", flush=True)
+          f"window {window} both sides", flush=True)
     import tempfile
     tmp = Path(tempfile.gettempdir()) / "squidxplorer_comparison"
     tmp.mkdir(exist_ok=True)
-    windows = {"raw": CONTRAST_561, "decon": decon_window}
+    windows = {"raw": window, "decon": window}
     sources = {"raw": RAW_SET, "decon": args.decon_source}
     # The reuse key carries the pass's identity: set name and window, so a cached
     # recording from another scheme or another decon solve is never reused.

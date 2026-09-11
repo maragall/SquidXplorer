@@ -27,7 +27,7 @@ python scripts/decon_demo_sop.py --iterations 2 --seed 4242 --scheme shared
 | `--channel` | Fluorescence_561_nm_Ex | pinned today (the shared window is 561's) |
 | `--iterations` | 2 | decon iterations; names the output set `decon46_iN_...` |
 | `--seed` | 4242 | orbit seed; one seed, one storyboard, baked into the video name |
-| `--scheme` | floor | decon-side video contrast: `shared` (135, 1109 both sides), `floor` (95, 1109 decon side), `peak-matched` (each side [0.1217 x P, P], P its own 99.9 pct 561 z-MIP peak). Default floor, Julio's pick over the eight figures: the shared 1109 ceiling already renders both sides' peaks identically (both clip to full there, decon 2.8% vs raw 1.1%) while the lowered floor restores the background the decon drained; peak-matching at p99.9 raises both ceilings so far the scene darkens and the decon's improvement reads weaker than it is. |
+| `--scheme` | floor | the video's ONE window, applied to BOTH sides: `shared` (135, 1109) or `floor` (95, 1109). Default floor, Julio's floor-down pick made symmetric: asymmetric windows bias apparent sharpness (verified by pixel-matching the halves when Julio read the sides as swapped - raw at 135 rendered punchier than decon at 95), so the comparison video never windows its sides differently. Peak-matching at p99.9 was rejected on look (both ceilings rise so far the scene darkens); per-side windows survive as a figures-only variant. |
 | `--out-dir` | ~/Desktop/decon_demo_figures | where the stills and figures land |
 
 ## Outputs

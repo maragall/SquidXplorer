@@ -28,8 +28,9 @@ sys.path.insert(0, str(HERE))
 DEFAULT_ACQ = Path("/Users/julioamaragall/Downloads/25x_C4_dz=3_2026-08-14_16-51-15.744692")
 DEFAULT_CHANNEL = "Fluorescence_561_nm_Ex"
 FLOOR_WINDOW = (95.0, 1109.0)
-# Julio's pick over the eight figures: floor. The shared 1109 ceiling already renders
-# both peaks identically; the lowered decon floor restores the drained background.
+# Julio's pick, then the symmetry rule: floor, (95, 1109) on BOTH sides. Asymmetric
+# windows bias apparent sharpness (verified by pixel-matching the halves when Julio
+# read the sides as swapped); a symmetric floor-down keeps his preference unbiased.
 DEFAULT_SCHEME = "floor"
 
 
@@ -46,10 +47,10 @@ def main(argv: list) -> int:
     ap.add_argument("--channel", default=DEFAULT_CHANNEL)
     ap.add_argument("--iterations", type=int, default=2)
     ap.add_argument("--seed", type=int, default=4242)
-    ap.add_argument("--scheme", choices=("shared", "floor", "peak-matched"),
-                    default=DEFAULT_SCHEME,
-                    help="decon-side video contrast; figures always render both "
-                         "floor-95 and peak-matched")
+    ap.add_argument("--scheme", choices=("shared", "floor"), default=DEFAULT_SCHEME,
+                    help="the video's ONE window, both sides: shared (135, 1109) or "
+                         "floor (95, 1109). Per-side windows are figures-only: the "
+                         "comparison video never windows its sides differently")
     ap.add_argument("--out-dir", type=Path,
                     default=Path.home() / "Desktop" / "decon_demo_figures")
     args = ap.parse_args(argv)
@@ -77,13 +78,7 @@ def main(argv: list) -> int:
     video_cmd = [HERE / "record_volume_comparison.py", "--seed", str(args.seed),
                  "--decon-source", decon_set]
     if args.scheme == "floor":
-        video_cmd += ["--decon-window", str(FLOOR_WINDOW[0]), str(FLOOR_WINDOW[1])]
-    elif args.scheme == "peak-matched":
-        from compare_figures import peak_window
-
-        lo, hi = peak_window(decon_set)
-        print(f"== video: peak-matched decon window ({lo:.1f}, {hi:.1f})", flush=True)
-        video_cmd += ["--decon-window", str(lo), str(hi)]
+        video_cmd += ["--window", str(FLOOR_WINDOW[0]), str(FLOOR_WINDOW[1])]
     run_stage("video", video_cmd)
     return 0
 
