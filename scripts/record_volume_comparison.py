@@ -167,6 +167,12 @@ def record_pass(source: Path, out_mp4: Path, seed: int, window: tuple,
     assert result.n_frames == len(states), (
         f"{result.n_frames} frame(s) against {len(states)} camera state(s)")
     if replay:
+        import hashlib
+
+        # The recording's identity includes the trajectory it replayed: the sidecar
+        # hash is the reuse key, so it is only ever reused against this exact json.
+        Path(str(out_mp4) + ".sha").write_text(
+            hashlib.sha256(camera_path.read_bytes()).hexdigest())
         print(f"replayed {len(states)} camera state(s), "
               f"max apply error {applied_err:.3e}", flush=True)
     else:
@@ -234,21 +240,29 @@ def preflight(tmp: Path, sources: dict, windows: dict, seed: int) -> None:
 
 
 def _halves_check(path: Path, n: int) -> None:
-    """Decode frame 0 and a mid-orbit frame; report each half's content bbox."""
+    """Decode frames across the orbit; each half's structure bbox must agree within
+    2 px, else the composed file is REFUSED before it replaces the destination."""
     import imageio.v2 as imageio
     import numpy as np
 
     from squidxplorer._camera_script import DIVIDER_PX
 
     reader = imageio.get_reader(str(path))
-    for idx in (0, n // 2):
+    worst = (0, -1)
+    for idx in (0, 70, 140, 210):
+        idx = min(idx, n - 1)
         f = np.asarray(reader.get_data(idx))
         left = f[:, :CANVAS_PX[1]]
         right = f[:, CANVAS_PX[1] + DIVIDER_PX:]
         bl, br = _content_bbox(left, 32), _content_bbox(right, 32)
-        print(f"frame {idx}: structure bbox left {bl}, right {br}, max corner diff "
-              f"{max(abs(x - y) for x, y in zip(bl, br))} px", flush=True)
+        diff = max(abs(x - y) for x, y in zip(bl, br))
+        worst = max(worst, (diff, idx))
+        print(f"frame {idx}: structure bbox left {bl}, right {br}, "
+              f"max corner diff {diff} px", flush=True)
     reader.close()
+    if worst[0] > 2:
+        raise SystemExit(f"alignment REFUSAL: frame {worst[1]} halves disagree by "
+                         f"{worst[0]} px; the composed file is not delivered")
 
 
 def _readable_frames(path: Path) -> int:
@@ -338,20 +352,27 @@ def main(argv: list) -> int:
 
     preflight(tmp, sources, windows, args.seed)
 
+    import hashlib
+
     outs = {}
     for name in ("raw", "decon"):
         source, out, w = sources[name], pass_out[name], windows[name]
-        # A replayed recording depends on the camera states it replayed: a decon mp4
-        # OLDER than the sidecar was recorded against other states (or none) and is
-        # stale. The raw pass writes the sidecar with its own mp4, so equal-or-newer.
-        fresh = (camera_json.exists()
-                 and (name == "raw"
-                      or (out.exists()
-                          and out.stat().st_mtime >= camera_json.stat().st_mtime)))
+        sha_file = Path(str(out) + ".sha")
+        # A replayed recording's identity includes the TRAJECTORY it replayed: reuse
+        # only when its sidecar hash matches the current camera json, so a decon mp4
+        # recorded against other states (or none) always re-records.
+        if name == "raw":
+            fresh = camera_json.exists()
+        else:
+            fresh = (camera_json.exists() and sha_file.exists()
+                     and sha_file.read_text().strip()
+                     == hashlib.sha256(camera_json.read_bytes()).hexdigest())
         if fresh and _readable_frames(out) > 0:
             print(f"reusing existing {out}", flush=True)
             outs[name] = out
             continue
+        out.unlink(missing_ok=True)           # a stale intermediate never survives
+        sha_file.unlink(missing_ok=True)
         _kill_running()
         cmd = [sys.executable, str(Path(__file__).resolve()),
                "--seed", str(args.seed), "--pass", str(source), str(out),
@@ -370,8 +391,10 @@ def main(argv: list) -> int:
         outs[name] = out
 
     final = args.out or DESKTOP / f"raw_vs_decon_561_seed{args.seed}.mp4"
-    n, shape = compose(outs["raw"], outs["decon"], final)
-    _halves_check(final, n)
+    staged = tmp / f"staged_{final.name}"
+    n, shape = compose(outs["raw"], outs["decon"], staged)
+    _halves_check(staged, n)                 # refuses BEFORE the destination changes
+    staged.replace(final)
     size_mb = final.stat().st_size / 1e6
     print(f"composed {final}: {n} frame(s), {n / FPS:.1f} s at {FPS} fps, "
           f"{shape[1]}x{shape[0]} px, {size_mb:.1f} MB", flush=True)
