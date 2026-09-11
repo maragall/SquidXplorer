@@ -100,21 +100,26 @@ def main(argv: list) -> int:
         mosaic.set_contrast(target, FLOOR, c)   # display map only: no read, no wait
         vf._pump(app, 0.4)
         shot = np.asarray(vol._viewer.screenshot(canvas_only=True, flash=False))[..., :3]
-        name = "max" if p == 100.0 else f"p{p:g}"
-        png = args.out_dir / f"i2_sweep_c{int(round(c))}.png"
+        name = "pmax" if p == 100.0 else f"p{p:g}"
+        # Self-describing, Julio's QC flow: the six files ARE the deliverable.
+        png = args.out_dir / (f"decon_i2_w{int(FLOOR)}-{int(round(c))}"
+                              f"_{name}_clip{clip:.3f}.png")
         iio.imwrite(png, shot)
-        print(f"captured {png} ({name})", flush=True)
+        print(f"captured {png}", flush=True)
         tiles.append(_label_tile(shot, f"(95, {c:.0f}) - {name} - clips {clip:.3f}%"))
 
-    rows = [np.concatenate(tiles[i:i + 3], axis=1) for i in (0, 3)]
-    sheet = np.concatenate(rows, axis=0)
-    sheet_path = args.out_dir / "i2_ceiling_sweep.png"
-    iio.imwrite(sheet_path, sheet)
-    desk = DESKTOP / sheet_path.name
-    shutil.copy2(sheet_path, desk)
-    subprocess.run(["open", "-a", "Preview", str(desk)], check=False)
-    print(f"contact sheet {sheet_path} (copied to {desk}, opened in Preview)",
+    pngs = sorted(args.out_dir.glob("decon_i2_w*_clip*.png"))
+    for png in pngs:
+        shutil.copy2(png, DESKTOP / png.name)
+    subprocess.run(["open", "-a", "Preview",
+                    *(str(DESKTOP / p.name) for p in pngs)], check=False)
+    print(f"copied {len(pngs)} PNG(s) to {DESKTOP}, opened together in Preview",
           flush=True)
+    # The contact sheet stays as a bonus beside the six files.
+    rows = [np.concatenate(tiles[i:i + 3], axis=1) for i in (0, 3)]
+    sheet_path = args.out_dir / "i2_ceiling_sweep.png"
+    iio.imwrite(sheet_path, np.concatenate(rows, axis=0))
+    print(f"contact sheet {sheet_path}", flush=True)
 
     vf.teardown(app, win, view, names)       # a teardown crash cannot cost the sheet
     return 0
