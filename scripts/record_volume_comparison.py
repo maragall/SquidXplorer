@@ -109,8 +109,41 @@ def preflight_pass(source: Path, out_png: Path, window: tuple, seed: int,
     return 0
 
 
+def compute_zoom_targets() -> tuple:
+    """(zoom_center, home_center) in world (z, y, x) um: the DATA chooses the zoom
+    chapter's target - the center of mass of the top 1% brightest 561 z-MIP pixels of
+    the RAW set - never the seed. Single-field acquisitions only today."""
+    import numpy as np
+
+    from compare_figures import channel_mip
+
+    from squidxplorer._mosaic_source import mosaic_fov_bboxes_um
+    from squidxplorer.reader import open_reader
+
+    reader = open_reader(RAW_SET)
+    meta = reader.metadata
+    if sum(len(f) for f in meta["fovs_per_region"].values()) != 1:
+        raise SystemExit("zoom target: single-field acquisitions only today")
+    region, fovs = next(iter(meta["fovs_per_region"].items()))
+    mip = channel_mip(RAW_SET)[0]
+    thr = np.quantile(mip, 0.99)
+    ys, xs = np.nonzero(mip >= thr)
+    wts = mip[ys, xs].astype(float)
+    cy, cx = float((ys * wts).sum() / wts.sum()), float((xs * wts).sum() / wts.sum())
+    x0, y0, x1, y1 = mosaic_fov_bboxes_um(meta, region)[fovs[0]]
+    pitch = float(meta["pixel_size_um"])
+    z_mid = float(meta["n_z"]) * float(meta["dz_um"]) / 2.0
+    target = (z_mid, y0 + (cy + 0.5) * pitch, x0 + (cx + 0.5) * pitch)
+    home = (z_mid, (y0 + y1) / 2.0, (x0 + x1) / 2.0)
+    print(f"zoom target (data-chosen, top 1% MIP center of mass): "
+          f"({target[0]:.1f}, {target[1]:.1f}, {target[2]:.1f}) um; "
+          f"home ({home[0]:.1f}, {home[1]:.1f}, {home[2]:.1f}) um", flush=True)
+    return target, home
+
+
 def record_pass(source: Path, out_mp4: Path, seed: int, window: tuple,
-                camera_path: Path, replay: bool) -> int:
+                camera_path: Path, replay: bool,
+                zoom_center=None, home_center=None) -> int:
     """One booted app, one recorded orbit; runs alone in its own process (one GL app).
 
     Pass A (replay=False) records its per-frame camera state (center, zoom, angles) to
@@ -160,7 +193,7 @@ def record_pass(source: Path, out_mp4: Path, seed: int, window: tuple,
         k += 1
         return frame
 
-    steps = random_orbit_steps(seed)
+    steps = random_orbit_steps(seed, zoom_center=zoom_center, home_center=home_center)
     result = run_camera_script(
         view, steps, out_path=str(out_mp4), fps=FPS, capture=capture,
         wait_ready=lambda w: wait_bricks_resident(w, timeout_s=RESIDENCY_TIMEOUT_S))
@@ -343,12 +376,19 @@ def main(argv: list) -> int:
                     help="internal: capture one pinned hero frame in this process")
     ap.add_argument("--replay", action="store_true",
                     help="internal: apply CAMERA_JSON verbatim instead of recording it")
+    ap.add_argument("--zoom-center", type=float, nargs=3, metavar=("Z", "Y", "X"),
+                    default=None, help="internal: the zoom chapter's world-um target")
+    ap.add_argument("--home-center", type=float, nargs=3, metavar=("Z", "Y", "X"),
+                    default=None, help="internal: the pull-back's world-um center")
+    ap.add_argument("--no-zoom", action="store_true",
+                    help="record the chapterless storyboard")
     args = ap.parse_args(argv)
 
     if args.pass_args:
         src, out, lo, hi, camera = args.pass_args
         return record_pass(Path(src), Path(out), args.seed, (float(lo), float(hi)),
-                           Path(camera), args.replay)
+                           Path(camera), args.replay,
+                           zoom_center=args.zoom_center, home_center=args.home_center)
     if args.preflight_args:
         src, out, lo, hi, camera = args.preflight_args
         return preflight_pass(Path(src), Path(out), (float(lo), float(hi)), args.seed,
@@ -376,6 +416,9 @@ def main(argv: list) -> int:
     camera_json = pass_out["raw"].with_suffix(".camera.json")
 
     preflight(tmp, sources, windows, args.seed)
+    zoom_center = home_center = None
+    if not args.no_zoom:
+        zoom_center, home_center = compute_zoom_targets()
 
     import hashlib
 
@@ -402,6 +445,9 @@ def main(argv: list) -> int:
         cmd = [sys.executable, str(Path(__file__).resolve()),
                "--seed", str(args.seed), "--pass", str(source), str(out),
                str(w[0]), str(w[1]), str(camera_json)]
+        if zoom_center is not None:
+            cmd += ["--zoom-center", *(str(v) for v in zoom_center),
+                    "--home-center", *(str(v) for v in home_center)]
         if name == "decon":
             cmd.append("--replay")
         rc = subprocess.run(cmd, check=False).returncode
