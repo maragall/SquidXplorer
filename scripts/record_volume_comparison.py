@@ -341,7 +341,14 @@ def main(argv: list) -> int:
     outs = {}
     for name in ("raw", "decon"):
         source, out, w = sources[name], pass_out[name], windows[name]
-        if _readable_frames(out) > 0 and camera_json.exists():
+        # A replayed recording depends on the camera states it replayed: a decon mp4
+        # OLDER than the sidecar was recorded against other states (or none) and is
+        # stale. The raw pass writes the sidecar with its own mp4, so equal-or-newer.
+        fresh = (camera_json.exists()
+                 and (name == "raw"
+                      or (out.exists()
+                          and out.stat().st_mtime >= camera_json.stat().st_mtime)))
+        if fresh and _readable_frames(out) > 0:
             print(f"reusing existing {out}", flush=True)
             outs[name] = out
             continue
