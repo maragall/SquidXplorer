@@ -41,12 +41,20 @@ class Step:
     ``transition_s`` overrides the script-wide pan time into this pose; the first step never
     pans in - the movie opens at its pose. ``zoom`` multiplies the framed zoom after the
     snap (zoom is not an angle, so the one-writer rule does not cover it).
+
+    A ``glide=True`` step never re-frames: its transition interpolates the camera CENTER
+    toward ``center`` (world (z, y, x); None holds it) and the zoom geometrically to the
+    current zoom times ``zoom``, per frame alongside the angles, and its final write is
+    angles-only through ``snap_camera`` plus the exact center/zoom - the zoom chapter's
+    move. Center and zoom writes stay inside this module; angles still have ONE writer.
     """
 
     pose: Pose
     dwell_s: float = 0.0
     transition_s: Optional[float] = None
     zoom: Optional[float] = None
+    center: Optional[tuple] = None
+    glide: bool = False
 
 
 @dataclass(frozen=True)
@@ -170,6 +178,38 @@ def _execute(win, vol, parsed: Sequence[Step], *, fps: int, transition_s: float,
     prev: Optional[tuple] = None
     for step in parsed:
         target = pose_angles(step.pose)
+        if step.glide:
+            cam = vol._viewer.camera
+            c0, z0 = tuple(float(v) for v in cam.center), float(cam.zoom)
+            c1 = tuple(float(v) for v in step.center) if step.center is not None else c0
+            z1 = z0 * float(step.zoom) if step.zoom is not None else z0
+            t = transition_s if step.transition_s is None else float(step.transition_s)
+            n = max(1, int(round(t * fps)))
+            arc = (transition_angles(prev, target, n)
+                   if (target is not None and prev is not None) else [])
+            for i in range(1, n):
+                if i - 1 < len(arc):
+                    _volume_view.snap_camera(win, arc[i - 1], settle=False)
+                f = i / n
+                cam.center = tuple(a + (b - a) * f for a, b in zip(c0, c1))
+                cam.zoom = z0 * (z1 / z0) ** f
+                if record:
+                    yield capture()
+                else:
+                    sleep(1.0 / fps)
+            if target is not None:
+                _volume_view.snap_camera(win, target, settle=False)
+            cam.center, cam.zoom = c1, z1
+            _volume_view.refresh_bricks(win)  # center and stride both moved
+            wait_ready(win)
+            if record:
+                for _ in range(dwell_frames(step.dwell_s, fps)):
+                    yield capture()
+            elif step.dwell_s > 0:
+                sleep(float(step.dwell_s))
+            if target is not None:
+                prev = target
+            continue
         if target is not None and prev is not None:
             t = transition_s if step.transition_s is None else float(step.transition_s)
             for angles in transition_angles(prev, target, int(round(t * fps))):
@@ -305,8 +345,13 @@ ORBIT_ZOOM = (1.1, 1.2)
 ORBIT_DWELL_S = (2.5, 3.5)
 ORBIT_WAYPOINT_DEG = 50.0
 
+#: The zoom chapter: glide to ~2.2x the orbit zoom (~2.5x fit), drift, pull back.
+ZOOM_GLIDE_FACTOR = 2.2
+ZOOM_DRIFT_DEG = 20.0
 
-def random_orbit_steps(seed: int) -> list:
+
+def random_orbit_steps(seed: int, zoom_center: Optional[tuple] = None,
+                       home_center: Optional[tuple] = None) -> list:
     """A seeded orbit inside demo_orbit_steps' proven envelope: XY 2.5 s open; a hero pose
     (tilt 30-40 off XY, azimuth 20-45, zoom 1.1-1.2, dwell 2.5-3.5 s); an 80-140 degree
     orbit (direction random) as waypoints every ~50 degrees, 2.5-3.5 s pans, all on the
@@ -314,6 +359,13 @@ def random_orbit_steps(seed: int) -> list:
 
     Sync across comparison passes is STRUCTURAL - one list runs both passes - so the seed
     buys reproducibility and variety across videos, not the sync. One seed, one list.
+
+    *zoom_center* (world (z, y, x)) inserts the ZOOM CHAPTER after the orbit: a 3 s glide
+    of center to the target with zoom rising ZOOM_GLIDE_FACTOR-fold, a 2.5 s zoomed
+    ~20 degree azimuth drift (parallax) plus a 1 s hold, and a 2 s pull-back toward
+    *home_center*. The DATA chooses the target, never the seed: the caller computes it
+    (the brightest structure's center of mass) and passes it in; with zoom_center=None
+    the list is exactly the chapterless storyboard.
     """
     rng = np.random.default_rng(int(seed))
     tilt = rng.uniform(*ORBIT_TILT_DEG)
@@ -332,6 +384,17 @@ def random_orbit_steps(seed: int) -> list:
         pan = round(float(rng.uniform(*ORBIT_DWELL_S)), 2)
         steps.append(Step(pose_for(tilt, az0 + direction * sweep * i / n_way),
                           transition_s=pan, zoom=zoom))
+    if zoom_center is not None:
+        az_end = az0 + direction * sweep
+        drift = pose_for(tilt, az_end + direction * ZOOM_DRIFT_DEG)
+        steps += [
+            Step(pose_for(tilt, az_end), transition_s=3.0, glide=True,
+                 center=tuple(float(v) for v in zoom_center), zoom=ZOOM_GLIDE_FACTOR),
+            Step(drift, dwell_s=1.0, transition_s=2.5, glide=True),
+            Step(drift, transition_s=2.0, glide=True, zoom=1.0 / ZOOM_GLIDE_FACTOR,
+                 center=(tuple(float(v) for v in home_center)
+                         if home_center is not None else None)),
+        ]
     steps += [
         Step("xz", dwell_s=2.5),
         Step("yz", dwell_s=2.5),
