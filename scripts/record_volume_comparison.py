@@ -64,8 +64,20 @@ def _content_bbox(frame, thresh: int = 8) -> tuple:
     return int(rows[0]), int(rows[-1]), int(cols[0]), int(cols[-1])
 
 
+def _apply_gamma(view, target: str, gamma: float) -> None:
+    """The SAME gamma on every layer of the 561 identity, both sides: the symmetric
+    rule extends to gamma - the shader renders it, so the recordings carry it."""
+    if float(gamma) == 1.0:
+        return
+    mosaic = view._pane.mosaic
+    with mosaic.programmatic():
+        for op in mosaic.ops():
+            for ly in mosaic.layers_for(op, target):
+                ly.gamma = float(gamma)
+
+
 def preflight_pass(source: Path, out_png: Path, window: tuple, seed: int,
-                   camera_path: Path, apply_state: bool) -> int:
+                   camera_path: Path, apply_state: bool, gamma: float = 1.0) -> int:
     """One boot, pinned canvas, ONE hero-pose frame. Side A (apply_state=False) derives
     the seed's hero state and records it; side B applies it verbatim."""
     import json
@@ -83,6 +95,7 @@ def preflight_pass(source: Path, out_png: Path, window: tuple, seed: int,
     app, win, view, names, target, fallback = booted
     vol = view._native3d
     _pin_canvas(app, view, vol)
+    _apply_gamma(view, target, gamma)
     cam = vol._viewer.camera
     if apply_state:
         st = json.loads(camera_path.read_text())
@@ -143,7 +156,7 @@ def compute_zoom_targets() -> tuple:
 
 def record_pass(source: Path, out_mp4: Path, seed: int, window: tuple,
                 camera_path: Path, replay: bool,
-                zoom_center=None, home_center=None) -> int:
+                zoom_center=None, home_center=None, gamma: float = 1.0) -> int:
     """One booted app, one recorded orbit; runs alone in its own process (one GL app).
 
     Pass A (replay=False) records its per-frame camera state (center, zoom, angles) to
@@ -167,6 +180,7 @@ def record_pass(source: Path, out_mp4: Path, seed: int, window: tuple,
               flush=True)
     vol = view._native3d
     _pin_canvas(app, view, vol)
+    _apply_gamma(view, target, gamma)
     cam = vol._viewer.camera
     states = json.loads(camera_path.read_text()) if replay else []
     k = 0
@@ -226,16 +240,18 @@ def _kill_running() -> None:
     time.sleep(2)
 
 
-def preflight(tmp: Path, sources: dict, windows: dict, seed: int) -> None:
+def preflight(tmp: Path, sources: dict, windows: dict, seed: int,
+              gamma: float = 1.0) -> None:
     """ONE pinned hero frame per side under ONE camera state, compared precisely BEFORE
     any full pass records: equal canvas sizes, content bbox corners within 1 px. A
     mismatch is a named refusal and no video is recorded."""
     import imageio.v3 as iio
 
     camera = tmp / f"preflight_seed{seed}.camera.json"
-    # The frame cache is keyed on the window: a look change re-captures.
+    # The frame cache is keyed on the whole look: a window or gamma change re-captures.
     pngs = {name: tmp / (f"preflight_{name}_seed{seed}"
-                         f"_w{int(windows[name][0])}-{int(windows[name][1])}.png")
+                         f"_w{int(windows[name][0])}-{int(windows[name][1])}"
+                         f"_g{gamma:g}.png")
             for name in ("raw", "decon")}
     if camera.exists() and all(p.exists() for p in pngs.values()):
         print("reusing existing preflight frames", flush=True)
@@ -247,7 +263,7 @@ def preflight(tmp: Path, sources: dict, windows: dict, seed: int) -> None:
             w = windows[name]
             cmd = [sys.executable, str(Path(__file__).resolve()), "--seed", str(seed),
                    "--preflight", str(sources[name]), str(png), str(w[0]), str(w[1]),
-                   str(camera)]
+                   str(camera), "--gamma", str(gamma)]
             if replay:
                 cmd.append("--replay")
             rc = subprocess.run(cmd, check=False).returncode
@@ -382,17 +398,21 @@ def main(argv: list) -> int:
                     default=None, help="internal: the pull-back's world-um center")
     ap.add_argument("--no-zoom", action="store_true",
                     help="record the chapterless storyboard")
+    ap.add_argument("--gamma", type=float, default=1.0,
+                    help="the ONE gamma, applied to BOTH sides (symmetric, like the "
+                         "window); below 1 lifts the low end at a peak-holding ceiling")
     args = ap.parse_args(argv)
 
     if args.pass_args:
         src, out, lo, hi, camera = args.pass_args
         return record_pass(Path(src), Path(out), args.seed, (float(lo), float(hi)),
                            Path(camera), args.replay,
-                           zoom_center=args.zoom_center, home_center=args.home_center)
+                           zoom_center=args.zoom_center, home_center=args.home_center,
+                           gamma=args.gamma)
     if args.preflight_args:
         src, out, lo, hi, camera = args.preflight_args
         return preflight_pass(Path(src), Path(out), (float(lo), float(hi)), args.seed,
-                              Path(camera), args.replay)
+                              Path(camera), args.replay, gamma=args.gamma)
 
     from volume_figure import CONTRAST_561
 
@@ -401,21 +421,22 @@ def main(argv: list) -> int:
     # read as swapped: raw at 135 rendered punchier than decon at 95).
     window = tuple(args.window) if args.window else CONTRAST_561
     print(f"seed {args.seed}, decon {args.decon_source.name}, "
-          f"window {window} both sides", flush=True)
+          f"window {window} and gamma {args.gamma:g} both sides", flush=True)
     import tempfile
     tmp = Path(tempfile.gettempdir()) / "squidxplorer_comparison"
     tmp.mkdir(exist_ok=True)
     windows = {"raw": window, "decon": window}
     sources = {"raw": RAW_SET, "decon": args.decon_source}
-    # The reuse key carries the pass's identity: set name and window, so a cached
-    # recording from another scheme or another decon solve is never reused.
+    # The reuse key carries the pass's identity: set name, window and gamma, so a
+    # cached recording from another look or another decon solve is never reused.
     pass_out = {
         name: tmp / (f"{name}_seed{args.seed}_{sources[name].name[:24]}"
-                     f"_w{int(windows[name][0])}-{int(windows[name][1])}.mp4")
+                     f"_w{int(windows[name][0])}-{int(windows[name][1])}"
+                     f"_g{args.gamma:g}.mp4")
         for name in ("raw", "decon")}
     camera_json = pass_out["raw"].with_suffix(".camera.json")
 
-    preflight(tmp, sources, windows, args.seed)
+    preflight(tmp, sources, windows, args.seed, gamma=args.gamma)
     zoom_center = home_center = None
     if not args.no_zoom:
         zoom_center, home_center = compute_zoom_targets()
@@ -444,7 +465,7 @@ def main(argv: list) -> int:
         _kill_running()
         cmd = [sys.executable, str(Path(__file__).resolve()),
                "--seed", str(args.seed), "--pass", str(source), str(out),
-               str(w[0]), str(w[1]), str(camera_json)]
+               str(w[0]), str(w[1]), str(camera_json), "--gamma", str(args.gamma)]
         if zoom_center is not None:
             cmd += ["--zoom-center", *(str(v) for v in zoom_center),
                     "--home-center", *(str(v) for v in home_center)]
