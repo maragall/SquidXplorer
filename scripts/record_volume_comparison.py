@@ -239,9 +239,26 @@ def preflight(tmp: Path, sources: dict, windows: dict, seed: int) -> None:
     print(f"preflight PASS: structure bbox corners agree within {worst} px", flush=True)
 
 
+def _phase_shift(a, b) -> tuple:
+    """Whole-pixel phase-correlation shift (dy, dx) between two grayscale halves."""
+    import numpy as np
+
+    fa, fb = np.fft.rfft2(a), np.fft.rfft2(b)
+    x = fa * np.conj(fb)
+    x /= np.abs(x) + 1e-9
+    c = np.fft.irfft2(x, s=a.shape)
+    iy, ix = np.unravel_index(int(np.argmax(c)), c.shape)
+    dy = iy if iy <= a.shape[0] // 2 else iy - a.shape[0]
+    dx = ix if ix <= a.shape[1] // 2 else ix - a.shape[1]
+    return int(dy), int(dx)
+
+
 def _halves_check(path: Path, n: int) -> None:
-    """Decode frames across the orbit; each half's structure bbox must agree within
-    2 px, else the composed file is REFUSED before it replaces the destination."""
+    """Decode frames across the orbit; the halves' GEOMETRY must align within 1 px by
+    phase correlation, else the composed file is REFUSED before it replaces the
+    destination. Structure bboxes are reported for the eyeball, never gated: the two
+    sides' windows differ by design, so dim-edge visibility moves the bbox while a
+    camera mismatch moves the correlation peak."""
     import imageio.v2 as imageio
     import numpy as np
 
@@ -255,13 +272,13 @@ def _halves_check(path: Path, n: int) -> None:
         left = f[:, :CANVAS_PX[1]]
         right = f[:, CANVAS_PX[1] + DIVIDER_PX:]
         bl, br = _content_bbox(left, 32), _content_bbox(right, 32)
-        diff = max(abs(x - y) for x, y in zip(bl, br))
-        worst = max(worst, (diff, idx))
-        print(f"frame {idx}: structure bbox left {bl}, right {br}, "
-              f"max corner diff {diff} px", flush=True)
+        dy, dx = _phase_shift(left[..., 1].astype(float), right[..., 1].astype(float))
+        worst = max(worst, (max(abs(dy), abs(dx)), idx))
+        print(f"frame {idx}: phase shift (dy, dx) = ({dy}, {dx}); structure bbox "
+              f"left {bl}, right {br}", flush=True)
     reader.close()
-    if worst[0] > 2:
-        raise SystemExit(f"alignment REFUSAL: frame {worst[1]} halves disagree by "
+    if worst[0] > 1:
+        raise SystemExit(f"alignment REFUSAL: frame {worst[1]} halves are shifted by "
                          f"{worst[0]} px; the composed file is not delivered")
 
 
