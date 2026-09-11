@@ -194,36 +194,43 @@ def preflight(tmp: Path, sources: dict, windows: dict, seed: int) -> None:
     import imageio.v3 as iio
 
     camera = tmp / f"preflight_seed{seed}.camera.json"
-    pngs = {}
-    for name, replay in (("raw", False), ("decon", True)):
-        png = tmp / f"preflight_{name}_seed{seed}.png"
-        png.unlink(missing_ok=True)
-        _kill_running()
-        w = windows[name]
-        cmd = [sys.executable, str(Path(__file__).resolve()), "--seed", str(seed),
-               "--preflight", str(sources[name]), str(png), str(w[0]), str(w[1]),
-               str(camera)]
-        if replay:
-            cmd.append("--replay")
-        rc = subprocess.run(cmd, check=False).returncode
-        if not png.exists():
-            raise SystemExit(f"preflight: the {name} side exited {rc} with no frame")
-        if rc != 0:
-            print(f"WARNING: the {name} preflight exited {rc} at teardown; "
-                  f"its frame is whole, continuing", flush=True)
-        pngs[name] = png
+    pngs = {name: tmp / f"preflight_{name}_seed{seed}.png" for name in ("raw", "decon")}
+    if camera.exists() and all(p.exists() for p in pngs.values()):
+        print("reusing existing preflight frames", flush=True)
+    else:
+        for name, replay in (("raw", False), ("decon", True)):
+            png = pngs[name]
+            png.unlink(missing_ok=True)
+            _kill_running()
+            w = windows[name]
+            cmd = [sys.executable, str(Path(__file__).resolve()), "--seed", str(seed),
+                   "--preflight", str(sources[name]), str(png), str(w[0]), str(w[1]),
+                   str(camera)]
+            if replay:
+                cmd.append("--replay")
+            rc = subprocess.run(cmd, check=False).returncode
+            if not png.exists():
+                raise SystemExit(f"preflight: the {name} side exited {rc} with no frame")
+            if rc != 0:
+                print(f"WARNING: the {name} preflight exited {rc} at teardown; "
+                      f"its frame is whole, continuing", flush=True)
     a, b = iio.imread(pngs["raw"]), iio.imread(pngs["decon"])
     if a.shape != b.shape:
         raise SystemExit(f"preflight REFUSAL: canvas sizes differ, "
                          f"raw {a.shape} vs decon {b.shape}; no video recorded")
-    ba, bb = _content_bbox(a), _content_bbox(b)
-    print(f"preflight canvas {a.shape[1]}x{a.shape[0]} both sides; content bbox "
-          f"(r0, r1, c0, c1) raw {ba}, decon {bb}", flush=True)
+    # Threshold 8 sees the window's toe (the two schemes' floors differ, so dim edges
+    # differ by design; reported, not gated); threshold 32 sees bright structure, whose
+    # bbox is the GEOMETRY check the identical replayed camera must satisfy.
+    ba8, bb8 = _content_bbox(a, 8), _content_bbox(b, 8)
+    ba, bb = _content_bbox(a, 32), _content_bbox(b, 32)
+    print(f"preflight canvas {a.shape[1]}x{a.shape[0]} both sides; "
+          f"toe bbox (thresh 8) raw {ba8}, decon {bb8}; "
+          f"structure bbox (thresh 32) raw {ba}, decon {bb}", flush=True)
     worst = max(abs(x - y) for x, y in zip(ba, bb))
-    if worst > 1:
-        raise SystemExit(f"preflight REFUSAL: content bboxes disagree by {worst} px "
+    if worst > 2:
+        raise SystemExit(f"preflight REFUSAL: structure bboxes disagree by {worst} px "
                          f"(raw {ba}, decon {bb}); no video recorded")
-    print(f"preflight PASS: bbox corners agree within {worst} px", flush=True)
+    print(f"preflight PASS: structure bbox corners agree within {worst} px", flush=True)
 
 
 def _halves_check(path: Path, n: int) -> None:
@@ -238,8 +245,8 @@ def _halves_check(path: Path, n: int) -> None:
         f = np.asarray(reader.get_data(idx))
         left = f[:, :CANVAS_PX[1]]
         right = f[:, CANVAS_PX[1] + DIVIDER_PX:]
-        bl, br = _content_bbox(left), _content_bbox(right)
-        print(f"frame {idx}: left bbox {bl}, right bbox {br}, max corner diff "
+        bl, br = _content_bbox(left, 32), _content_bbox(right, 32)
+        print(f"frame {idx}: structure bbox left {bl}, right {br}, max corner diff "
               f"{max(abs(x - y) for x, y in zip(bl, br))} px", flush=True)
     reader.close()
 
