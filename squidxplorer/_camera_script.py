@@ -345,8 +345,9 @@ ORBIT_ZOOM = (1.1, 1.2)
 ORBIT_DWELL_S = (2.5, 3.5)
 ORBIT_WAYPOINT_DEG = 50.0
 
-#: The zoom chapter: glide to ~2.2x the orbit zoom (~2.5x fit), drift, pull back.
-ZOOM_GLIDE_FACTOR = 2.2
+#: The zoom chapter: glide to ~4.5x the orbit zoom (the approved 5x-still feel),
+#: drift, pull back. Julio, on 2.2: "Zoom level to weak though."
+ZOOM_GLIDE_FACTOR = 4.5
 ZOOM_DRIFT_DEG = 20.0
 
 
