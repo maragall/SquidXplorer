@@ -27,7 +27,7 @@ python scripts/decon_demo_sop.py --iterations 2 --seed 4242 --scheme shared
 | `--channel` | Fluorescence_561_nm_Ex | pinned today (the shared window is 561's) |
 | `--iterations` | 2 | decon iterations; names the output set `decon46_iN_...` |
 | `--seed` | 4242 | orbit seed; one seed, one storyboard, baked into the video name |
-| `--scheme` | floor | the video's ONE window, applied to BOTH sides: `shared` (135, 1109) or `floor` (95, 1109). Default floor, Julio's floor-down pick made symmetric: asymmetric windows bias apparent sharpness (verified by pixel-matching the halves when Julio read the sides as swapped - raw at 135 rendered punchier than decon at 95), so the comparison video never windows its sides differently. Peak-matching at p99.9 was rejected on look (both ceilings rise so far the scene darkens); per-side windows survive as a figures-only variant. |
+| `--scheme` | matched | `matched` (default, Julio-approved on the stills): each side's ceiling is its OWN 561 z-MIP p99.999 so peaks render equal (the CEO's intensity matching - on this set raw (264, 3681), decon-i2 (272, 7123)); each side's floor is its OWN auto-contrast rule floor (`_contrast.auto_contrast`: mode + 2 sigma vs the background population's percentile), which drops raw's out-of-focus veil; gamma 0.7 shared. Absolute cross-side brightness is intentionally NOT comparable under this scheme - that is the spec. `shared` (135, 1109) and `floor` (95, 1109) keep one window on both sides at gamma 1. |
 | `--out-dir` | ~/Desktop/decon_demo_figures | where the stills and figures land |
 
 ## Outputs

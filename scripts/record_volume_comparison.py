@@ -380,8 +380,14 @@ def main(argv: list) -> int:
                     help="the decon sibling acquisition for the right side")
     ap.add_argument("--window", type=float, nargs=2, metavar=("LO", "HI"),
                     default=None,
-                    help="the ONE comparison window, applied to BOTH sides; "
+                    help="one window applied to BOTH sides; "
                          "default: volume_figure's raw 561 window")
+    ap.add_argument("--raw-window", type=float, nargs=2, metavar=("LO", "HI"),
+                    default=None,
+                    help="matched scheme: the raw side's own window (overrides --window)")
+    ap.add_argument("--decon-window", type=float, nargs=2, metavar=("LO", "HI"),
+                    default=None,
+                    help="matched scheme: the decon side's own window (overrides --window)")
     ap.add_argument("--out", type=Path, default=None,
                     help="composed .mp4 path; default: Desktop, named by the seed")
     ap.add_argument("--pass", dest="pass_args", nargs=5,
@@ -416,16 +422,20 @@ def main(argv: list) -> int:
 
     from volume_figure import CONTRAST_561
 
-    # The rule: the comparison window is IDENTICAL on both sides. Asymmetric floors
-    # bias apparent sharpness (verified by pixel-matching the halves when the sides
-    # read as swapped: raw at 135 rendered punchier than decon at 95).
+    # The matched scheme (the CEO's intensity matching, Julio-approved): each side's
+    # window is its OWN - ceiling at its own MIP p99.999 so peaks render equal, floor
+    # its own auto-contrast rule floor - so absolute cross-side brightness is
+    # intentionally NOT comparable. Gamma stays shared. Without per-side flags, one
+    # window applies to both (the earlier symmetric schemes).
     window = tuple(args.window) if args.window else CONTRAST_561
-    print(f"seed {args.seed}, decon {args.decon_source.name}, "
-          f"window {window} and gamma {args.gamma:g} both sides", flush=True)
+    windows = {"raw": tuple(args.raw_window) if args.raw_window else window,
+               "decon": tuple(args.decon_window) if args.decon_window else window}
+    print(f"seed {args.seed}, decon {args.decon_source.name}, raw window "
+          f"{windows['raw']}, decon window {windows['decon']}, "
+          f"gamma {args.gamma:g} both sides", flush=True)
     import tempfile
     tmp = Path(tempfile.gettempdir()) / "squidxplorer_comparison"
     tmp.mkdir(exist_ok=True)
-    windows = {"raw": window, "decon": window}
     sources = {"raw": RAW_SET, "decon": args.decon_source}
     # The reuse key carries the pass's identity: set name, window and gamma, so a
     # cached recording from another look or another decon solve is never reused.

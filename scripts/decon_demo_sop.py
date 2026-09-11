@@ -28,10 +28,28 @@ sys.path.insert(0, str(HERE))
 DEFAULT_ACQ = Path("/Users/julioamaragall/Downloads/25x_C4_dz=3_2026-08-14_16-51-15.744692")
 DEFAULT_CHANNEL = "Fluorescence_561_nm_Ex"
 FLOOR_WINDOW = (95.0, 1109.0)
-# Julio's pick, then the symmetry rule: floor, (95, 1109) on BOTH sides. Asymmetric
-# windows bias apparent sharpness (verified by pixel-matching the halves when Julio
-# read the sides as swapped); a symmetric floor-down keeps his preference unbiased.
-DEFAULT_SCHEME = "floor"
+# Julio's approved look ("Looks great"): matched with rule floors. Each side's ceiling
+# is its OWN 561 z-MIP p99.999 so peaks render equal (the CEO's intensity matching);
+# each side's floor is its OWN auto-contrast rule floor (mode + 2 sigma vs the
+# background population's percentile, _contrast.auto_contrast), which drops raw's
+# out-of-focus veil; gamma MATCHED_GAMMA is shared. Absolute cross-side brightness is
+# intentionally NOT comparable under this scheme.
+DEFAULT_SCHEME = "matched"
+MATCHED_GAMMA = 0.7
+MATCHED_CEILING_PCT = 99.999
+
+
+def matched_window(source: Path) -> tuple:
+    """(floor, ceiling) for one side: its own rule floor, its own p99.999 ceiling."""
+    import numpy as np
+
+    from compare_figures import channel_mip
+
+    from squidxplorer._contrast import auto_contrast
+
+    mip = channel_mip(source)
+    lo, _hi = auto_contrast(mip)
+    return (float(lo), float(np.percentile(mip, MATCHED_CEILING_PCT)))
 
 
 def run_stage(name: str, cmd: list) -> None:
@@ -47,10 +65,12 @@ def main(argv: list) -> int:
     ap.add_argument("--channel", default=DEFAULT_CHANNEL)
     ap.add_argument("--iterations", type=int, default=2)
     ap.add_argument("--seed", type=int, default=4242)
-    ap.add_argument("--scheme", choices=("shared", "floor"), default=DEFAULT_SCHEME,
-                    help="the video's ONE window, both sides: shared (135, 1109) or "
-                         "floor (95, 1109). Per-side windows are figures-only: the "
-                         "comparison video never windows its sides differently")
+    ap.add_argument("--scheme", choices=("shared", "floor", "matched"),
+                    default=DEFAULT_SCHEME,
+                    help="matched (default, Julio-approved): each side's own rule "
+                         "floor and p99.999 ceiling, gamma 0.7 shared - peaks render "
+                         "equal, absolute cross-side brightness intentionally not "
+                         "comparable. shared/floor: one window both sides, gamma 1")
     ap.add_argument("--out-dir", type=Path,
                     default=Path.home() / "Desktop" / "decon_demo_figures")
     args = ap.parse_args(argv)
@@ -79,6 +99,14 @@ def main(argv: list) -> int:
                  "--decon-source", decon_set]
     if args.scheme == "floor":
         video_cmd += ["--window", str(FLOOR_WINDOW[0]), str(FLOOR_WINDOW[1])]
+    elif args.scheme == "matched":
+        raw_w, decon_w = matched_window(args.acquisition), matched_window(decon_set)
+        print(f"== video: matched windows raw {raw_w[0]:.0f}-{raw_w[1]:.0f}, "
+              f"decon {decon_w[0]:.0f}-{decon_w[1]:.0f}, gamma {MATCHED_GAMMA}",
+              flush=True)
+        video_cmd += ["--raw-window", *(str(v) for v in raw_w),
+                      "--decon-window", *(str(v) for v in decon_w),
+                      "--gamma", str(MATCHED_GAMMA)]
     run_stage("video", video_cmd)
     return 0
 
