@@ -592,10 +592,16 @@ class MosaicLayers:
         self._identity_changed()
 
     def _link_set(self, channel: str) -> list[Any]:
-        """The layers of *channel* that ``link_layers`` connects: one per identity."""
+        """The layers of *channel* that ``link_layers`` connects: one per identity.
+
+        A layer stamped ``contrast_unlinked`` (see :meth:`isolate_contrast`) stays out:
+        its pixels are a different quantity than the channel's planes, so the
+        one-window-per-channel rule does not describe it."""
         seen: set = set()
         out: list[Any] = []
         for ly in self._by_channel.get(channel) or []:
+            if bool((getattr(ly, "metadata", None) or {}).get("contrast_unlinked")):
+                continue
             k = key_of(ly)
             ident = (k.op, k.channel) if k is not None else id(ly)
             if ident in seen:
@@ -603,6 +609,27 @@ class MosaicLayers:
             seen.add(ident)
             out.append(ly)
         return out
+
+    def isolate_contrast(self, op: str) -> None:
+        """Take *op*'s layers OUT of the per-channel contrast link, permanently.
+
+        One window per channel holds for layers showing the SAME quantity; a QC band is
+        a max over hundreds of columns of ANOTHER axis, whose intensity distribution
+        sits far above the plane's - measured on G7 488 (2026-09-09): the XY-seeded
+        window rendered the bands saturated. The stamp keeps later registrations from
+        re-linking them; links already made at add time are cut here.
+        """
+        from napari.layers.utils._link_layers import unlink_layers
+
+        for ly in self.ours():
+            k = key_of(ly)
+            if k is None or k.op != str(op):
+                continue
+            ly.metadata = {**(getattr(ly, "metadata", None) or {}), "contrast_unlinked": True}
+            try:
+                unlink_layers([ly], ("contrast_limits",))
+            except Exception:                    # noqa: BLE001 - an unlink, never a failed open
+                pass
 
     @staticmethod
     def _widen_range(layer: Any, lo: float, hi: float) -> bool:

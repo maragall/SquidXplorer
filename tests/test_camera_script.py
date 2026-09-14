@@ -197,6 +197,94 @@ def test_the_demo_orbit_storyboard_holds_its_35_degree_cone(mosaic):
     assert azimuths == [30, 80, 130, 30]
 
 
+def test_random_orbit_steps_are_seed_reproducible_and_hold_the_envelope():
+    """One seed, one list (two calls equal); different seeds differ; every oblique pose's
+    tilt, checked by ``camera_basis``'s own view direction, lands on that script's drawn
+    tilt inside the 30-40 degree envelope; the shape is the proven demo storyboard."""
+    from squidxplorer._napari_view import camera_basis
+
+    a, b = CS.random_orbit_steps(4242), CS.random_orbit_steps(4242)
+    assert a == b, "one seed must yield one list"
+    assert CS.random_orbit_steps(7) != a, "different seeds must differ"
+
+    assert a[0].pose == "xy" and a[0].dwell_s == 2.5
+    assert [s.pose for s in a if isinstance(s.pose, str)] == ["xy", "xz", "yz"]
+    assert a[-1].pose == a[1].pose, "the script must return to its hero"
+
+    for seed in (4242, 7, 99):
+        steps = CS.random_orbit_steps(seed)
+        obliques = [s for s in steps if not isinstance(s.pose, str)]
+        tilts = []
+        for step in obliques:
+            forward = camera_basis(step.pose)[2]
+            tilts.append(np.degrees(np.arccos(min(1.0, abs(float(forward[0]))))))
+            lo, hi = CS.ORBIT_ZOOM
+            assert lo <= step.zoom <= hi
+        assert all(CS.ORBIT_TILT_DEG[0] - 0.2 <= t <= CS.ORBIT_TILT_DEG[1] + 0.2
+                   for t in tilts), tilts
+        assert max(tilts) - min(tilts) < 0.2, "the orbit must hold ONE drawn tilt"
+
+
+def test_the_zoom_chapter_is_data_targeted_and_optional():
+    """With a zoom_center the storyboard gains exactly three glide steps between the
+    orbit and XZ (glide in, drift with a hold, pull back toward home); the DATA passes
+    the target in, so one seed with one target is one list; with no target the list is
+    exactly the chapterless storyboard."""
+    base = CS.random_orbit_steps(4242)
+    target, home = (34.5, 800.0, 900.0), (34.5, 850.0, 850.0)
+    steps = CS.random_orbit_steps(4242, zoom_center=target, home_center=home)
+    assert steps == CS.random_orbit_steps(4242, zoom_center=target, home_center=home)
+    glides = [s for s in steps if s.glide]
+    assert len(glides) == 3 and [s for s in steps if not s.glide] == base
+    xz = next(i for i, s in enumerate(steps) if s.pose == "xz")
+    assert all(steps[xz - 1 - k].glide for k in range(3)), "the chapter precedes XZ"
+    zoom_in, drift, pull = glides
+    assert zoom_in.center == target and zoom_in.zoom == CS.ZOOM_GLIDE_FACTOR
+    assert drift.center is None and drift.zoom is None and drift.dwell_s == 1.0
+    assert pull.center == home and pull.zoom == 1.0 / CS.ZOOM_GLIDE_FACTOR
+    assert drift.pose != zoom_in.pose, "the drift must move the azimuth"
+
+
+def test_a_glide_step_interpolates_center_and_zoom_without_reframing(mosaic):
+    """The glide's transition walks center linearly and zoom geometrically to the
+    target, its final write lands exactly, and it never re-frames (the fit snap would
+    reset both); a later plain step still re-frames as ever."""
+    shell, vol = _volume_shell(mosaic)
+    vol.refresh = lambda *a, **k: None
+    CS.run_camera_script(shell, [CS.Step("xy")],
+                         wait_ready=lambda _w: True, sleep=lambda _s: None)
+    cam = vol._viewer.camera
+    c0, z0 = tuple(cam.center), float(cam.zoom)
+    target = (c0[0], c0[1] + 40.0, c0[2] - 20.0)
+    seen = []
+
+    def capture():
+        seen.append((tuple(cam.center), float(cam.zoom)))
+        return np.zeros((4, 4, 3), np.uint8)
+
+    def writer(frames, out_path, fps):
+        return str(out_path), sum(1 for _ in frames)
+
+    CS.run_camera_script(
+        shell, [CS.Step("xy"),
+                CS.Step("xy", dwell_s=0.5, transition_s=1.0, glide=True,
+                        center=target, zoom=2.0)],
+        out_path="glide.mp4", fps=10, capture=capture,
+        wait_ready=lambda _w: True, writer=writer)
+
+    assert tuple(cam.center) == pytest.approx(target)
+    assert float(cam.zoom) == pytest.approx(z0 * 2.0)
+    ys = [c[1] for c, _z in seen[10:]]
+    zs = [z for _c, z in seen[10:]]
+    assert ys == sorted(ys) and zs == sorted(zs), "the glide must be monotone"
+    assert zs[-1] == pytest.approx(z0 * 2.0)
+    # A plain step after the chapter re-frames: fit resets center and zoom.
+    CS.run_camera_script(shell, [CS.Step("xy")],
+                         wait_ready=lambda _w: True, sleep=lambda _s: None)
+    assert tuple(cam.center) == pytest.approx(c0)
+    assert float(cam.zoom) == pytest.approx(z0)
+
+
 def _comparison_scene(mosaic, op="decon"):
     """Raw flat layers AND an operator volume in ONE viewer: both identities live."""
     from .conftest import build_flat_scene
