@@ -515,6 +515,13 @@ class RegionViewer(QMainWindow):
         controls, tree = take() if callable(take) else (None, None)
         if controls is not None:
             lv.addWidget(controls, 0)
+        # NUMERIC contrast limits under napari's slider (Nick, ValidTX: "need numbers here,
+        # not just blank sliders"; napari 0.6.6 hides them in a right-click popup).
+        from squidxplorer._contrast_fields import ContrastFields
+
+        self._contrast_fields = ContrastFields(getattr(pane, "mosaic", None))
+        self._contrast_fields.bind()
+        lv.addWidget(self._contrast_fields, 0)
         if tree is not None:
             tree.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
             lv.addWidget(tree, 1)
