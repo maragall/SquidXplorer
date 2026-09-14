@@ -606,14 +606,41 @@ def test_the_3d_psf_is_a_normalised_axially_centred_kernel():
     assert centroid == pytest.approx(psf.shape[0] // 2, abs=0.05)
 
 
+def test_the_psf_lateral_extent_covers_the_defocus_cone_for_a_deep_stack():
+    """The modelled PSF's lateral half-width covers the widefield defocus cone across the
+    stack's own z range, and the declared halo tracks it. petakit's in-focus rule alone
+    (6 Airy radii) truncated the 25x set's cone ~40x: a 21 px kernel read the haze as DC,
+    so RL amplified peaks (x3.2) while the background mean ROSE."""
+    import math
+
+    from squidxplorer._decon import lateral_halo_px
+
+    deep = OpticsParams(na=0.5, wavelength_um=0.5, dxy_um=0.5, dz_um=2.0, nz=20)
+    shallow = OpticsParams(na=0.5, wavelength_um=0.5, dxy_um=0.5, dz_um=2.0, nz=4)
+    cone_px = ((deep.nz / 2) * deep.dz_um
+               * math.tan(math.asin(deep.na / deep.immersion_index)) / deep.dxy_um)
+    psf = make_psf(deep)
+    assert psf.shape[1] == psf.shape[2]
+    # The known cone: 23.1 px here, where the in-focus rule alone models 8 px.
+    assert psf.shape[1] // 2 >= math.ceil(cone_px)
+    assert psf.shape[1] > make_psf(shallow).shape[1]
+    # The halo integrates the (untruncated) model, so it now tracks the cone too.
+    assert lateral_halo_px(deep) >= cone_px
+    assert lateral_halo_px(deep) > lateral_halo_px(shallow)
+
+
 def test_the_volume_solve_moves_light_back_to_its_own_plane():
     """Blur a known sparse 3-D bead phantom with the EXACT PSF, restore with the volume solve, and measure both lateral fit (RMSE) and AXIAL specificity"""
     nz = _PSF3D_OPTICS.nz
     psf = make_psf(_PSF3D_OPTICS)
+    # The frame must exceed the defocus-cone PSF's lateral support, else the blur itself
+    # throws light out of frame and no solve can bring it back.
+    size, lo, hi = 128, 24, 104
+    assert size > psf.shape[1]
     rng = np.random.default_rng(1)
-    truth = np.full((nz, 64, 64), 20.0, np.float32)
+    truth = np.full((nz, size, size), 20.0, np.float32)
     for _ in range(12):
-        z, y, x = rng.integers(2, nz - 2), rng.integers(8, 56), rng.integers(8, 56)
+        z, y, x = rng.integers(2, nz - 2), rng.integers(lo, hi), rng.integers(lo, hi)
         truth[z, y, x] += rng.uniform(500, 3000)
     blurred = scipy_signal.fftconvolve(truth, psf, mode="same").astype(np.float32)
 
@@ -624,11 +651,14 @@ def test_the_volume_solve_moves_light_back_to_its_own_plane():
         return float(np.sqrt(np.mean((np.asarray(a, np.float64)
                                       - np.asarray(b, np.float64)) ** 2)))
 
-    assert rmse(restored, truth) < 0.65 * rmse(blurred, truth), (
+    # The honest widefield PSF carries ~44% of a point's energy OUTSIDE this 8-plane
+    # stack; that light is never recorded, so restoration has a floor the truncated
+    # kernel did not show. Measured: ratio 0.81 at 10 iterations, plateau 0.71 at 40.
+    assert rmse(restored, truth) < 0.85 * rmse(blurred, truth), (
         f"RMSE vs truth barely moved: blurred {rmse(blurred, truth):.1f}, "
         f"restored {rmse(restored, truth):.1f}")
 
-    beads = [(z, y, x) for z in range(2, nz - 2) for y in range(8, 56) for x in range(8, 56)
+    beads = [(z, y, x) for z in range(2, nz - 2) for y in range(lo, hi) for x in range(lo, hi)
              if truth[z, y, x] > 100]
     assert beads, "the phantom lost its beads; the test's premise is stale"
 

@@ -20,6 +20,7 @@ re-solve at that k, because the stacks are not kept; the Preview button is that 
 
 from __future__ import annotations
 
+import math
 import threading
 from dataclasses import dataclass
 from functools import lru_cache
@@ -147,15 +148,47 @@ DEFAULT_OPTICS = OpticsParams(na=0.3, wavelength_um=0.525, dxy_um=7.52 / 10.0, d
 _PSF_CACHE_SIZE = 32
 
 
+#: petakit's own in-focus lateral margin: 6 Airy radii each side (compute_psf_size's rule).
+_AIRY_MARGIN_RADII = 6.0
+
+
+@lru_cache(maxsize=_PSF_CACHE_SIZE)
+def lateral_support_px(optics: OpticsParams) -> int:
+    """The lateral half-width (px) an honest PSF needs for a z stack.
+
+    The widefield defocus cone across the stack's OWN z range: radius
+    (nz/2)*dz*tan(asin(na/ni)) plus petakit's in-focus Airy margin, capped at the radius
+    holding :data:`HALO_ENERGY` of the cone model's z-integrated energy. The cap is computed
+    on the UNTRUNCATED geometry (each defocused plane spreads unit energy over its cone
+    disk), never by integrating an already-truncated model: petakit's in-focus rule alone
+    truncated the 25x set's cone ~40x, so RL read the haze as DC and amplified peaks
+    instead of draining haze into them.
+    """
+    sin_t = min(optics.na / optics.immersion_index, 1.0 - 1e-6)
+    tan_t = sin_t / math.sqrt(1.0 - sin_t * sin_t)
+    airy_um = _AIRY_MARGIN_RADII * 0.61 * optics.wavelength_um / optics.na
+    cone_um = airy_um + np.linspace(0.0, (optics.nz / 2.0) * optics.dz_um, 257) * tan_t
+    radius_um = np.linspace(0.0, float(cone_um[-1]), 4097)
+    energy = np.minimum(1.0, (radius_um[:, None] / cone_um[None, :]) ** 2).mean(axis=1)
+    at = radius_um[min(int(np.searchsorted(energy, HALO_ENERGY)), radius_um.size - 1)]
+    return int(math.ceil(float(at) / optics.dxy_um))
+
+
 @lru_cache(maxsize=_PSF_CACHE_SIZE)
 def make_psf(optics: OpticsParams) -> np.ndarray:
-    """The 3-D vectorial PSF for *optics*, ``(Z, Y, X)`` float32 normalised to sum 1."""
+    """The 3-D vectorial PSF for *optics*, ``(Z, Y, X)`` float32 normalised to sum 1.
+
+    Lateral size is the LARGER of petakit's in-focus rule (6 Airy radii each side) and the
+    defocus-cone support (:func:`lateral_support_px`); the solve's OTF embed center-crops a
+    PSF wider or deeper than the volume, so the honest model costs no new mechanism there.
+    """
     petakit = _petakit()
     ni = optics.immersion_index
     nz_psf, nxy_psf = petakit.compute_psf_size(
         optics.nz, optics.dxy_um, optics.dz_um,
         wavelength=optics.wavelength_um, na=optics.na, ni=ni,
     )
+    nxy_psf = max(int(nxy_psf), 2 * lateral_support_px(optics) + 1)
     psf = petakit.generate_psf(
         nz=nz_psf, nxy=nxy_psf,
         dxy=optics.dxy_um, dz=optics.dz_um,
@@ -170,6 +203,8 @@ def make_psf(optics: OpticsParams) -> np.ndarray:
 #: rule was written, on 25 point sources blurred with the real PSF at G7's optics (nz 5 and
 #: 15, CPU and MPS): the 99.9% radius is 9.9 px, halo 0 differs from the whole-field solve by
 #: up to 5 counts, every halo >= 4 px is within 1 count. ``tests/test_sub_fov_decon.py`` pins.
+#: Since the defocus-cone support (2026-09-14) the integrated model is untruncated, so a
+#: deep stack's halo honestly tracks the cone; ``tests/test_decon.py`` pins that tracking.
 HALO_ENERGY: float = 0.999
 HALO_MIN_PX: int = 8
 
@@ -179,7 +214,13 @@ def lateral_halo_px(optics: OpticsParams) -> int:
     """The lateral radius (px) holding :data:`HALO_ENERGY` of the modelled PSF's energy, at
     least :data:`HALO_MIN_PX`: what a windowed solve pads with so its interior equals the
     whole-field solve."""
-    lateral = make_psf(optics).sum(axis=0)
+    psf = make_psf(optics)
+    if psf.shape[0] > optics.nz:
+        # The solve's OTF embed center-crops z to the volume's depth (_otf_source); planes
+        # beyond that never reach a pixel, so integrating them would inflate the halo.
+        start = (psf.shape[0] - optics.nz) // 2
+        psf = psf[start:start + optics.nz]
+    lateral = psf.sum(axis=0)
     cy, cx = np.unravel_index(int(np.argmax(lateral)), lateral.shape)
     yy, xx = np.indices(lateral.shape)
     radius = np.hypot(yy - cy, xx - cx).ravel()
