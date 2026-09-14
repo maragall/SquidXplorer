@@ -104,6 +104,11 @@ class ViewDeck(QMainWindow):
         act_open = file_menu.addAction("&Open Acquisition…")
         act_open.setShortcut(QKeySequence.StandardKey.Open)
         act_open.triggered.connect(lambda *_: self._plate_call("_open_acquisition_dialog"))
+        # Bulk export (Nick, ValidTX): a menu action, not a chip — the chip grid is guarded.
+        act_export = file_menu.addAction("&Export PNGs of Selected Wells…")
+        act_export.setToolTip("One PNG per selected well, all under the focused view's "
+                              "contrast, colors and z, so the files compare like for like.")
+        act_export.triggered.connect(lambda *_: self._plate_call("_export_selected_wells_pngs"))
         act_quit = file_menu.addAction("&Quit")
         act_quit.setShortcut(QKeySequence.StandardKey.Quit)
         act_quit.triggered.connect(lambda *_: self._plate_call("close"))

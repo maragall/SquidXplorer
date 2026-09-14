@@ -1201,23 +1201,11 @@ class RegionViewer(QMainWindow):
             self._say(f"png: {problem}")
             return
 
-        from squidxplorer._napari_view import colormap_hue_rgb, colormap_mid_rgb, full_res_level
+        from squidxplorer._napari_view import full_res_level
 
         z_now = self._z_slider_index()
-        channels = []
-        for c in (self._meta or {}).get("channels", []):
-            # Per CHANNEL, the topmost VISIBLE layer: the one-lit-op rule is per channel, so
-            # the screen legitimately composites raw beside a result. One op's walk here
-            # silently dropped the raw channels of a mixed scene from the export.
-            layer = mosaic.top_visible_layer(c["name"])
-            if layer is None:
-                continue
-            clim = getattr(layer, "contrast_limits", None)
-            if clim is None:                      # a labels layer has no contrast window
-                continue
-            rgb = colormap_hue_rgb(layer) or colormap_mid_rgb(layer) or (255, 255, 255)
-            channels.append(PngChannel(c["name"], layer.data, tuple(clim), tuple(rgb),
-                                       z_index=z_now))
+        channels = [PngChannel(name, layer.data, clim, rgb, z_index=z_now)
+                    for name, layer, clim, rgb in self._visible_channel_looks()]
         if not channels:
             self._say("png: no visible intensity channel to export.")
             return
@@ -1254,6 +1242,29 @@ class RegionViewer(QMainWindow):
             on_done=self._on_png_done,
             on_problem=self._on_png_failed,
             on_finished=lambda: self._forget_png_worker(w))
+
+    def _visible_channel_looks(self) -> list:
+        """Per CHANNEL, the topmost VISIBLE layer's look: ``[(name, layer, clim, rgb)]``.
+
+        The one-lit-op rule is per channel, so the screen legitimately composites raw beside
+        a result; one op's walk here silently dropped the raw channels of a mixed scene from
+        the export. THE one collection loop, shared by this view's PNG and the plate's bulk
+        export (which takes name/clim/rgb as the latched look for every well).
+        """
+        from squidxplorer._napari_view import colormap_hue_rgb, colormap_mid_rgb
+
+        mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
+        out = []
+        for c in (self._meta or {}).get("channels", []):
+            layer = mosaic.top_visible_layer(c["name"]) if mosaic is not None else None
+            if layer is None:
+                continue
+            clim = getattr(layer, "contrast_limits", None)
+            if clim is None:                      # a labels layer has no contrast window
+                continue
+            rgb = colormap_hue_rgb(layer) or colormap_mid_rgb(layer) or (255, 255, 255)
+            out.append((c["name"], layer, tuple(clim), tuple(rgb)))
+        return out
 
     def _crop_channels_to_fov(self, channels: list, region: str, fov: int) -> tuple:
         """Crop each channel's data to one field's box, for a FOVs view's export.

@@ -619,6 +619,68 @@ def _full_res_plane(data, z_index):
     return plane
 
 
+class _BulkPngWorker(QThread):
+    """Sequential bulk PNG export: one file per selected well (or chosen field), every one
+    rendered under the SAME latched look, so the files are cross-comparable slide to slide.
+
+    Fuses each well's RAW mosaic off the reader (`fuse_region_mosaic`, the preview placement)
+    per visible channel, then rides the one per-channel compositor (`render_view_png`). A well
+    that cannot fuse is a named skip, never a lost run.
+    """
+
+    done = Signal(int, int, str, float)        # (n written, n asked, out dir, seconds)
+    problem = Signal(str)                      # a named failure, never a silent no-op
+
+    def __init__(self, reader, meta, jobs, looks, *, z_level, time_point, out_dir, acq,
+                 op="raw", parent=None):
+        super().__init__(parent)
+        self._reader, self._meta = reader, dict(meta)
+        self._jobs = list(jobs)                # [(region, fov | None)]; None = the whole well
+        self._looks = list(looks)              # [(channel, clim, rgb)] — the view's latched look
+        self._z = int(z_level)
+        self._t = int(time_point)
+        self._out_dir = str(out_dir)
+        self._acq, self._op = str(acq), str(op)
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def _render_one(self, region, fov):
+        from squidxplorer._mosaic_source import fuse_region_mosaic
+        from squidxplorer._png import PngChannel, render_view_png, write_png
+
+        channels = []
+        for name, clim, rgb in self._looks:
+            fused = fuse_region_mosaic(self._reader, self._meta, region, name,
+                                       z_level=self._z, time_point=self._t,
+                                       fovs=None if fov is None else [int(fov)])
+            if fused is None:
+                raise ValueError(f"{region}/{name}: no stage positions or pixel size to place a mosaic")
+            channels.append(PngChannel(name, fused[0], tuple(clim), tuple(rgb), z_index=None))
+        stem = (f"{self._acq}_{region}_{self._op}" if fov is None
+                else f"{self._acq}_{region}_fov{int(fov)}_{self._op}")
+        rgb_img, _step = render_view_png(channels)
+        return write_png(rgb_img, Path(self._out_dir) / f"{stem}.png")
+
+    def run(self):                                    # pragma: no cover - Qt thread
+        started = time.perf_counter()
+        written = 0
+        for region, fov in self._jobs:
+            if self._stop.is_set():
+                break
+            try:
+                path = self._render_one(region, fov)
+            except Exception as exc:                  # noqa: BLE001 - NAMED per-well skip
+                log.error("bulk png: %s%s failed (%s: %s)", region,
+                          "" if fov is None else f" fov {fov}", type(exc).__name__, exc)
+                continue
+            written += 1
+            log.info("bulk png: wrote %s", path)
+        self.done.emit(int(written), len(self._jobs), self._out_dir,
+                       float(time.perf_counter() - started))
+
+
 class _PreviewWorker(QThread):
     """Fast RAW plate preview: one representative z-plane per channel per FOV, composited per cell."""
 
