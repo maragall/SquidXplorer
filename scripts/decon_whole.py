@@ -13,11 +13,13 @@ Output is a sibling acquisition in the source's own OME-TIFF shape.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 import os
 import shutil
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -73,16 +75,26 @@ def _release_gpu() -> None:
 
 
 def solve_tiled(stack: np.ndarray, optics, halo: int, grid: int,
-                iterations: int) -> np.ndarray:
-    """Tile stack (Z, Y, X) laterally, solve each window whole in z, paste trimmed cores."""
+                iterations: int, backends: Counter) -> np.ndarray:
+    """Tile stack (Z, Y, X) laterally, solve each window whole in z, paste trimmed cores.
+
+    *backends* tallies, per window, the device ``select_device`` answers for that window's
+    exact expanded shape — the same call ``deconvolve_stack`` makes, so the tally IS the
+    backend each window ran on (edge windows lose halo at the frame edge, so their shapes,
+    and therefore the smoothness guard's answer, can differ from interior ones).
+    """
     nz, height, width = stack.shape
     out = np.empty_like(stack)
+    psf_shape = _decon.make_psf(optics).shape
     rows, cols = tile_edges(height, grid), tile_edges(width, grid)
     for i in range(grid):
         for j in range(grid):
             r0, r1, c0, c1 = rows[i], rows[i + 1], cols[j], cols[j + 1]
             er0, er1 = max(0, r0 - halo), min(height, r1 + halo)
             ec0, ec1 = max(0, c0 - halo), min(width, c1 + halo)
+            window_shape = (nz, er1 - er0, ec1 - ec0)
+            device = _decon_gpu.select_device(window_shape, gpu=True, psf_shape=psf_shape)
+            backends[device or "cpu"] += 1
             solved = _decon.deconvolve_stack(
                 stack[:, er0:er1, ec0:ec1], optics, iterations, project=False)
             out[:, r0:r1, c0:c1] = solved[:, r0 - er0:r1 - er0, c0 - ec0:c1 - ec0]
@@ -90,8 +102,12 @@ def solve_tiled(stack: np.ndarray, optics, halo: int, grid: int,
     return out
 
 
-def channel_plans(source: Path, meta: dict) -> dict:
-    """{channel: (optics, halo) or None for copy-through} with z bound to the stack depth."""
+def channel_plans(source: Path, meta: dict, overrides: dict | None = None) -> dict:
+    """{channel: (optics, halo) or None for copy-through} with z bound to the stack depth.
+
+    *overrides* maps OpticsParams field names (na, dxy_um, ni) to explicit values that
+    replace the acquisition record's, for a record known to be wrong or incomplete.
+    """
     plans = {}
     for ch in meta["channels"]:
         name = ch["name"]
@@ -102,9 +118,11 @@ def channel_plans(source: Path, meta: dict) -> dict:
                      name, exc)
             plans[name] = None
             continue
+        changes = dict(overrides or {})
         if o.nz != meta["n_z"]:
-            o = _decon.OpticsParams(o.na, o.wavelength_um, o.dxy_um, o.dz_um,
-                                    meta["n_z"], o.ni)
+            changes["nz"] = meta["n_z"]
+        if changes:
+            o = dataclasses.replace(o, **changes)
         plans[name] = (o, _decon.lateral_halo_px(o))
     return plans
 
@@ -133,6 +151,12 @@ def main(argv=None) -> int:
                         help="output-name suffix, e.g. _i2 -> decon46_i2_<source>")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the tile plan and estimates, solve nothing")
+    parser.add_argument("--na", type=float, default=None,
+                        help="override the recorded numerical aperture")
+    parser.add_argument("--dxy-um", type=float, default=None,
+                        help="override the recorded lateral pixel size (um)")
+    parser.add_argument("--ni", type=float, default=None,
+                        help="override the immersion refractive index")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
@@ -145,7 +169,12 @@ def main(argv=None) -> int:
     meta = reader.metadata
     n_z, (height, width) = meta["n_z"], meta["frame_shape"]
     names = [c["name"] for c in meta["channels"]]
-    plans = channel_plans(source, meta)
+    overrides = {k: v for k, v in
+                 (("na", args.na), ("dxy_um", args.dxy_um), ("ni", args.ni))
+                 if v is not None}
+    if overrides:
+        log.info("optics overrides: %s", ", ".join(f"{k}={v}" for k, v in overrides.items()))
+    plans = channel_plans(source, meta, overrides)
     solved_plans = {n: p for n, p in plans.items() if p is not None}
     if not solved_plans:
         raise SystemExit("every channel copies through; nothing to deconvolve")
@@ -209,10 +238,13 @@ def main(argv=None) -> int:
                     continue
                 optics, halo = plans[name]
                 t1 = time.monotonic()
-                field[:, c] = solve_tiled(stack, optics, halo, grid, args.iterations)
+                backends: Counter = Counter()
+                field[:, c] = solve_tiled(stack, optics, halo, grid, args.iterations,
+                                          backends)
                 field.flush()
-                log.info("%s/%s %s: %d window(s) solved in %.1f s",
-                         region, fov, name, grid * grid, time.monotonic() - t1)
+                log.info("%s/%s %s: %d window(s) solved in %.1f s (backends: %s)",
+                         region, fov, name, grid * grid, time.monotonic() - t1,
+                         ", ".join(f"{n} {d}" for d, n in sorted(backends.items())))
             del field
     log.info("done: %d field(s) in %.1f s, output %s",
              n_fields, time.monotonic() - t0, out_dir)
