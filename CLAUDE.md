@@ -1515,6 +1515,39 @@ net -108 lines, the deletion IS the correction:
 - Known and accepted: on an nz > 1 acquisition the raw crop contributes its own z slider
   beside the iteration slider.
 
+## ValidTX slide workflow, completed (2026-09-22, branch validtx-bulk)
+
+Nick Fiore's clarification of the 2026-09-04 requests, taken end to end (Julio approved the
+merge without a hand test; the GL look of the new widgets is a hand check owed):
+
+- **Numeric contrast limits** ("need numbers here, not just blank sliders"):
+  `_contrast_fields.ContrastFields`, one plain row under napari's layer-controls block in the
+  left column - two editable lo/hi fields following the ACTIVE layer live (its own
+  contrast_limits event), committing typed values on Enter through
+  `MosaicLayers.widen_contrast_range` + `set_contrast`, so the identity mirror, the
+  never-narrows range rule and the plate's follow tap all hold. napari 0.6.6 was measured
+  first: its only numeric readout lives in the right-click popup, so the row was built, not
+  wired. A non-intensity layer blanks and disables the row, never hides it.
+- **Bulk PNG export from selected wells** (his "is bulk export a current functionality?" -
+  it was not): a deck File-menu action "Export PNGs of Selected Wells..." (the chip grid is
+  guarded; the menu equality pin in test_hero_declutter now includes it as the sanctioned
+  addition). `PlateWindow._export_selected_wells_pngs` -> `_workers._BulkPngWorker`:
+  sequential, one directory prompt, per well one raw mosaic per visible channel
+  (`fuse_region_mosaic(fovs=)` - THE {region: [fov, ...]} spelling; a strict FOV subset
+  exports one PNG per chosen field) composited through the existing `render_view_png` path
+  under ONE (clim, rgb, z) snapshot from the focused view, so every file is cross-comparable
+  (the PowerPoint contract, stated in the tooltip and log lines). Refusals by name; a failed
+  well is a named skip. The export is RAW pixels under the view's look on purpose: operator
+  pixels per well are the Run-on-plate flow, and the launch line says so when the focused
+  view shows an operator.
+- **n=1 phase beside a z-stack** (his acquisition-change ask): the app side already held and
+  is pinned (`tests/test_mixed_depth.py`): `_full_res_plane` passes a bare plane through and
+  clamps a 1-deep stack, `render_view_png` takes each channel at its own z_index, a mixed
+  scene steps z with the single-plane channel lit. NOT ours: per-channel Nz is not
+  representable in the acquisition metadata (one z_levels list for all channels) - a Squid
+  schema declaration must come first; the reader clamp behind the same contract is then
+  small. Filed for hongquan's team.
+
 ## Agent skills
 
 ### Issue tracker
