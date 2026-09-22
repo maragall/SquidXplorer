@@ -125,6 +125,7 @@ class BrickedVolume:
         self._offset = (r0, c0)
 
         self._layers: dict = {}          # (channel, brick.key) -> napari layer
+        self._box = None                 # the white extent box; one per open, down with close()
         self._steps: dict = {}           # (channel, brick.key) -> the step that layer holds
         self._epoch = 0
         self._step = 1
@@ -185,6 +186,7 @@ class BrickedVolume:
             self._viewer.dims.ndisplay = 3
         except Exception as exc:                        # noqa: BLE001 - named, never silent
             self._say(f"3D: could not switch this pane to 3D ({exc}).")
+        self._add_box()
         # Frame the ROI before the first cull: a fresh camera at the world origin culls every
         # brick out, and reset_view cannot help while there are no layers yet.
         self._frame_camera()
@@ -194,6 +196,22 @@ class BrickedVolume:
     def frame(self) -> None:
         """Re-point the camera at this volume's own box: the snap chips' "fit"."""
         self._frame_camera()
+
+    def _add_box(self) -> None:
+        """The volume's white extent box (gallery-view's bounds convention): the camera's
+        own framing extent, so ROI and full-FOV volumes alike read at scale in captures."""
+        from squidxplorer._napari3d import add_bounding_box_layer
+
+        r0, r1, c0, c1 = self._window
+        size = (self._nz * self._scale[0],
+                (r1 - r0) * self._scale[1], (c1 - c0) * self._scale[2])
+        try:
+            self._adding_brick = True               # our own chrome is not an "arrival"
+            self._box = add_bounding_box_layer(self._viewer, self._origin_um, size)
+        except Exception:                           # noqa: BLE001 - the box is cosmetic
+            self._box = None
+        finally:
+            self._adding_brick = False
 
     def _frame_camera(self) -> None:
         """Point the camera at this ROI and zoom so the whole box fits the canvas.
@@ -257,6 +275,12 @@ class BrickedVolume:
         self._loader.wait(2000)
         for key in list(self._layers):
             self._drop(key)
+        box, self._box = self._box, None
+        if box is not None:
+            try:
+                self._viewer.layers.remove(box)
+            except Exception:                           # noqa: BLE001 - already gone
+                pass
         try:
             self._viewer.dims.ndisplay = 2
         except Exception:                               # noqa: BLE001

@@ -646,3 +646,30 @@ def test_the_bricked_volume_frames_its_roi_through_the_one_camera_rule():
     assert vol._viewer.camera.zoom != pytest.approx(crossed)
 
     assert vol._viewer.camera.center == pytest.approx((5.0, 4500.0, 9250.0))
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# The volume's white extent box (hongquan, 2026-09-22): gallery-view's bounds convention.
+# ══════════════════════════════════════════════════════════════════════════════════════════
+
+def test_a_volume_scene_carries_the_white_extent_box_and_close_removes_it(mosaic):
+    """Every volume tab draws ONE white box over the volume's own extent (origin + window at
+    the acquisition's pitch, z scaled by dz), and closing the volume takes it down."""
+    import numpy as np
+
+    from squidxplorer._napari3d import BOX_LAYER_NAME
+
+    vol = _opened_volume(mosaic, ("c0",))
+    boxes = [ly for ly in mosaic.model.layers if ly.name == BOX_LAYER_NAME]
+    assert len(boxes) == 1, f"expected exactly one extent box, found {len(boxes)}"
+    box = boxes[0]
+    pts = np.vstack([np.asarray(s) for s in box.data])
+    # _opened_volume: origin (0,0,0), 8x8 px window at 0.75 um/px, nz=1 at dz 1.5.
+    assert np.allclose(pts.min(axis=0), (0.0, 0.0, 0.0))
+    assert np.allclose(pts.max(axis=0), (1.5, 6.0, 6.0)), (
+        f"the box does not span the volume's extent: {pts.max(axis=0)}")
+    assert np.allclose(np.asarray(box.edge_color)[:, :3], 1.0), "the box lines are white"
+
+    vol.close()
+    assert not any(ly.name == BOX_LAYER_NAME for ly in mosaic.model.layers), (
+        "closing the volume left its box behind")
