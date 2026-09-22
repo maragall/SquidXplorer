@@ -654,25 +654,25 @@ class RegionViewer(QMainWindow):
         # separate tabs for the 3d view."): a 2D tab IS 2D and a 3D tab IS 3D; nothing
         # switches modes in place. The chip and `_view_roi_2d` are deleted whole.
         self._btn_3d = self._chip("3D", "Open this view in 3D as a new tab.", self._open_3d)
-        self._btn_focus = self._chip("⌖ focus", "Jump the z-slider to the sharpest plane.",
+        self._btn_focus = self._chip("focus", "Jump the z-slider to the sharpest plane.",
                                      self._focus_reference_plane)
         # The "▣ plate" chip is GONE (UI feedback 2026-08-17): the working layout keeps the plate
         # BESIDE the views, so "bring the plate forward" stopped being a job. The ⚙ controls chip
         # is built in `operator_panel()` now — the whole per-window operator surface lives in the
         # views window's collapsible dock (2026-08-19).
         self._btn_record = self._chip(
-            "⏺ movie", "Export this view as an .mp4 over its time or z axis.",
+            "movie", "Export this view as an .mp4 over its time or z axis.",
             self._record_movie)
         # The PNG export renders the DATA, never the canvas: a screenshot is screen resolution,
         # this is the visible layer's own pixels at native pitch (Julio: "a high-resolution
         # (i.e., zoom-able, high DPI) PNG for powerpoints").
         self._btn_png = self._chip(
-            "⎙ png", "Save this view as a full-resolution PNG.", self._save_png)
+            "png", "Save this view as a full-resolution PNG.", self._save_png)
         # FOVs. The ROI chips beside it are for a box the user draws; this is for the boxes the
         # ACQUISITION already drew. On a sparse run — the AF sweep sets are 16 fields at 7x the
         # field pitch, so 3% of the mosaic is data — checking focus means visiting each field, and
         # doing that by wheel-zoom is the complaint this answers.
-        self._btn_fovs = self._chip("⊞ FOVs", self._FOVS_TIP, self._open_fovs)
+        self._btn_fovs = self._chip("FOVs", self._FOVS_TIP, self._open_fovs)
         # ONE grid of every chip, all visible, nothing folded (Julio, 2026-08-25: "the GUI
         # buttons such as 'FOVs' shouldn't collapse"). The ROI chip is two-state (draw / go).
         from qtpy.QtWidgets import QGridLayout
@@ -682,10 +682,10 @@ class RegionViewer(QMainWindow):
         grid.setSpacing(COLUMN_PX)
         chips = [
             self._btn_3d, self._btn_roi, self._btn_fovs,
-            self._chip("⊙ select", "Click an ROI to select it; Delete removes it.",
+            self._chip("select", "Click an ROI to select it; Delete removes it.",
                        self._select_rois),
-            self._chip("✕ clear", "Remove all ROIs in this window.", self._clear_rois),
-            self._chip("→ window", "Open the drawn ROIs as child views.", self._open_roi_children),
+            self._chip("clear", "Remove all ROIs in this window.", self._clear_rois),
+            self._chip("window", "Open the drawn ROIs as child views.", self._open_roi_children),
             self._btn_focus, self._btn_record, self._btn_png,
         ]
         # 3D camera poses are NOT buttons (Julio, 2026-09-09: "the camera controls
@@ -2105,8 +2105,8 @@ class RegionViewer(QMainWindow):
         log.debug("view %s auto-contrast landed for %s", self.window_id, sorted(windows))
 
     #: The ROI chip's two faces: draw a box, or go to the box just drawn.
-    _ROI_DRAW = ("▭ ROI", "Draw an ROI rectangle inside the mosaic.")
-    _ROI_GO = ("→ ROI", "Open the drawn ROI as a child view.")
+    _ROI_DRAW = ("ROI", "Draw an ROI rectangle inside the mosaic.")
+    _ROI_GO = ("open ROI", "Open the drawn ROI as a child view.")
     _roi_count = 0
     _roi_used = False
 
@@ -2967,7 +2967,7 @@ class ViewerManager(QObject):
         if not regions:
             return None
         base = title or RegionViewer._view_label(regions)
-        full = f"{base}  ◂ view {parent_id}" if parent_id is not None else base
+        full = f"{base} · view {parent_id}" if parent_id is not None else base
         return self._spawn(regions, title=full, roi_bbox=roi_bbox, parent_id=parent_id, luts=luts,
                            fovs=fovs, layers_only=layers_only)
 

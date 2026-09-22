@@ -64,14 +64,15 @@ def test_the_band_opens_below_its_ceiling():
         "the band holds Operator AND Log; split two ways, less than this is a five-line log")
 
 
-def test_no_gui_string_carries_an_em_or_en_dash():
-    """Julio (2026-08-24): "there should be no em dashes in GUI"."""
+def _gui_strings():
+    """Every non-docstring string literal in squidxplorer/, as (file, line, value):
+    a string in a Python file is prose bound for a human surface unless it is a
+    docstring. The dash and pictograph bans below share this one walk."""
     import ast
     from pathlib import Path
 
     import squidxplorer
 
-    offenders: list[str] = []
     for path in sorted(Path(squidxplorer.__file__).parent.glob("*.py")):
         tree = ast.parse(path.read_text())
         docstrings = set()
@@ -85,9 +86,44 @@ def test_no_gui_string_carries_an_em_or_en_dash():
                     docstrings.add(id(body[0].value))
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str) \
-                    and id(node) not in docstrings \
-                    and ("—" in node.value or "–" in node.value):
-                offenders.append(f"{path.name}:{node.lineno} {node.value!r:.80}")
+                    and id(node) not in docstrings:
+                yield path.name, node.lineno, node.value
+
+
+def test_no_gui_string_carries_an_em_or_en_dash():
+    """Julio (2026-08-24): "there should be no em dashes in GUI"."""
+    offenders = [f"{name}:{line} {value!r:.80}" for name, line, value in _gui_strings()
+                 if "—" in value or "–" in value]
     assert not offenders, (
         "em/en dashes in string literals reach the GUI; use commas, colons, periods or "
         "hyphens instead:\n" + "\n".join(offenders))
+
+
+#: Pictographic Unicode blocks banned from GUI strings, by (first, last) codepoint.
+#: Typographic marks stay legal by sitting outside every range: · U+00B7, µ U+00B5,
+#: ° U+00B0, × U+00D7, ² U+00B2, … U+2026, & accelerators.
+_PICTOGRAPH_RANGES = (
+    (0x2190, 0x21FF),    # Arrows (the "→ window" era chip glyphs)
+    (0x2200, 0x22FF),    # Mathematical Operators worn as pictographs (⊞, ⊙)
+    (0x2300, 0x23FF),    # Miscellaneous Technical (⌖, ⎙, ⏺)
+    (0x25A0, 0x25FF),    # Geometric Shapes (▭, ●, ◀, ▪, ◂)
+    (0x2600, 0x26FF),    # Miscellaneous Symbols (⚙, ⚠)
+    (0x2700, 0x27BF),    # Dingbats (✓, ✕)
+    (0x2B00, 0x2BFF),    # Miscellaneous Symbols and Arrows
+    (0xFE00, 0xFE0F),    # Variation Selectors (the emoji-presentation switch)
+    (0x1F000, 0x1FAFF),  # the emoji planes, Mahjong Tiles through Symbols Extended-A
+)
+
+
+def test_no_gui_string_carries_an_emoji_or_pictograph():
+    """Julio (2026-09-22): "make sure that we are not using emojis in the UI". Chip
+    labels are plain words; the log's marks are plain words ("done:", "warning:")."""
+    offenders = [
+        f"{name}:{line} U+{ord(ch):04X} {value!r:.80}"
+        for name, line, value in _gui_strings()
+        for ch in sorted(set(value))
+        if any(lo <= ord(ch) <= hi for lo, hi in _PICTOGRAPH_RANGES)
+    ]
+    assert not offenders, (
+        "pictographic characters in string literals reach the GUI; use plain words "
+        "instead:\n" + "\n".join(offenders))
