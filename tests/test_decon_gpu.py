@@ -191,30 +191,57 @@ def test_fast_len_returns_the_shortest_7_smooth_length_and_never_an_11_smooth_on
 
 def test_pad_plan_leaves_already_fast_axes_alone_including_z():
     widths = _decon_gpu.pad_plan((10, AWKWARD, AWKWARD), (10, 19, 19))
-    assert widths[0] == 0, "z was already 7-smooth and must not be padded"
-    assert widths[1] == widths[2] > 0
-    assert AWKWARD + 2 * widths[1] == 2160
-    assert _decon_gpu.pad_plan((1, 2048, 2048), (1, 19, 19)) == (0, 0, 0)
+    assert widths[0] == (0, 0), "z was already 7-smooth and must not be padded"
+    assert widths[1] == widths[2] and sum(widths[1]) > 0
+    assert AWKWARD + sum(widths[1]) == 2160
+    assert _decon_gpu.pad_plan((1, 2048, 2048), (1, 19, 19)) == ((0, 0),) * 3
 
 
 def test_pad_plan_gives_at_least_the_psf_extent_which_is_what_makes_the_wrap_exact():
     """A pad narrower than the PSF leaks into the border."""
     widths = _decon_gpu.pad_plan((1, AWKWARD, AWKWARD), (1, 19, 19))
-    assert widths[1] >= 19, f"pad {widths[1]} is under the PSF extent, the wrap will leak"
+    assert min(widths[1]) >= 19, f"pad {widths[1]} is under the PSF extent, the wrap will leak"
+
+
+def test_pad_plan_lands_exactly_on_a_smooth_length_even_when_the_remainder_is_odd():
+    """THE silent-CPU pin (Julio, 2026-09-09, the 15x433x417 ROI): the floored shared
+    width padded 433 to 479, a PRIME, so the smoothness guard stood MPS down and the
+    log said 'petakit CPU' with no reason. The sides split the odd remainder now."""
+    shape, psf = (15, 433, 417), (95, 19, 19)
+    eff = _decon_gpu.effective_shape(shape, psf)
+    assert eff == (15, 480, 480), eff
+    assert all(_decon_gpu.is_smooth(n) for n in eff[1:])
+    widths = _decon_gpu.pad_plan(shape, psf)
+    assert widths[1] == (23, 24) and widths[2] == (31, 32)
+    assert all(min(w) >= 19 for w in widths[1:]), "each side still covers the PSF extent"
 
 
 def test_pad_plan_declines_rather_than_growing_an_axis_without_bound(monkeypatch):
     monkeypatch.setattr(_decon_gpu, "MAX_PAD_GROWTH", 1.0001)
-    assert _decon_gpu.pad_plan((1, AWKWARD, AWKWARD), (1, 19, 19)) == (0, 0, 0)
+    assert _decon_gpu.pad_plan((1, AWKWARD, AWKWARD), (1, 19, 19)) == ((0, 0),) * 3
+
+
+def test_a_smoothness_stand_down_is_said_not_silent(monkeypatch):
+    """A CPU answer on a GPU machine must carry its reason: the bare 'petakit CPU' line
+    was Julio's whole evidence (2026-09-09), the same defect class as silent tiling."""
+    monkeypatch.setattr(_decon_gpu, "_cupy_cuda_present", lambda: False)
+    monkeypatch.setattr(_decon_gpu, "_torch_device", lambda: "mps")
+    monkeypatch.setattr(_decon_gpu, "MAX_PAD_GROWTH", 1.0001)
+    line = _decon_gpu.describe((1, AWKWARD, AWKWARD), psf_shape=(1, 19, 19))
+    assert "CPU" in line and str(AWKWARD) in line, line
+    assert "no fast Metal FFT" in line, f"the stand-down must say its reason: {line}"
 
 
 def test_wrap_pad_reproduces_the_opposite_edge_and_not_zeros_or_a_replicated_edge():
     """Only wrap matches the circular convolution petakit already performs."""
     a = np.arange(1, 7, dtype=np.float32).reshape(1, 2, 3)
-    out = _decon_gpu._wrap_pad(a, (0, 0, 2))
+    out = _decon_gpu._wrap_pad(a, ((0, 0), (0, 0), (2, 2)))
     assert out.shape == (1, 2, 7)
     np.testing.assert_array_equal(out[0, 0], [2, 3, 1, 2, 3, 1, 2])
-    assert _decon_gpu._wrap_pad(a, (0, 0, 0)) is a
+    assert _decon_gpu._wrap_pad(a, ((0, 0), (0, 0), (0, 0))) is a
+    uneven = _decon_gpu._wrap_pad(a, ((0, 0), (0, 0), (1, 2)))
+    assert uneven.shape == (1, 2, 6)
+    np.testing.assert_array_equal(uneven[0, 0], [3, 1, 2, 3, 1, 2])
 
 
 def test_padding_leaves_the_border_pixels_alone_on_an_awkward_width(monkeypatch):
@@ -223,7 +250,8 @@ def test_padding_leaves_the_border_pixels_alone_on_an_awkward_width(monkeypatch)
     volume = _rim_phantom((1, AWKWARD, AWKWARD))
     psf = _psf_1z(DEFAULT_OPTICS)
 
-    assert any(_decon_gpu.pad_plan(volume.shape, psf.shape)), "this width must actually pad"
+    assert any(map(any, _decon_gpu.pad_plan(volume.shape, psf.shape))), \
+        "this width must actually pad"
     reference = petakit.deconvolve(volume, psf, method=METHOD, iterations=ITERATIONS, gpu=False)
     got = _decon_gpu.rl(volume, psf, ITERATIONS, device)
 
@@ -258,8 +286,8 @@ def test_a_3d_stack_pads_yx_but_never_the_acquired_depth(monkeypatch):
     volume = _rim_phantom((5, 514, 514), seed=17)
     psf = make_psf(DEFAULT_OPTICS)
     widths = _decon_gpu.pad_plan(volume.shape, psf.shape)
-    assert widths[0] == 0, "z (5) is 7-smooth and must be left exactly as acquired"
-    assert widths[1] > 0 and widths[2] > 0
+    assert widths[0] == (0, 0), "z (5) is 7-smooth and must be left exactly as acquired"
+    assert sum(widths[1]) > 0 and sum(widths[2]) > 0
 
     reference = petakit.deconvolve(volume, psf, method=METHOD, iterations=ITERATIONS, gpu=False)
     got = _decon_gpu.rl(volume, psf, ITERATIONS, device)
@@ -278,7 +306,8 @@ def test_the_padded_result_is_not_merely_the_unpadded_one_by_accident(monkeypatc
     peak = float(np.abs(reference).max())
 
     monkeypatch.setattr(_decon_gpu, "_wrap_pad",
-                        lambda v, w: np.pad(v, [(x, x) for x in w]) if any(w) else v)
+                        lambda v, w: (np.pad(v, [tuple(x) for x in w])
+                                      if any(map(any, w)) else v))
     broken = _decon_gpu.rl(volume, psf, ITERATIONS, device)
     border = _border_max(np.abs(broken - reference), 64) / peak
     assert border > TOLERANCE, (
@@ -293,7 +322,7 @@ def test_restricting_lambda_to_the_true_region_is_load_bearing():
     volume = _rim_phantom((1, AWKWARD, AWKWARD), seed=5)
     psf = _psf_1z(DEFAULT_OPTICS)
     widths = _decon_gpu.pad_plan(volume.shape, psf.shape)
-    core = tuple(slice(w, w + n) for w, n in zip(widths, volume.shape))
+    core = tuple(slice(lo, lo + n) for (lo, _hi), n in zip(widths, volume.shape))
 
     reference = petakit.deconvolve(volume, psf, method=METHOD, iterations=ITERATIONS, gpu=False)
     peak = float(np.abs(reference).max())
@@ -338,7 +367,7 @@ def test_opting_the_cpu_path_into_padding_keeps_the_extent_and_stays_below_shot_
 
     assert not _decon_gpu.is_smooth(514)
     plane = _rim_phantom((1, 514, 514), seed=9)[0].astype(np.uint16)
-    assert any(_decon_gpu.pad_plan((1, 514, 514), (1, 19, 19)))
+    assert any(map(any, _decon_gpu.pad_plan((1, 514, 514), (1, 19, 19))))
     monkeypatch.setenv(_decon_gpu.ENV_VAR, "cpu")
     monkeypatch.delenv(_decon_gpu.PAD_CPU_ENV_VAR, raising=False)
     plain = _plane_solve(plane, DEFAULT_OPTICS, ITERATIONS)
