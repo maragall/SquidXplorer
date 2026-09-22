@@ -1574,7 +1574,13 @@ merge without a hand test; the GL look of the new widgets is a hand check owed):
   `_napari3d.bounding_box_lines`/`add_bounding_box_layer` is the ONE box mechanism
   (gallery-view's 12-edge + 100 um ticks convention, quiet white, um-labelled);
   `BrickedVolume._add_box()` draws it at the exact framed extent, `close()` removes it.
-  Width `max(1.0, extent/2000)` um (Julio: half of gallery-view's 2). napari's per-layer
+  **The width is DATA-DERIVED** (Julio: a ratio of "the size of continous objects" so the
+  box reads "clean and not obstructive"): `structure_scale_um` measures the median
+  connected-component equivalent diameter of the resident MIPs above the auto-contrast
+  floor, and the box thins ONCE at first loader idle to `scale / BOX_WIDTH_RATIO` (8,
+  Julio's pick from a /4 /8 /16 proposal), floored at one screen px at fit zoom
+  (`1/camera.zoom`); a scene labelling nothing keeps the extent-rule fallback. On the 25x
+  set: scale 4.64 um, width 0.58 um. napari's per-layer
   bounding_box overlay was measured and rejected: one box per BRICK, red with blue corners.
 - **The demo toolchain is in scripts/**: `decon_whole.py` (lateral tiling, z always whole,
   per-window backend tally), `volume_figure.py` (headful stills), `record_volume_comparison.py`

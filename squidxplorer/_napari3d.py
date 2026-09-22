@@ -142,6 +142,61 @@ def bounding_box_lines(origin_zyx_um: tuple, size_zyx_um: tuple) -> list:
     return [np.array(line) for line in edges + ticks]
 
 
+#: The box's width is the volume's own structure scale over this ratio (Julio, 2026-09-22:
+#: "compute 'thin' based on the size of continuous objects... a ratio that makes that
+#: bounding box look clean and not obstructive"; from the proposed /4, /8, /16 he picked
+#: "scale/8 looks right"). An eighth of the median filament diameter reads finer than the
+#: finest content the box frames, at fit and at the orbit's 4.5x dive alike.
+BOX_WIDTH_RATIO = 8.0
+
+#: MIP components smaller than this many pixels are noise, not structure.
+_MIN_COMPONENT_PX = 5
+
+#: The measurement decimates each MIP to about this edge; the median diameter is in um,
+#: so the coarser sampling moves it by far less than the ratio's step.
+_SCALE_MEASURE_PX = 512
+
+
+def structure_scale_um(planes: Sequence[tuple]) -> Optional[float]:
+    """The volume's characteristic structure scale: the MEDIAN equivalent diameter, in um,
+    of the connected bright components over ``(mip_2d, um_per_px)`` pairs.
+
+    Bright = above the channel's own auto-contrast floor (`_contrast.auto_contrast`'s lo),
+    the same rule the sliders seed from. None when nothing labels - a blank or degenerate
+    scene - so the caller keeps its extent-rule fallback width.
+    """
+    from scipy import ndimage
+
+    from squidxplorer._contrast import auto_contrast
+
+    diams: list = []
+    for mip, pitch in planes:
+        arr = np.asarray(mip)
+        if arr.ndim != 2 or arr.size == 0:
+            continue
+        step = max(1, int(max(arr.shape) // _SCALE_MEASURE_PX))
+        arr = arr[::step, ::step]
+        px_um = float(pitch) * step
+        try:
+            win = auto_contrast(arr)
+        except Exception:                               # noqa: BLE001 - no window, no verdict
+            win = None
+        if win is None:
+            continue
+        mask = arr > float(win[0])
+        if not mask.any():
+            continue
+        labels, n = ndimage.label(mask)
+        if not n:
+            continue
+        areas = np.bincount(labels.ravel())[1:]
+        areas = areas[areas >= _MIN_COMPONENT_PX]
+        if not areas.size:
+            continue
+        diams.extend(np.sqrt(4.0 * areas.astype(float) / np.pi) * px_um)
+    return float(np.median(diams)) if diams else None
+
+
 def add_bounding_box_layer(viewer: Any, origin_zyx_um: tuple, size_zyx_um: tuple) -> Any:
     """ONE white extent box for a volume, gallery-view's convention; scale-bar quiet white."""
     # Half of gallery-view's 2 um (Julio, 2026-09-22: "reduce width to half"); a multi-FOV
