@@ -111,33 +111,57 @@ def _auto_clim(stack: np.ndarray) -> Optional[tuple]:
         return None
 
 
-def _add_bounding_box(viewer: Any, scale: tuple, shape_zyx: tuple) -> None:
-    """gallery-view's micrometre bounding box with 100 um ticks, so the volume reads at scale."""
-    nz, ny, nx = shape_zyx
-    z_max, y_max, x_max = nz * scale[0], ny * scale[1], nx * scale[2]
+#: The one name every volume's extent box carries; the pin test finds it by this.
+BOX_LAYER_NAME = "Bounding Box (100um ticks)"
+
+
+def bounding_box_lines(origin_zyx_um: tuple, size_zyx_um: tuple) -> list:
+    """gallery-view's box from any world corner: 12 edges plus 100 um ticks, in stage um."""
+    oz, oy, ox = (float(v) for v in origin_zyx_um)
+    sz, sy, sx = (float(v) for v in size_zyx_um)
+    z1, y1, x1 = oz + sz, oy + sy, ox + sx
     edges = [
-        [[0, 0, 0], [0, 0, x_max]], [[0, 0, x_max], [0, y_max, x_max]],
-        [[0, y_max, x_max], [0, y_max, 0]], [[0, y_max, 0], [0, 0, 0]],
-        [[z_max, 0, 0], [z_max, 0, x_max]], [[z_max, 0, x_max], [z_max, y_max, x_max]],
-        [[z_max, y_max, x_max], [z_max, y_max, 0]], [[z_max, y_max, 0], [z_max, 0, 0]],
-        [[0, 0, 0], [z_max, 0, 0]], [[0, 0, x_max], [z_max, 0, x_max]],
-        [[0, y_max, x_max], [z_max, y_max, x_max]], [[0, y_max, 0], [z_max, y_max, 0]],
+        [[oz, oy, ox], [oz, oy, x1]], [[oz, oy, x1], [oz, y1, x1]],
+        [[oz, y1, x1], [oz, y1, ox]], [[oz, y1, ox], [oz, oy, ox]],
+        [[z1, oy, ox], [z1, oy, x1]], [[z1, oy, x1], [z1, y1, x1]],
+        [[z1, y1, x1], [z1, y1, ox]], [[z1, y1, ox], [z1, oy, ox]],
+        [[oz, oy, ox], [z1, oy, ox]], [[oz, oy, x1], [z1, oy, x1]],
+        [[oz, y1, x1], [z1, y1, x1]], [[oz, y1, ox], [z1, y1, ox]],
     ]
-    tick = min(z_max, y_max, x_max) * 0.02
+    tick = min(sz, sy, sx) * 0.02
     ticks: list = []
-    for x in np.arange(100, x_max, 100):
-        ticks += [[[0, 0, x], [0, tick, x]], [[0, 0, x], [tick, 0, x]]]
-    for y in np.arange(100, y_max, 100):
-        ticks += [[[0, y, 0], [0, y, tick]], [[0, y, 0], [tick, y, 0]]]
-    for z in np.arange(100, z_max, 100):
-        ticks += [[[z, 0, 0], [z, tick, 0]], [[z, 0, 0], [z, 0, tick]]]
+    for x in np.arange(100, sx, 100):
+        ticks += [[[oz, oy, ox + x], [oz, oy + tick, ox + x]],
+                  [[oz, oy, ox + x], [oz + tick, oy, ox + x]]]
+    for y in np.arange(100, sy, 100):
+        ticks += [[[oz, oy + y, ox], [oz, oy + y, ox + tick]],
+                  [[oz, oy + y, ox], [oz + tick, oy + y, ox]]]
+    for z in np.arange(100, sz, 100):
+        ticks += [[[oz + z, oy, ox], [oz + z, oy + tick, ox]],
+                  [[oz + z, oy, ox], [oz + z, oy, ox + tick]]]
+    return [np.array(line) for line in edges + ticks]
+
+
+def add_bounding_box_layer(viewer: Any, origin_zyx_um: tuple, size_zyx_um: tuple) -> Any:
+    """ONE white extent box for a volume, gallery-view's convention; scale-bar quiet white."""
+    # Half of gallery-view's 2 um (Julio, 2026-09-22: "reduce width to half"); a multi-FOV
+    # region scales at the same halved proportionality so the lines stay ~0.5 px at fit.
+    width = max(1.0, max(float(v) for v in size_zyx_um) / 2000.0)
     layer = viewer.add_shapes(
-        [np.array(line) for line in edges + ticks],
-        shape_type="line", edge_color="white", edge_width=2,
-        name="Bounding Box (100um ticks)",
+        bounding_box_lines(origin_zyx_um, size_zyx_um),
+        shape_type="line", edge_color="white", edge_width=width,
+        name=BOX_LAYER_NAME,
     )
     from squidxplorer._napari_view import MosaicLayers
     MosaicLayers._label_units(layer)                 # stage um: napari >= 0.7 nulls mixed units
+    return layer
+
+
+def _add_bounding_box(viewer: Any, scale: tuple, shape_zyx: tuple) -> None:
+    """The popouts' box: anchored at the world origin, sized from the stack's own shape."""
+    nz, ny, nx = shape_zyx
+    add_bounding_box_layer(
+        viewer, (0.0, 0.0, 0.0), (nz * scale[0], ny * scale[1], nx * scale[2]))
 
 
 def _wire_close_to_release_memory(viewer: Any) -> None:

@@ -90,7 +90,9 @@ def test_the_halo_is_the_psfs_lateral_support_with_a_floor():
     from squidxplorer._decon import HALO_MIN_PX, lateral_halo_px
 
     halo = lateral_halo_px(_optics())
-    assert halo == 10, f"the 99.9% lateral radius of the G7-optics PSF measured 9.9 px; got {halo}"
+    # 10 before 2026-09-14: that radius integrated a laterally TRUNCATED model, so it was
+    # self-referentially small. With the defocus-cone support the honest measure is 18 px.
+    assert halo == 18, f"the 99.9% lateral radius of the G7-optics PSF measured 18 px; got {halo}"
     assert halo >= HALO_MIN_PX >= 4
 
 
@@ -101,7 +103,7 @@ def test_the_windowed_solve_matches_the_whole_field_solve_inside_the_window():
     optics = _optics()
     stack = _blurred_stack(optics)
     op = decon_op(optics, iterations=3)
-    assert projection.operator_halo_px(op, NZ) == lateral_halo_px(optics) == 10
+    assert projection.operator_halo_px(op, NZ) == lateral_halo_px(optics) == 18
 
     whole = projection.project_well(_reader(stack), REGION, 0, reduce=op)
     sub = projection.project_well(_reader(stack), REGION, 0, reduce=op, window=WINDOW)
