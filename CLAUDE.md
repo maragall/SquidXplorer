@@ -1548,6 +1548,42 @@ merge without a hand test; the GL look of the new widgets is a hand check owed):
   schema declaration must come first; the reader clamp behind the same contract is then
   small. Filed for hongquan's team.
 
+## The PSF covers the defocus cone; the demo toolchain ships (2026-09-22, branches psf-support + psf-rerun + video-orbit + volume-bbox)
+
+- **The PSF's lateral support was TRUNCATED ~40x and decon could not drain haze** (Julio,
+  live: "It amplifies the intense spots rather than compressing the haze towards them").
+  petakit's `compute_psf_size` sizes laterally from the IN-FOCUS Airy radius alone (6 radii:
+  21 px for the 25x optics) while the widefield defocus cone at the stack edge is
+  `(nz/2)*dz*tan(asin(na/ni))` = ~220 px there. Measured signature: peaks x3.2 while the
+  background mean ROSE. `_decon.lateral_support_px` now sizes from the cone plus the Airy
+  margin, capped at the 99.9% energy radius of the UNTRUNCATED cone model; `make_psf` takes
+  `max(petakit nxy, 2*support+1)` (petakit untouched, its own crop-to-image handles the rest);
+  `lateral_halo_px` integrates only the z planes the solve's crop keeps. 25x corrected optics:
+  PSF (91, 21, 21) -> (91, 447, 447), halo 15 -> 218 px. Proven on the real set: background
+  falls BELOW raw and keeps falling with iterations (173.5 at i2, 172.3 at i4 vs raw 175.7)
+  while it used to rise. Every earlier decon judgment (the "overcooked at 2" read included)
+  predates this fix and is void.
+- **The 25x_C4 record is WRONG on the rig side** (hongquan: 25x 0.85 NA water, recorded as
+  20x 0.8 air; `rig_profile_notes` flagged it all along): `scripts/decon_whole.py` takes
+  `--na --dxy-um --ni` (all three together) correcting the PSF ONLY, per-channel wavelength
+  kept, on-disk pixel_size_um untouched. Display-geometry correction is deliberately NOT done.
+- **No aggression knob exists**: the Biggs-Andrews lambda is hardwired in petakit `_rl_core`
+  and `_decon_gpu._solve` alike; unaccelerated RL (gentler per iteration) is a small
+  `accelerate=False` in both arms, scoped but NOT built (the boss's ask, awaiting a go).
+- **The volume carries a white extent box** (hongquan: "Can you add 3D bounding box?"):
+  `_napari3d.bounding_box_lines`/`add_bounding_box_layer` is the ONE box mechanism
+  (gallery-view's 12-edge + 100 um ticks convention, quiet white, um-labelled);
+  `BrickedVolume._add_box()` draws it at the exact framed extent, `close()` removes it.
+  Width `max(1.0, extent/2000)` um (Julio: half of gallery-view's 2). napari's per-layer
+  bounding_box overlay was measured and rejected: one box per BRICK, red with blue corners.
+- **The demo toolchain is in scripts/**: `decon_whole.py` (lateral tiling, z always whole,
+  per-window backend tally), `volume_figure.py` (headful stills), `record_volume_comparison.py`
+  (seeded-orbit passes, camera record-and-replay, preflight + phase-shift gates),
+  `compare_psf_figures.py`, `decon_demo_sop.py` + README (the SOP; matched per-side windows).
+  KNOWN INCONSISTENCY: the pad-aware working-set estimate refuses plans the CPU arm actually
+  runs unpadded (runs used SQUIDXPLORER_DECON_PAD=off); reconcile before trusting the
+  estimator on non-smooth windows.
+
 ## Agent skills
 
 ### Issue tracker
