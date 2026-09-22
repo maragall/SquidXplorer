@@ -733,6 +733,7 @@ class RegionViewer(QMainWindow):
         giz = self._camera_gizmo
         if giz is not None and _alive(giz):
             giz.set_active(True)
+        self._refresh_record_chip()          # the movie chip records the orbit here
 
     def _play_orbit(self) -> None:
         """Play the canned demo orbit live in this view; the chip disables while it runs."""
@@ -1063,6 +1064,20 @@ class RegionViewer(QMainWindow):
         btn = getattr(self, "_btn_record", None)
         if btn is None:
             return
+        if self._is_volume_tab:
+            # A volume tab's movie IS the camera orbit (Julio, 2026-09-22: "a button of
+            # exporting a video of the 3D rendering"); no sweep axis is required.
+            problem = encoder_problem()
+            if problem:
+                btn.setEnabled(False)
+                btn.setToolTip(f"No mp4 encoder on this machine - {problem}")
+                return
+            btn.setEnabled(True)
+            btn.setToolTip(
+                "Record this 3D view as an .mp4: the demo camera orbit plus the zoom "
+                "dive into the brightest structure, at the contrast on screen. Runs on "
+                "the live canvas; the view is busy while it records.")
+            return
         meta = self._meta or {}
         if not can_record(meta):
             btn.setEnabled(False)
@@ -1098,9 +1113,15 @@ class RegionViewer(QMainWindow):
         return visible or names
 
     def _record_movie(self) -> None:
-        """Export this view's sweep to an .mp4. Second click cancels the run in flight."""
+        """Export this view's sweep to an .mp4. Second click cancels the run in flight.
+
+        On a VOLUME tab the movie is the 3D orbit recording instead; the 2D sweep
+        stays exactly what it was everywhere else."""
         from squidxplorer._video import DEFAULT_FPS, axis_length, can_record, default_axis
 
+        if self._is_volume_tab:
+            self._record_orbit_movie()
+            return
         worker = self._video_worker
         if worker is not None and worker.isRunning():
             worker.stop()
@@ -1147,6 +1168,59 @@ class RegionViewer(QMainWindow):
                 int(100 * d / max(1, total)), f"movie: frame {d} of {total}"),
             on_finished=lambda: self._forget_video_worker(w),
             signals={"cancelled": self._on_movie_cancelled})
+
+    def _record_orbit_movie(self) -> None:
+        """One click on a volume tab records the demo orbit to an .mp4 (Julio, 2026-09-22:
+        "we should add a button of exporting a video of the 3D rendering. Just like we
+        had for the 2D png."): the same recording the camera scripts make, save dialog
+        first, the zoom chapter's target chosen by the data on screen.
+
+        Runs ON the GUI thread on purpose: the script drives the live canvas and pumps
+        Qt itself, so a worker thread could not hold it. The chip disables while it runs.
+        """
+        from squidxplorer import _camera_script
+        from squidxplorer._video import encoder_problem
+
+        if getattr(self, "_orbit_running", False):
+            self._say("movie: a camera script is already running in this view.")
+            return
+        problem = encoder_problem()
+        if problem:
+            self._say(f"movie: {problem}")
+            return
+        vol = getattr(self, "_native3d", None)
+        if vol is None:
+            self._say("movie: no 3D volume is up in this view yet.")
+            return
+        region = self.current_region()
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"Save the 3D orbit movie of {region}", f"{region}_orbit.mp4",
+            "Movie (*.mp4)")
+        if not path:
+            return
+        if not str(path).lower().endswith(".mp4"):
+            path = f"{path}.mp4"
+        zoom_center, home_center = _camera_script.volume_zoom_targets(vol)
+        self._orbit_running = True
+        btn = getattr(self, "_btn_record", None)
+        if btn is not None and _alive(btn):
+            btn.setEnabled(False)
+        self._say(f"recording the 3D orbit of {region} to {path}…")
+        t0 = time.perf_counter()
+        try:
+            result = _camera_script.run_camera_script(
+                self,
+                _camera_script.demo_orbit_steps(zoom_center=zoom_center,
+                                                home_center=home_center),
+                out_path=path, fps=_camera_script.DEFAULT_FPS)
+        except (ValueError, RuntimeError) as exc:
+            self._on_movie_failed(str(exc))
+        else:
+            self._on_movie_done(result.path, result.n_frames, time.perf_counter() - t0)
+        finally:
+            self._orbit_running = False
+            if btn is not None and _alive(btn):
+                btn.setEnabled(True)
 
     def _z_slider_index(self) -> int:
         """Which z plane this window is showing, or 0 when it has no z slider."""
