@@ -1249,7 +1249,10 @@ def test_naparis_menu_bar_is_chrome_and_the_decks_menu_is_file_and_view(qapp, na
         menus = [a.menu().title() for a in deck.menuBar().actions() if a.menu() is not None]
         assert menus == ["&File", "&View"], menus
         file_actions = [a.text() for a in deck.menuBar().actions()[0].menu().actions()]
-        assert file_actions == ["&Open Acquisition…", "&Quit"], file_actions
+        # The bulk PNG export (Nick, ValidTX, 2026-09) is a sanctioned addition; anything
+        # ELSE growing here must still fail this equality.
+        assert file_actions == ["&Open Acquisition…", "&Export PNGs of Selected Wells…",
+                                "&Quit"], file_actions
     finally:
         shutdown_plate_window(qapp, plate)
 

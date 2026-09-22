@@ -72,12 +72,14 @@ def fuse_region_mosaic(
     z_level: int = 0,
     time_point: int = 0,
     max_px: int = _MAX_FUSED_PX,
+    fovs: Optional[list] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """Paste a region's FOVs into ONE plane, placed by stage position.
 
     Returns ``(mosaic, step)`` where ``step`` is the decimation factor, or ``None`` when the
     acquisition carries no stage positions / no pixel size. An unreadable FOV stays a zeroed
-    hole and is logged by name.
+    hole and is logged by name. ``fovs`` crops to that subset — THE one FOV-subset spelling;
+    ``fov_offsets_px`` derives the canvas from exactly those positions.
     """
     from squidxplorer._placement import fov_offsets_px, mosaic_extent_px
 
@@ -86,7 +88,8 @@ def fuse_region_mosaic(
     if not positions or pixel_size in (None, 0):
         return None
 
-    fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
+    fovs = (list(fovs) if fovs is not None
+            else list((meta.get("fovs_per_region") or {}).get(region) or []))
     if not fovs:
         return None
 
