@@ -144,8 +144,9 @@ def bounding_box_lines(origin_zyx_um: tuple, size_zyx_um: tuple) -> list:
 
 def add_bounding_box_layer(viewer: Any, origin_zyx_um: tuple, size_zyx_um: tuple) -> Any:
     """ONE white extent box for a volume, gallery-view's convention; scale-bar quiet white."""
-    # 2 um matches gallery-view's single FOV; a multi-FOV region scales so the lines stay ~1 px.
-    width = max(2.0, max(float(v) for v in size_zyx_um) / 1000.0)
+    # Half of gallery-view's 2 um (Julio, 2026-09-22: "reduce width to half"); a multi-FOV
+    # region scales at the same halved proportionality so the lines stay ~0.5 px at fit.
+    width = max(1.0, max(float(v) for v in size_zyx_um) / 2000.0)
     layer = viewer.add_shapes(
         bounding_box_lines(origin_zyx_um, size_zyx_um),
         shape_type="line", edge_color="white", edge_width=width,
