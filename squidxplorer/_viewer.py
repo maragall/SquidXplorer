@@ -2850,6 +2850,71 @@ class PlateWindow(QMainWindow):
             f"{summary['total']} acquisition(s)"
             + (" (stopped early)" if summary["stopped"] else ""))
 
+    def _export_selected_wells_pngs(self) -> None:
+        """Bulk PNG export (Nick, ValidTX): one PNG per selected well — or per chosen field
+        when the selection carries a strict FOV subset — every file rendered under the
+        FOCUSED view's latched look (its visible channels' contrast and colors, its z), so
+        the files compare like for like in a slide deck. Raw pixels off the reader; an
+        operator result exists only in its own view and is said so below. Every refusal is
+        a named sentence."""
+        from squidxplorer._png import png_problem
+
+        worker = getattr(self, "_bulk_png", None)
+        if worker is not None and getattr(worker, "isRunning", lambda: False)():
+            self._readout.setText("bulk png: an export is already running - it will say when it lands.")
+            return
+        if self._reader is None or self._meta is None:
+            self._readout.setText("bulk png: open an acquisition first.")
+            return
+        if not self._selected_regions:
+            self._readout.setText("bulk png: select wells on the plate first (click, shift-click or drag a box).")
+            return
+        manager = getattr(self, "_viewer_manager", None)
+        view = manager.active_view() if manager is not None else None
+        if view is None:
+            self._readout.setText("bulk png: open a view first - the export takes its look "
+                                  "(contrast, colors, z) from the focused view.")
+            return
+        looks = [(name, clim, rgb) for name, _layer, clim, rgb in view._visible_channel_looks()]
+        if not looks:
+            self._readout.setText("bulk png: no visible intensity channel in the focused view to take the look from.")
+            return
+        problem = png_problem()
+        if problem:
+            self._readout.setText(f"bulk png: {problem}")
+            return
+        ov = getattr(self, "_overview", None)
+        subsets = ov.fov_subsets() if ov is not None else {}
+        jobs = []                                # a strict subset exports its fields, one file each
+        for r in self._selected_regions:
+            picked = subsets.get(r)
+            jobs.extend([(r, int(f)) for f in picked] if picked else [(r, None)])
+        out_dir = QFileDialog.getExistingDirectory(
+            self, f"Export {len(jobs)} PNG(s) of the selected wells to folder")
+        if not out_dir:
+            return
+
+        from squidxplorer._workers import _BulkPngWorker
+
+        mosaic = getattr(view._pane, "mosaic", None) if view._pane is not None else None
+        visible_op = mosaic.visible_op() if mosaic is not None else None
+        if visible_op not in (None, "raw"):
+            log.info("bulk png: the focused view shows %r, which exists only there; the bulk "
+                     "export renders each well's RAW mosaic under that view's look.", visible_op)
+        w = _BulkPngWorker(self._reader, self._meta, jobs, looks,
+                           z_level=view._z_slider_index(), time_point=view.time_point,
+                           out_dir=out_dir, acq=self._acq_name or "plate", parent=self)
+        self._readout.setText(f"● bulk png: {len(jobs)} file(s), one look for all, to {out_dir} "
+                              "(progress in the log)")
+        _launch_worker(self, w, slot="_bulk_png",
+                       on_done=self._on_bulk_png_done,
+                       on_problem=lambda m: self._readout.setText(f"bulk png failed: {m}"))
+
+    def _on_bulk_png_done(self, written: int, asked: int, out_dir: str, seconds: float) -> None:
+        mark = "✓" if written == asked else "⚠"
+        self._readout.setText(f"{mark} bulk png: {written} of {asked} file(s) written to "
+                              f"{out_dir} in {seconds:.1f}s")
+
     def _check_disk(self, out_dir, regions: Optional[list] = None) -> tuple[bool, float, str]:
         """Estimate the persisted plate size and refuse if it won't fit (with headroom). Returns
         (ok, estimate_GB, message). Estimate = per-well projection (T·C·Y·X·itemsize) × 1.34 (the exact
@@ -3675,6 +3740,7 @@ class PlateWindow(QMainWindow):
         self._stop_preview()
         self._stop_flatfield()       # BEFORE _join_retired, so its threads are in that list
         _stop_slot(self, "_bulk")    # the set-wide save, likewise: stopped, then joined below
+        _stop_slot(self, "_bulk_png")   # the bulk PNG export, likewise
         self._join_retired()         # everything _retire deferred
         ov = getattr(self, "_overview", None)
         if ov is not None:
