@@ -309,7 +309,7 @@ def test_the_fovs_chip_opens_one_child_view_over_the_current_region(qapp, napari
         assert child.parent_id == parent.window_id, "it must nest under the view it came from"
         assert child._roi_bbox is None, "a FOV walk is not cropped — it frames, it does not crop"
         assert child.display_name.startswith("FOVs · ")
-        assert f"◂ view {parent.window_id}" in child.display_name
+        assert f"· view {parent.window_id}" in child.display_name
 
         view = mgr.view_for(child.window_id)
         assert view is not None and view.kind == "fovs"
