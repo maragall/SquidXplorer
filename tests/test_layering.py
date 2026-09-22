@@ -24,6 +24,8 @@ GUI_MODULES = frozenset({
                           # the napari Camera math it projects with is `_napari_view.camera_basis`.
     "_camera_script",    # the camera-script EXECUTOR: pumps the Qt loop while waiting on the
                           # brick loader. The planning half (poses, interpolation, dwell) is pure.
+    "_contrast_fields",  # the numeric lo/hi contrast row (two QLineEdits following the active
+                          # layer); the contrast RULES it writes through live in `_napari_view`.
     "_gallery_window",   # Gallery View's window; its producer `_gallery` is Qt-free on purpose
     "_ingest",           # the acquisition-open pipeline, cut out of `_viewer` (2026-08-13)
     "_acqset_gui",       # the QThread over `_acqset.run_over_set`; `_acqset` itself is Qt-free
