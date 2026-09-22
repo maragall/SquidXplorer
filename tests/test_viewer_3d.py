@@ -673,3 +673,54 @@ def test_a_volume_scene_carries_the_white_extent_box_and_close_removes_it(mosaic
     vol.close()
     assert not any(ly.name == BOX_LAYER_NAME for ly in mosaic.model.layers), (
         "closing the volume left its box behind")
+
+
+def test_the_box_thins_to_an_eighth_of_the_measured_structure_scale(mosaic):
+    """Julio's pick (2026-09-22, "scale/8 looks right"): once bricks are resident the box
+    width becomes structure_scale / 8, structure scale = the MEDIAN equivalent diameter of
+    the MIP's bright components; floored at one screen px (1 / camera.zoom) so it cannot
+    vanish; a blank scene keeps the extent-rule fallback width."""
+    import numpy as np
+
+    from squidxplorer._brick_view import BrickedVolume
+    from squidxplorer._napari3d import BOX_WIDTH_RATIO, structure_scale_um
+
+    vol = BrickedVolume(
+        mosaic, reader=None, meta={}, region="A1", window_px=(0, 128, 0, 128),
+        channels=["c0"], scale=(1.5, 0.75, 0.75), origin_um=(0.0, 0.0, 0.0),
+        limit=2048, budget_bytes=1 << 30, op="raw",
+    )
+    vol._loader.start = lambda *a, **k: None
+    vol._loader.stop = lambda *a, **k: None
+    vol._loader.wait = lambda *a, **k: True
+    vol._frame_camera = lambda *a, **k: None
+    vol.open()
+
+    # One synthetic brick: a lone 16x16 px square object on zero background.
+    arr = np.zeros((2, 128, 128), np.uint16)
+    arr[:, 40:56, 40:56] = 1000
+    brick = vol._bricks[0]
+    vol._on_brick(vol._offset_brick(brick), "c0", arr, step=1, epoch=vol._epoch)
+    vol._on_idle(vol._epoch)
+
+    # The measurement itself, on the exact plane the volume holds:
+    scale = structure_scale_um([(arr.max(axis=0), 0.75)])
+    expected_diam = np.sqrt(4.0 * 256 / np.pi) * 0.75      # 16x16 px at 0.75 um/px
+    assert scale is not None and abs(scale - expected_diam) < 1e-6
+    want = max(scale / BOX_WIDTH_RATIO, 1.0)               # headless camera zoom is 1.0
+    got = float(np.max(vol._box.edge_width))
+    assert abs(got - want) < 1e-6, f"box width {got} um, expected {want} um"
+    vol.close()
+
+
+def test_a_blank_volume_keeps_the_fallback_box_width(mosaic):
+    import numpy as np
+
+    vol = _opened_volume(mosaic, ("c0",))
+    fallback_width = float(np.max(vol._box.edge_width))
+    vol._on_brick(vol._offset_brick(vol._bricks[0]), "c0",
+                  np.zeros((1, 8, 8), np.uint16), step=1, epoch=vol._epoch)
+    vol._on_idle(vol._epoch)
+    assert float(np.max(vol._box.edge_width)) == fallback_width
+    assert vol._box_width_derived, "a blank measurement must not re-run every idle"
+    vol.close()

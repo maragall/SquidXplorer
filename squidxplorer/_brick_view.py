@@ -126,6 +126,7 @@ class BrickedVolume:
 
         self._layers: dict = {}          # (channel, brick.key) -> napari layer
         self._box = None                 # the white extent box; one per open, down with close()
+        self._box_width_derived = False  # thinned ONCE from the first resident bricks
         self._steps: dict = {}           # (channel, brick.key) -> the step that layer holds
         self._epoch = 0
         self._step = 1
@@ -212,6 +213,38 @@ class BrickedVolume:
             self._box = None
         finally:
             self._adding_brick = False
+
+    def _derive_box_width(self) -> None:
+        """Thin the box to the volume's OWN structure scale, once, from the first resident
+        bricks (open() draws it before any pixels exist, on the extent-rule fallback).
+        Floor: one screen pixel at the current (fit) zoom - width_um >= 1 / camera.zoom,
+        which is `um_per_screen_px()` - so the thinned box can never vanish outright.
+        A scene that labels nothing keeps the fallback width."""
+        if self._box is None or self._box_width_derived or not self._layers:
+            return
+        from squidxplorer._napari3d import BOX_WIDTH_RATIO, structure_scale_um
+
+        planes = []
+        for ly in self._layers.values():
+            data = getattr(ly, "data", None)
+            if data is None or getattr(data, "ndim", 0) != 3:
+                continue
+            try:
+                planes.append((np.asarray(data).max(axis=0), float(ly.scale[-1])))
+            except Exception:                       # noqa: BLE001 - a brick mid-swap
+                continue
+        scale = structure_scale_um(planes)
+        if scale is None:
+            self._box_width_derived = True          # measured and blank: keep the fallback
+            return
+        width = max(float(scale) / BOX_WIDTH_RATIO, self.um_per_screen_px())
+        try:
+            self._box.edge_width = width
+            log.info("extent box: structure scale %.1f um, width %.2f um (ratio 1/%g)",
+                     scale, width, BOX_WIDTH_RATIO)
+        except Exception:                           # noqa: BLE001 - the box is cosmetic
+            pass
+        self._box_width_derived = True
 
     def _frame_camera(self) -> None:
         """Point the camera at this ROI and zoom so the whole box fits the canvas.
@@ -597,6 +630,8 @@ class BrickedVolume:
         if self._heal_pending and not self._closed:
             self._heal_pending = False
             self.refresh()
+        if not self._closed and epoch == self._epoch:
+            self._derive_box_width()
         if self._t_settled is None and self._t_open is not None and epoch == self._epoch \
                 and self._layers:
             self._t_settled = time.perf_counter() - self._t_open
