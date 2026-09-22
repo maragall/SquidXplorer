@@ -1584,6 +1584,24 @@ merge without a hand test; the GL look of the new widgets is a hand check owed):
   runs unpadded (runs used SQUIDXPLORER_DECON_PAD=off); reconcile before trusting the
   estimator on non-smooth windows.
 
+## The movie chip records the 3D orbit; no pictographs in the GUI (2026-09-22, branch video-chip-emoji)
+
+- **The movie chip on a VOLUME tab records the orbit video** (Julio: "add a button of
+  exporting a video of the 3D rendering. Just like we had for the 2D png" - an explicit
+  override of the earlier console-only ruling): `_record_movie` routes by `_is_volume_tab`;
+  the volume arm asks for a save path then runs `run_camera_script` with
+  `demo_orbit_steps(zoom_center=...)` on the live canvas at fps 12, GUI thread on purpose
+  (the script pumps Qt). `_camera_script.volume_zoom_targets(vol)` picks the dive target
+  from the DATA on screen (COM of the top 1% brightest resident z-MIP pixels, world um);
+  no target means the chapterless orbit, never a guess. The 2D sweep arm is byte-untouched.
+- **No emoji or pictographs in GUI strings** (Julio): the chip glyphs and log marks are
+  plain words now (focus/movie/png/FOVs/select/clear/window/ROI; "done:"/"warning:"; ASCII
+  "->" in destination suffixes). Typographic marks stay: middle dot, micro, degree,
+  ellipsis, superscripts, ampersand accelerators. Enforced beside the dash ban in
+  test_console_readable over one shared GUI-string walk; banned ranges: U+2190-21FF,
+  U+2200-22FF, U+2300-23FF, U+25A0-25FF, U+2600-26FF, U+2700-27BF, U+2B00-2BFF,
+  U+FE00-FE0F, U+1F000-1FAFF. tools/ harness strings are outside the sweep's scope.
+
 ## Agent skills
 
 ### Issue tracker
