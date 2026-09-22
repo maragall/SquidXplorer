@@ -37,7 +37,7 @@ def test_the_reconciliation_line_is_correct_when_dedup_removes_a_region():
     """13 region slots across 3 windows, B6 held twice, so 12 regions run."""
     views = [
         _View(2, "Deconvolution trial", ["A1", "A2", "A3", "A4"]),
-        _View(5, "ROI · B6  ◂ view 2", ["B6"], roi_bbox=(120.0, 340.0, 636.0, 856.0)),
+        _View(5, "ROI · B6 · view 2", ["B6"], roi_bbox=(120.0, 340.0, 636.0, 856.0)),
         _View(7, "C3, C4, C5, +5", ["C3", "C4", "C5", "C6", "C7", "C8", "C9", "B6"]),
     ]
     block = describe_view_target(views, action="Run decon")

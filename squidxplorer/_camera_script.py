@@ -306,23 +306,94 @@ OBLIQUE_HERO = (0.0, 16.7, 58.8)
 DEMO_ZOOM = 1.15
 
 
-def demo_orbit_steps() -> list:
+#: The demo orbit's cone and end azimuth: the zoom chapter's anchor pose.
+_DEMO_TILT_DEG = 35.0
+_DEMO_END_AZ_DEG = 130.0
+
+
+def demo_orbit_steps(zoom_center: Optional[tuple] = None,
+                     home_center: Optional[tuple] = None) -> list:
     """The canned SOP fly-around, ~22 s recorded at the default fps.
 
     XY top-down fit 2.5 s; slow 2 s pan to the oblique hero (35 degrees off XY, azimuth
     30), 3 s; an orbit - the azimuth sweeps 30 -> 80 -> 130 on the same 35 degree cone
     over 6 s of pan (each waypoint tuned on a real ViewerModel to hold tilt 35.0 +/- 0.1);
     XZ 2.5 s (the axial view); YZ 2.5 s; back to the hero for 2 s.
+
+    *zoom_center* (world (z, y, x)) inserts the ZOOM CHAPTER between the orbit and XZ,
+    random_orbit_steps' own shape: a 3 s glide into the target with the zoom rising
+    ZOOM_GLIDE_FACTOR-fold, a drifted parallax hold, a 2 s pull-back toward
+    *home_center*. The DATA chooses the target (see :func:`volume_zoom_targets`);
+    None keeps the chapterless demo.
     """
-    return [
+    steps = [
         Step("xy", dwell_s=2.5),
         Step(OBLIQUE_HERO, dwell_s=3.0, transition_s=2.0, zoom=DEMO_ZOOM),
         Step((0.0, 34.4, 82.9), transition_s=3.0, zoom=DEMO_ZOOM),     # azimuth 80
         Step((0.0, 26.1, 114.3), transition_s=3.0, zoom=DEMO_ZOOM),    # azimuth 130
+    ]
+    if zoom_center is not None:
+        end = pose_for(_DEMO_TILT_DEG, _DEMO_END_AZ_DEG)
+        drift = pose_for(_DEMO_TILT_DEG, _DEMO_END_AZ_DEG + ZOOM_DRIFT_DEG)
+        steps += [
+            Step(end, transition_s=3.0, glide=True,
+                 center=tuple(float(v) for v in zoom_center), zoom=ZOOM_GLIDE_FACTOR),
+            Step(drift, dwell_s=1.0, transition_s=2.5, glide=True),
+            Step(drift, transition_s=2.0, glide=True, zoom=1.0 / ZOOM_GLIDE_FACTOR,
+                 center=(tuple(float(v) for v in home_center)
+                         if home_center is not None else None)),
+        ]
+    steps += [
         Step("xz", dwell_s=2.5),
         Step("yz", dwell_s=2.5),
         Step(OBLIQUE_HERO, dwell_s=2.0, transition_s=2.0, zoom=DEMO_ZOOM),
     ]
+    return steps
+
+
+def volume_zoom_targets(vol) -> tuple:
+    """``(zoom_center, home_center)`` in world (z, y, x) um for the zoom chapter, chosen
+    by the DATA on screen: the center of mass of the top 1% brightest pixels of the
+    resident bricks' z-MIPs (the comparison script's rule, read off the live layers
+    instead of the raw files); home is the volume box's own center. ``(None, None)``
+    when the volume's books are not readable, ``(None, home)`` when no brick holds
+    bright pixels yet, so the caller records the chapterless orbit rather than guess."""
+    origin = getattr(vol, "_origin_um", None)
+    scale = getattr(vol, "_scale", None)
+    window = getattr(vol, "_window", None)
+    nz = getattr(vol, "_nz", None)
+    if origin is None or scale is None or window is None or not nz:
+        return None, None
+    r0, r1, c0, c1 = (int(v) for v in window)
+    home = (float(origin[0]) + float(nz) * float(scale[0]) / 2.0,
+            float(origin[1]) + (r1 - r0) * float(scale[1]) / 2.0,
+            float(origin[2]) + (c1 - c0) * float(scale[2]) / 2.0)
+    mips = []
+    for ly in list(getattr(vol, "_layers", {}).values()):
+        data = getattr(ly, "data", None)
+        if data is None or getattr(data, "ndim", 0) != 3:
+            continue
+        try:
+            mips.append((np.asarray(data).max(axis=0),
+                         tuple(float(v) for v in ly.translate),
+                         tuple(float(v) for v in ly.scale)))
+        except Exception:                    # noqa: BLE001 - a brick mid-eviction has no vote
+            continue
+    if not mips:
+        return None, home
+    thr = float(np.quantile(np.concatenate([m.ravel() for m, _t, _s in mips]), 0.99))
+    wsum = wy = wx = 0.0
+    for mip, tr, sc in mips:
+        ys, xs = np.nonzero(mip >= thr)
+        if ys.size == 0:
+            continue
+        w = mip[ys, xs].astype(np.float64)
+        wsum += float(w.sum())
+        wy += float(((tr[1] + (ys + 0.5) * sc[1]) * w).sum())
+        wx += float(((tr[2] + (xs + 0.5) * sc[2]) * w).sum())
+    if wsum <= 0.0:
+        return None, home
+    return (home[0], wy / wsum, wx / wsum), home
 
 
 def pose_for(tilt_deg: float, azimuth_deg: float) -> tuple:

@@ -654,25 +654,25 @@ class RegionViewer(QMainWindow):
         # separate tabs for the 3d view."): a 2D tab IS 2D and a 3D tab IS 3D; nothing
         # switches modes in place. The chip and `_view_roi_2d` are deleted whole.
         self._btn_3d = self._chip("3D", "Open this view in 3D as a new tab.", self._open_3d)
-        self._btn_focus = self._chip("⌖ focus", "Jump the z-slider to the sharpest plane.",
+        self._btn_focus = self._chip("focus", "Jump the z-slider to the sharpest plane.",
                                      self._focus_reference_plane)
         # The "▣ plate" chip is GONE (UI feedback 2026-08-17): the working layout keeps the plate
         # BESIDE the views, so "bring the plate forward" stopped being a job. The ⚙ controls chip
         # is built in `operator_panel()` now — the whole per-window operator surface lives in the
         # views window's collapsible dock (2026-08-19).
         self._btn_record = self._chip(
-            "⏺ movie", "Export this view as an .mp4 over its time or z axis.",
+            "movie", "Export this view as an .mp4 over its time or z axis.",
             self._record_movie)
         # The PNG export renders the DATA, never the canvas: a screenshot is screen resolution,
         # this is the visible layer's own pixels at native pitch (Julio: "a high-resolution
         # (i.e., zoom-able, high DPI) PNG for powerpoints").
         self._btn_png = self._chip(
-            "⎙ png", "Save this view as a full-resolution PNG.", self._save_png)
+            "png", "Save this view as a full-resolution PNG.", self._save_png)
         # FOVs. The ROI chips beside it are for a box the user draws; this is for the boxes the
         # ACQUISITION already drew. On a sparse run — the AF sweep sets are 16 fields at 7x the
         # field pitch, so 3% of the mosaic is data — checking focus means visiting each field, and
         # doing that by wheel-zoom is the complaint this answers.
-        self._btn_fovs = self._chip("⊞ FOVs", self._FOVS_TIP, self._open_fovs)
+        self._btn_fovs = self._chip("FOVs", self._FOVS_TIP, self._open_fovs)
         # ONE grid of every chip, all visible, nothing folded (Julio, 2026-08-25: "the GUI
         # buttons such as 'FOVs' shouldn't collapse"). The ROI chip is two-state (draw / go).
         from qtpy.QtWidgets import QGridLayout
@@ -682,10 +682,10 @@ class RegionViewer(QMainWindow):
         grid.setSpacing(COLUMN_PX)
         chips = [
             self._btn_3d, self._btn_roi, self._btn_fovs,
-            self._chip("⊙ select", "Click an ROI to select it; Delete removes it.",
+            self._chip("select", "Click an ROI to select it; Delete removes it.",
                        self._select_rois),
-            self._chip("✕ clear", "Remove all ROIs in this window.", self._clear_rois),
-            self._chip("→ window", "Open the drawn ROIs as child views.", self._open_roi_children),
+            self._chip("clear", "Remove all ROIs in this window.", self._clear_rois),
+            self._chip("window", "Open the drawn ROIs as child views.", self._open_roi_children),
             self._btn_focus, self._btn_record, self._btn_png,
         ]
         # 3D camera poses are NOT buttons (Julio, 2026-09-09: "the camera controls
@@ -733,6 +733,7 @@ class RegionViewer(QMainWindow):
         giz = self._camera_gizmo
         if giz is not None and _alive(giz):
             giz.set_active(True)
+        self._refresh_record_chip()          # the movie chip records the orbit here
 
     def _play_orbit(self) -> None:
         """Play the canned demo orbit live in this view; the chip disables while it runs."""
@@ -1063,6 +1064,20 @@ class RegionViewer(QMainWindow):
         btn = getattr(self, "_btn_record", None)
         if btn is None:
             return
+        if self._is_volume_tab:
+            # A volume tab's movie IS the camera orbit (Julio, 2026-09-22: "a button of
+            # exporting a video of the 3D rendering"); no sweep axis is required.
+            problem = encoder_problem()
+            if problem:
+                btn.setEnabled(False)
+                btn.setToolTip(f"No mp4 encoder on this machine - {problem}")
+                return
+            btn.setEnabled(True)
+            btn.setToolTip(
+                "Record this 3D view as an .mp4: the demo camera orbit plus the zoom "
+                "dive into the brightest structure, at the contrast on screen. Runs on "
+                "the live canvas; the view is busy while it records.")
+            return
         meta = self._meta or {}
         if not can_record(meta):
             btn.setEnabled(False)
@@ -1098,9 +1113,15 @@ class RegionViewer(QMainWindow):
         return visible or names
 
     def _record_movie(self) -> None:
-        """Export this view's sweep to an .mp4. Second click cancels the run in flight."""
+        """Export this view's sweep to an .mp4. Second click cancels the run in flight.
+
+        On a VOLUME tab the movie is the 3D orbit recording instead; the 2D sweep
+        stays exactly what it was everywhere else."""
         from squidxplorer._video import DEFAULT_FPS, axis_length, can_record, default_axis
 
+        if self._is_volume_tab:
+            self._record_orbit_movie()
+            return
         worker = self._video_worker
         if worker is not None and worker.isRunning():
             worker.stop()
@@ -1147,6 +1168,59 @@ class RegionViewer(QMainWindow):
                 int(100 * d / max(1, total)), f"movie: frame {d} of {total}"),
             on_finished=lambda: self._forget_video_worker(w),
             signals={"cancelled": self._on_movie_cancelled})
+
+    def _record_orbit_movie(self) -> None:
+        """One click on a volume tab records the demo orbit to an .mp4 (Julio, 2026-09-22:
+        "we should add a button of exporting a video of the 3D rendering. Just like we
+        had for the 2D png."): the same recording the camera scripts make, save dialog
+        first, the zoom chapter's target chosen by the data on screen.
+
+        Runs ON the GUI thread on purpose: the script drives the live canvas and pumps
+        Qt itself, so a worker thread could not hold it. The chip disables while it runs.
+        """
+        from squidxplorer import _camera_script
+        from squidxplorer._video import encoder_problem
+
+        if getattr(self, "_orbit_running", False):
+            self._say("movie: a camera script is already running in this view.")
+            return
+        problem = encoder_problem()
+        if problem:
+            self._say(f"movie: {problem}")
+            return
+        vol = getattr(self, "_native3d", None)
+        if vol is None:
+            self._say("movie: no 3D volume is up in this view yet.")
+            return
+        region = self.current_region()
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"Save the 3D orbit movie of {region}", f"{region}_orbit.mp4",
+            "Movie (*.mp4)")
+        if not path:
+            return
+        if not str(path).lower().endswith(".mp4"):
+            path = f"{path}.mp4"
+        zoom_center, home_center = _camera_script.volume_zoom_targets(vol)
+        self._orbit_running = True
+        btn = getattr(self, "_btn_record", None)
+        if btn is not None and _alive(btn):
+            btn.setEnabled(False)
+        self._say(f"recording the 3D orbit of {region} to {path}…")
+        t0 = time.perf_counter()
+        try:
+            result = _camera_script.run_camera_script(
+                self,
+                _camera_script.demo_orbit_steps(zoom_center=zoom_center,
+                                                home_center=home_center),
+                out_path=path, fps=_camera_script.DEFAULT_FPS)
+        except (ValueError, RuntimeError) as exc:
+            self._on_movie_failed(str(exc))
+        else:
+            self._on_movie_done(result.path, result.n_frames, time.perf_counter() - t0)
+        finally:
+            self._orbit_running = False
+            if btn is not None and _alive(btn):
+                btn.setEnabled(True)
 
     def _z_slider_index(self) -> int:
         """Which z plane this window is showing, or 0 when it has no z slider."""
@@ -2031,8 +2105,8 @@ class RegionViewer(QMainWindow):
         log.debug("view %s auto-contrast landed for %s", self.window_id, sorted(windows))
 
     #: The ROI chip's two faces: draw a box, or go to the box just drawn.
-    _ROI_DRAW = ("▭ ROI", "Draw an ROI rectangle inside the mosaic.")
-    _ROI_GO = ("→ ROI", "Open the drawn ROI as a child view.")
+    _ROI_DRAW = ("ROI", "Draw an ROI rectangle inside the mosaic.")
+    _ROI_GO = ("open ROI", "Open the drawn ROI as a child view.")
     _roi_count = 0
     _roi_used = False
 
@@ -2893,7 +2967,7 @@ class ViewerManager(QObject):
         if not regions:
             return None
         base = title or RegionViewer._view_label(regions)
-        full = f"{base}  ◂ view {parent_id}" if parent_id is not None else base
+        full = f"{base} · view {parent_id}" if parent_id is not None else base
         return self._spawn(regions, title=full, roi_bbox=roi_bbox, parent_id=parent_id, luts=luts,
                            fovs=fovs, layers_only=layers_only)
 

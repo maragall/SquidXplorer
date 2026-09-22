@@ -519,7 +519,7 @@ class BrickedVolume:
         from squidxplorer._napari3d import pin_max_compositing
 
         kwargs = {
-            "name": f"{channel} ▪ {key[1][0]},{key[1][1]}",
+            "name": f"{channel} · {key[1][0]},{key[1][1]}",
             "scale": scale,
             "translate": translate,
             "rendering": "mip",

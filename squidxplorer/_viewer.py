@@ -603,8 +603,8 @@ class PlateWindow(QMainWindow):
         _cycle_qss = ("QPushButton{background:#0b0e14;color:#8b949e;border:1px solid #232b3a;"
                       "border-radius:4px;padding:1px 6px;font-size:11px;}"
                       "QPushButton:hover{background:#161b22;}")
-        self._acq_prev_btn = QPushButton("◀")
-        self._acq_next_btn = QPushButton("▶")
+        self._acq_prev_btn = QPushButton("<")
+        self._acq_next_btn = QPushButton(">")
         for _b, _d in ((self._acq_prev_btn, -1), (self._acq_next_btn, +1)):
             _b.setStyleSheet(_cycle_qss)
             _b.setCursor(Qt.PointingHandCursor)
@@ -1908,9 +1908,9 @@ class PlateWindow(QMainWindow):
             cb = QCheckBox(ly.label + ("  (base)" if base else ""))
             cb.setChecked(ly.enabled); cb.setStyleSheet("color:#e6edf3;")
             cb.toggled.connect(lambda on, k=ly.key: self._on_layer_toggle(k, on))
-            up = QPushButton("↑"); up.setStyleSheet(_BTN_QSS); up.setFixedWidth(34)
+            up = QPushButton("up"); up.setStyleSheet(_BTN_QSS); up.setFixedWidth(34)
             up.clicked.connect(lambda _=False, k=ly.key: self._on_layer_move(k, +1))
-            dn = QPushButton("↓"); dn.setStyleSheet(_BTN_QSS); dn.setFixedWidth(34)
+            dn = QPushButton("down"); dn.setStyleSheet(_BTN_QSS); dn.setFixedWidth(34)
             dn.clicked.connect(lambda _=False, k=ly.key: self._on_layer_move(k, -1))
             if base:
                 # IMA-227: raw is the layer every transform is recoverable TO — "each transform is
@@ -2476,7 +2476,7 @@ class PlateWindow(QMainWindow):
         _launch_worker(
             self, w, slot="_worker",
             on_done=lambda: self._readout.setText(
-                f"✓ computed MIP · {len(self._order)} wells (read-only){fov_warn}"),
+                f"done: computed MIP · {len(self._order)} wells (read-only){fov_warn}"),
             on_problem=self._on_failed,
             on_progress=lambda i, n: self._readout.setText(
                 f"loading computed plate - {i}/{n} wells"),
@@ -2724,9 +2724,9 @@ class PlateWindow(QMainWindow):
         # place that decides the two are the same thing today.
         self._overview.reset_layer(layer_key)
         if saves_copy:
-            dest = f" → stitched_{self._acq_name}"
+            dest = f" -> stitched_{self._acq_name}"
         elif save:
-            dest = f" → {out_dir.name}"
+            dest = f" -> {out_dir.name}"
         else:
             dest = " (preview - not saved)"
         reopen_note = ("  (re-openable acquisition)" if (acq_format or saves_copy)
@@ -2738,15 +2738,15 @@ class PlateWindow(QMainWindow):
         def _done_msg(w=worker):
             if w.landed == 0:
                 self._run_readout(
-                    f"⚠ {label} · {scope} produced nothing - all {w.skipped or self._worker._total} "
+                    f"warning: {label} · {scope} produced nothing - all {w.skipped or self._worker._total} "
                     f"well(s) were skipped (see the red markers)")
             elif w.skipped:
                 self._run_readout(
-                    f"✓ {label} · {scope}{dest} - {w.skipped} well(s) skipped"
+                    f"done: {label} · {scope}{dest} - {w.skipped} well(s) skipped"
                     + (reopen_note if save else ""))
             else:
                 self._run_readout(
-                    f"✓ {label} · {scope}{dest}" + (reopen_note if save else ""))
+                    f"done: {label} · {scope}{dest}" + (reopen_note if save else ""))
 
         # Announce the run to the activity registry the log panel's header reads. Keyed
         # "operator-run" (re-entrant by key: a new run replaces the old entry rather than stacking).
@@ -2784,7 +2784,7 @@ class PlateWindow(QMainWindow):
             windows=windows)
         self._tell_requester(requester, "operator_started", label)
         self.log.started(self._run.action, address=self._run.address)
-        self._run_readout(f"● {label} · {scope}{dest} …")
+        self._run_readout(f"{label} · {scope}{dest} …")
         # Whether the plate this run is writing ended up whole is NOT tracked here. `write_plate`
         # settles it on the store itself (`_output.INCOMPLETE_MARKER`, kept unless every field
         # this run owed landed) as the last act of the write, which is the only place that knows
@@ -2836,7 +2836,7 @@ class PlateWindow(QMainWindow):
         from squidxplorer._acqset_gui import SetRunWorker
 
         worker = SetRunWorker(self._acq_set, key, operator_kwargs, out_parent, parent=self)
-        self._readout.setText(f"● {label} · all {n} acquisitions … (progress in the log)")
+        self._readout.setText(f"{label} · all {n} acquisitions … (progress in the log)")
         _launch_worker(self, worker, slot="_bulk",
                        on_done=self._on_bulk_done,
                        on_problem=lambda m: self._readout.setText(f"set run failed: {m}"))
@@ -2845,7 +2845,7 @@ class PlateWindow(QMainWindow):
         """The set-wide save drained: report the tally the loop measured, never the intent."""
         whole = not (summary["failed"] or summary["partial"] or summary["stopped"])
         self._readout.setText(
-            ("✓" if whole else "⚠") + f" set run: {summary['ok']} ok, "
+            ("done:" if whole else "warning:") + f" set run: {summary['ok']} ok, "
             f"{summary['partial']} partial, {summary['failed']} failed of "
             f"{summary['total']} acquisition(s)"
             + (" (stopped early)" if summary["stopped"] else ""))
@@ -2904,14 +2904,14 @@ class PlateWindow(QMainWindow):
         w = _BulkPngWorker(self._reader, self._meta, jobs, looks,
                            z_level=view._z_slider_index(), time_point=view.time_point,
                            out_dir=out_dir, acq=self._acq_name or "plate", parent=self)
-        self._readout.setText(f"● bulk png: {len(jobs)} file(s), one look for all, to {out_dir} "
+        self._readout.setText(f"bulk png: {len(jobs)} file(s), one look for all, to {out_dir} "
                               "(progress in the log)")
         _launch_worker(self, w, slot="_bulk_png",
                        on_done=self._on_bulk_png_done,
                        on_problem=lambda m: self._readout.setText(f"bulk png failed: {m}"))
 
     def _on_bulk_png_done(self, written: int, asked: int, out_dir: str, seconds: float) -> None:
-        mark = "✓" if written == asked else "⚠"
+        mark = "done:" if written == asked else "warning:"
         self._readout.setText(f"{mark} bulk png: {written} of {asked} file(s) written to "
                               f"{out_dir} in {seconds:.1f}s")
 
