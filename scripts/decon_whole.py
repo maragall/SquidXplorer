@@ -2,6 +2,7 @@
 """Deconvolve a WHOLE acquisition: full z per solve, lateral tiling across solves.
 
 Usage: python scripts/decon_whole.py SOURCE [--iterations N] [--dry-run]
+       [--na NA --dxy-um UM --ni NI]   # corrected optics, PSF only
 
 Each solve is one whole (Z, y, x) window through the existing deconvolve_stack
 (never tiled internally, z always whole); windows tile the frame exactly and each
@@ -13,7 +14,6 @@ Output is a sibling acquisition in the source's own OME-TIFF shape.
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import logging
 import os
 import shutil
@@ -102,11 +102,14 @@ def solve_tiled(stack: np.ndarray, optics, halo: int, grid: int,
     return out
 
 
-def channel_plans(source: Path, meta: dict, overrides: dict | None = None) -> dict:
+def channel_plans(source: Path, meta: dict, corrected=None) -> dict:
     """{channel: (optics, halo) or None for copy-through} with z bound to the stack depth.
 
-    *overrides* maps OpticsParams field names (na, dxy_um, ni) to explicit values that
-    replace the acquisition record's, for a record known to be wrong or incomplete.
+    *corrected* is an optional (na, dxy_um, ni) triple replacing ONLY those three fields
+    per channel; wavelength, dz and nz stay each channel's own. Deliberately NOT
+    _decon.set_optics: that override is one whole record used for every channel,
+    wavelength included, and this script solves several emission channels in one run.
+    The correction reaches the PSF only; the on-disk pixel_size_um stays the record's.
     """
     plans = {}
     for ch in meta["channels"]:
@@ -118,11 +121,16 @@ def channel_plans(source: Path, meta: dict, overrides: dict | None = None) -> di
                      name, exc)
             plans[name] = None
             continue
-        changes = dict(overrides or {})
         if o.nz != meta["n_z"]:
-            changes["nz"] = meta["n_z"]
-        if changes:
-            o = dataclasses.replace(o, **changes)
+            o = _decon.OpticsParams(o.na, o.wavelength_um, o.dxy_um, o.dz_um,
+                                    meta["n_z"], o.ni)
+        if corrected is not None:
+            na, dxy_um, ni = corrected
+            recorded = o
+            o = _decon.OpticsParams(na, o.wavelength_um, dxy_um, o.dz_um, o.nz, ni)
+            log.info("%s: CORRECTED optics %s (recorded: na=%s, dxy_um=%s, ni=%s; the "
+                     "correction reaches the PSF only, on-disk pixel_size_um untouched)",
+                     name, o, recorded.na, recorded.dxy_um, recorded.ni)
         plans[name] = (o, _decon.lateral_halo_px(o))
     return plans
 
@@ -149,15 +157,22 @@ def main(argv=None) -> int:
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--suffix", default="",
                         help="output-name suffix, e.g. _i2 -> decon46_i2_<source>")
+    parser.add_argument("--na", type=float, default=None,
+                        help="corrected objective NA (with --dxy-um and --ni; PSF only)")
+    parser.add_argument("--dxy-um", type=float, default=None,
+                        help="corrected pixel size um for the PSF's lateral sampling; "
+                             "the output's on-disk pixel_size_um stays the record's")
+    parser.add_argument("--ni", type=float, default=None,
+                        help="corrected immersion index, e.g. 1.333 for water")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the tile plan and estimates, solve nothing")
-    parser.add_argument("--na", type=float, default=None,
-                        help="override the recorded numerical aperture")
-    parser.add_argument("--dxy-um", type=float, default=None,
-                        help="override the recorded lateral pixel size (um)")
-    parser.add_argument("--ni", type=float, default=None,
-                        help="override the immersion refractive index")
     args = parser.parse_args(argv)
+
+    given = (args.na, args.dxy_um, args.ni)
+    if any(v is not None for v in given) and any(v is None for v in given):
+        parser.error("--na, --dxy-um and --ni travel together: a corrected PSF needs "
+                     "all three (wavelength stays per channel).")
+    corrected = given if args.na is not None else None
 
     logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
     source = args.source.resolve()
@@ -169,12 +184,7 @@ def main(argv=None) -> int:
     meta = reader.metadata
     n_z, (height, width) = meta["n_z"], meta["frame_shape"]
     names = [c["name"] for c in meta["channels"]]
-    overrides = {k: v for k, v in
-                 (("na", args.na), ("dxy_um", args.dxy_um), ("ni", args.ni))
-                 if v is not None}
-    if overrides:
-        log.info("optics overrides: %s", ", ".join(f"{k}={v}" for k, v in overrides.items()))
-    plans = channel_plans(source, meta, overrides)
+    plans = channel_plans(source, meta, corrected)
     solved_plans = {n: p for n, p in plans.items() if p is not None}
     if not solved_plans:
         raise SystemExit("every channel copies through; nothing to deconvolve")
