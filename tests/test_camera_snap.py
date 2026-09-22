@@ -108,6 +108,90 @@ def test_the_orbit_chip_plays_the_demo_live_and_disables_while_it_runs(
         shutdown_plate_window(qapp, win)
 
 
+def test_the_movie_chip_on_a_volume_tab_records_the_camera_orbit(
+        qapp, napari_pane_stub, squid_dataset, monkeypatch, tmp_path):
+    """Julio, 2026-09-22: "we should add a button of exporting a video of the 3D
+    rendering. Just like we had for the 2D png." On a volume tab the movie chip IS that
+    button: a save dialog, then the camera-script recording of the demo orbit at the
+    script's own fps. The 2D sweep path is untouched (tests/test_video_window.py pins
+    it end to end on a 2D tab)."""
+    from qtpy.QtWidgets import QFileDialog
+
+    from squidxplorer import _camera_script, _video
+
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    v = win._viewer_manager.open([list(win._order)[0]])
+    _drain_until(qapp, lambda: v._pane is not None, timeout=10)
+    try:
+        monkeypatch.setattr(_video, "encoder_problem", lambda: None)
+        v.note_volume_tab()
+        assert v._btn_record.isEnabled(), "the movie chip is dead on a volume tab"
+        tip = v._btn_record.toolTip()
+        assert "orbit" in tip and "zoom" in tip, tip
+        v._native3d = object()               # a volume is up; the stub has no bricks yet
+        out = tmp_path / "orbit.mp4"
+        monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                            staticmethod(lambda *a, **k: (str(out), "Movie (*.mp4)")))
+        calls = []
+
+        def fake_run(w, steps, **kw):
+            calls.append((w, [s.pose for s in steps], kw,
+                          v._btn_record.isEnabled()))
+            return _camera_script.ScriptResult(str(out), 7, ())
+
+        monkeypatch.setattr(_camera_script, "run_camera_script", fake_run)
+        v._record_movie()
+        assert len(calls) == 1, "the volume tab's movie chip did not record the orbit"
+        w, poses, kw, enabled_during = calls[0]
+        assert w is v
+        assert poses == [s.pose for s in _camera_script.demo_orbit_steps()], (
+            "a brickless stub volume must record the chapterless demo orbit")
+        assert kw["out_path"] == str(out) and kw["fps"] == _camera_script.DEFAULT_FPS
+        assert enabled_during is False, "the chip stayed clickable while recording"
+        assert v._btn_record.isEnabled(), "the chip never came back after the run"
+        assert v._video_worker is None, "the orbit recording must not start the 2D sweep"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_volume_zoom_targets_reads_the_bright_structure_and_the_demo_gains_the_dive():
+    """The zoom chapter's target is DATA-chosen: the center of mass of the top 1%
+    brightest z-MIP pixels of the resident bricks, in world um; home is the box center.
+    With a target, ``demo_orbit_steps`` grows the glide chapter around it."""
+    from squidxplorer import _camera_script
+
+    class _Layer:
+        def __init__(self):
+            self.data = np.zeros((2, 8, 8), np.uint16)
+            self.data[:, 6, 2] = 1000
+            self.translate = (0.0, 10.0, 20.0)
+            self.scale = (3.0, 1.0, 1.0)
+
+    class _Vol:
+        _layers = {"k": _Layer()}
+        _origin_um = (0.0, 10.0, 20.0)
+        _scale = (3.0, 1.0, 1.0)
+        _window = (0, 8, 0, 8)
+        _nz = 2
+
+    target, home = _camera_script.volume_zoom_targets(_Vol())
+    assert home == pytest.approx((3.0, 14.0, 24.0))
+    assert target == pytest.approx((3.0, 16.5, 22.5)), (
+        "the target must sit on the bright structure, not the box center")
+
+    plain = _camera_script.demo_orbit_steps()
+    dived = _camera_script.demo_orbit_steps(zoom_center=target, home_center=home)
+    assert len(dived) == len(plain) + 3, "the zoom chapter is three glide steps"
+    glides = [s for s in dived if s.glide]
+    assert glides and glides[0].center == pytest.approx(target)
+    assert glides[0].zoom == _camera_script.ZOOM_GLIDE_FACTOR
+    assert glides[-1].center == pytest.approx(home)
+    assert _camera_script.volume_zoom_targets(object()) == (None, None), (
+        "an unreadable volume must refuse quietly, not guess a chapter")
+
+
 def test_each_snap_points_the_camera_down_its_own_axis(mosaic):
     """The pin is ``camera.view_direction`` in napari's (z, y, x) world order, never the
     angle triple itself; and every snap refines the bricks (a pure rotation fires no

@@ -181,7 +181,7 @@ def new_roi(win) -> None:
     try:
         v.layers.selection.active = layer
         layer.mode = "add_rectangle"
-        win._say("Draw an ROI rectangle, then '→ window' to open it as a child window.")
+        win._say("Draw an ROI rectangle, then 'window' to open it as a child window.")
     except Exception as exc:                         # noqa: BLE001
         win._say(f"could not start an ROI: {exc}")
 
@@ -190,7 +190,7 @@ def select_rois(win) -> None:
     """Enter select mode so an ROI can be clicked and deleted."""
     v, layer = roi_shapes_layer(win, create=False)
     if v is None or layer is None:
-        win._say("draw an ROI first with '▭ new'.")
+        win._say("draw an ROI first with 'ROI'.")
         return
     try:
         v.layers.selection.active = layer
@@ -237,7 +237,7 @@ def open_roi_children(win) -> None:
     layer = win._roi_layer
     rects = list(getattr(layer, "data", []) or []) if layer is not None else []
     if v is None or layer is None or layer not in list(v.layers) or not rects:
-        win._say("no ROI to open - draw one with '▭ new' first.")
+        win._say("no ROI to open - draw one with 'ROI' first.")
         return
     if win._manager is None:
         win._say(f"{len(rects)} ROI(s) drawn, but this window has no manager to open children.")

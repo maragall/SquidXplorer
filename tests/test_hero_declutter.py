@@ -511,26 +511,26 @@ def test_the_roi_chip_turns_into_go_to_roi_once_a_box_is_drawn(qapp, napari_pane
     win, (v,) = _open_view(qapp, root)
     mgr = win._viewer_manager
     try:
-        assert v._btn_roi.text() == "▭ ROI"
+        assert v._btn_roi.text() == "ROI"
         v._btn_roi.click()                               # start drawing
         layer = v._roi_layer
         assert layer is not None, "the ROI chip did not start an ROI layer"
         rect = _rect_inside(win._meta, v.current_region())
         layer.data = [rect]                              # the user finished the rectangle
         qapp.processEvents()
-        assert v._btn_roi.text() == "→ ROI", "the chip did not turn into the go-to-ROI arrow"
+        assert v._btn_roi.text() == "open ROI", "the chip did not turn into the go-to-ROI state"
         assert len(v._btn_roi.toolTip().split(". ")) == 1, "the arrow's tooltip is one sentence"
         n_before = len(mgr.windows)
         v._btn_roi.click()                               # the arrow opens the ROI child
         _drain_until(qapp, lambda: len(mgr.windows) == n_before + 1, timeout=10)
         assert len(mgr.windows) == n_before + 1, "clicking the arrow did not open the ROI child"
-        assert v._btn_roi.text() == "▭ ROI", "a used ROI must hand the chip back to drawing"
+        assert v._btn_roi.text() == "ROI", "a used ROI must hand the chip back to drawing"
         layer.data = [rect, rect + 2.0]                  # a SECOND box is drawn
         qapp.processEvents()
-        assert v._btn_roi.text() == "→ ROI", "a new box must offer the arrow again"
+        assert v._btn_roi.text() == "open ROI", "a new box must offer the open state again"
         v._clear_rois()
         qapp.processEvents()
-        assert v._btn_roi.text() == "▭ ROI", "clearing the ROIs must hand the chip back"
+        assert v._btn_roi.text() == "ROI", "clearing the ROIs must hand the chip back"
     finally:
         shutdown_plate_window(qapp, win)
 

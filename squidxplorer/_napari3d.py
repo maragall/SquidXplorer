@@ -530,7 +530,7 @@ def open_native_3d_volume(
         cmap = colormap_by_channel.get(name)            # bricks cannot step in brightness
         for b in bricks:
             kwargs = {
-                "name": name if single else f"{name} ▪ {b.iy},{b.ix}",
+                "name": name if single else f"{name} · {b.iy},{b.ix}",
                 "scale": scale,
                 "translate": (0.0, b.r0 * float(scale[1]), b.c0 * float(scale[2])),
                 "blending": "additive",
