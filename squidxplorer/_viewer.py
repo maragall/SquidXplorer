@@ -428,7 +428,7 @@ class PlateWindow(QMainWindow):
         #
         # There WAS a third pane, "exploration" (IMA-205/221/237/260): one tab per Shift-dragged FOV
         # subset, each embedding a second napari mosaic. 2b8fbc5 ("Decentralize GUI") replaced the
-        # gesture that filled it — a Shift-drag opens an independent window now — and the pane was
+        # gesture that filled it (a Shift-drag SELECTS since 2026-09-24) — and the pane was
         # removed on 2026-08-05 along with the tab, its slider, its export button and its scope.
         # The one thing that was still routed into it, the deconvolution QC composite, goes to
         # `_left_tabs` (see `publish_qc_result`), which is on screen.
@@ -2431,8 +2431,8 @@ class PlateWindow(QMainWindow):
         self._overview.hovered.connect(self._on_hover)
         self._overview.wellActivated.connect(self.activate_well)
         self._overview.activeLayerChanged.connect(lambda _k: self._update_loupe_source())
-        # NAVIGATION BELONGS HERE TOO, even though this path deliberately omits selectionChanged
-        # and marqueeSelected: a view opened over the earlier RAW plate can outlive the switch to a
+        # NAVIGATION BELONGS HERE TOO, even though this path deliberately omits selectionChanged:
+        # a view opened over the earlier RAW plate can outlive the switch to a
         # computed one, and it is still a window the user can steer. `show_region` refuses a region
         # this acquisition does not have, which is what keeps a mismatch honest rather than silent.
         self._overview.wellNavigated.connect(self._on_well_navigated)
@@ -2867,7 +2867,9 @@ class PlateWindow(QMainWindow):
             self._readout.setText("bulk png: open an acquisition first.")
             return
         if not self._selected_regions:
-            self._readout.setText("bulk png: select wells on the plate first (click, shift-click or drag a box).")
+            self._readout.setText(
+                "bulk png: select wells on the plate first (Shift-drag a box, Shift-click "
+                "or Cmd/Ctrl-click wells).")
             return
         manager = getattr(self, "_viewer_manager", None)
         view = manager.active_view() if manager is not None else None
@@ -3431,23 +3433,6 @@ class PlateWindow(QMainWindow):
         """
         return _run_scope.distinct_view_regions(self._open_view_targets())
 
-    def _on_marquee_selected(self, wells: list):
-        """Shift-DRAG released on the plate -> open an INDEPENDENT napari window for that subset.
-
-        The decentralized flow (Spencer, 2026-07-23): a selection opens a floating napari window,
-        and MANY wells become ONE window with a region slider to step through them — not one window
-        per well, which "is really not what anybody wants". The window is tracked by ID in the Open
-        View list. Shift+CLICK still refines the selection; the drag-release is the "open" gesture.
-
-        An empty drag (over blank plate) is a miss, not a request: return quietly rather than
-        writing 'empty selection' over whatever the readout is saying."""
-        if not wells:
-            return
-        ordered = [w for w in self._order if w in set(wells)] or list(wells)  # plate row-major
-        win = self._viewer_manager.open(ordered)
-        if win is None:
-            self._readout.setText("Open an acquisition before opening a view.")
-
     def selected_region_fovs(self) -> list:
         """The current selection as (region, fov) pairs — the payload IMA-205 will consume.
 
@@ -3479,7 +3464,8 @@ class PlateWindow(QMainWindow):
     def activate_well(self, well_id: str, fov_index: int):
         """Double-click a well -> open ONE independent window on that region.
 
-        The single-region case of the shift-drag gesture. It used to have a second half — register
+        The one plate gesture that OPENS a view (a Shift-drag selects, a plain click
+        navigates). It used to have a second half — register
         the well's raw z-planes into an embedded ndviewer_light and move its FOV slider — and that
         half has been unreachable since the module was deleted on 2026-07-30 (`self._detail` was
         assigned `None` once and never anything else), so it is gone with it.

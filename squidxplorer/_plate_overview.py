@@ -322,9 +322,6 @@ class PlateOverview(QWidget):
     hovered = Signal(str)
     wellActivated = Signal(str, int)
     selectionChanged = Signal(list)
-    # Shift-drag specifically: opens an exploration tab. Shift-click refines the selection one
-    # well at a time and deliberately does not fire this, or every corrective click spawns a tab.
-    marqueeSelected = Signal(list)
     activeLayerChanged = Signal(str)
     wellNavigated = Signal(str)        # region id: a plain LEFT-CLICK, while a view window is open,
     #                                    asking the ACTIVE view to show this region. Deliberately
@@ -1295,7 +1292,7 @@ class PlateOverview(QWidget):
             return
         self._nav.stop()          # a new press supersedes any navigation still waiting to fire
         self._nav_well = None
-        # Shift owns multi-well selection: Shift-drag opens the wells you box, Shift+Alt unions,
+        # Shift owns multi-well selection: Shift-drag selects the wells you box, Shift+Alt unions,
         # Cmd/Ctrl-click toggles one. A plain click ALSO acts, and what it does depends on whether
         # a view window is open (`_click_navigates`): with none it REPLACES the selection; with one
         # it navigates that view and leaves the selection alone. Both are idempotent, which is what
@@ -1380,24 +1377,27 @@ class PlateOverview(QWidget):
                     self._fov_selection.pop(hit["well_id"], None)
                 self.selectionChanged.emit(self.selected_wells())
             else:
-                # Shift-drag opens a window over the boxed regions and leaves no persistent wash.
-                boxed = [self._by_rc[rc] for rc in sorted(set(self._cells_in(x0, y0, x1, y1)))]
+                # A drag SELECTS, either way: the wash must survive the release so "select wells,
+                # then File > Export PNGs of Selected Wells" works (Julio, 2026-09-24: the old
+                # open-a-window gesture unshaded the plate the moment he boxed wells to export).
+                # Zoomed in far enough that the box lands inside a mosaic, it selects the fields
+                # it covers rather than the whole well.
+                cells = set(self._cells_in(x0, y0, x1, y1))
                 if add:
-                    # Shift+Alt-drag unions into the batch selection, and — zoomed in far enough
-                    # that the box lands inside a mosaic — unions the fields it covers rather than
-                    # the whole well.
-                    cells = set(self._cells_in(x0, y0, x1, y1))
+                    # Shift+Alt-drag unions into the batch selection.
                     self._selection |= cells
                     for region, fovs in self._fovs_in(x0, y0, x1, y1, cells).items():
                         prev = self._fov_selection.get(region)
                         self._fov_selection[region] = (
                             sorted(set(prev) | set(fovs)) if prev else list(fovs))
-                    self.selectionChanged.emit(self.selected_wells())
                 else:
-                    self.marqueeSelected.emit(boxed)
-                    if self._selection:
-                        self._selection = set()
-                        self.selectionChanged.emit([])
+                    # Shift-drag REPLACES it. Opening views over the boxed wells was this
+                    # gesture's job while views were floating windows (Spencer, 2026-07-23);
+                    # with a lazy view over every well and click-to-navigate, a drag that
+                    # spawns tabs and clears the wash is only a trap.
+                    self._selection = cells
+                    self._fov_selection = self._fovs_in(x0, y0, x1, y1, cells)
+                self.selectionChanged.emit(self.selected_wells())
             self.update()
             self._press = None
             self._panning = False
@@ -1436,8 +1436,11 @@ class PlateOverview(QWidget):
             else:
                 new_sel = ({(hit["row_index"], hit["col_index"])}
                            if hit and hit["well_id"] else set())
-                if new_sel != self._selection:
+                if new_sel != self._selection or self._fov_selection:
+                    # A whole-well gesture means the whole well: replacing the selection also
+                    # drops any FOV subsets a marquee had cropped into it.
                     self._selection = new_sel
+                    self._fov_selection = {}
                     self.selectionChanged.emit(self.selected_wells())
                     self.update()
         self._press = None

@@ -453,12 +453,13 @@ def test_double_click_opens_an_independent_window_on_that_region(qapp, squid_dat
 
 
 
-def _boxed(ov):
-    """Records what a Shift-drag asks to open (marqueeSelected) plus every selection emission alongside it."""
-    opened, selected = [], []
-    ov.marqueeSelected.connect(lambda wells: opened.append(list(wells)))
-    ov.selectionChanged.connect(lambda wells: selected.append(list(wells)))
-    return opened, selected
+def _selected(ov):
+    """Records every selection emission. A drag can emit nothing else: the open-a-window
+    marquee is gone (a drag that spawned a view and cleared the wash left nothing selected
+    for the bulk PNG export, Julio 2026-09-24)."""
+    seen = []
+    ov.selectionChanged.connect(lambda wells: seen.append(list(wells)))
+    return seen
 
 def _sel_overview(cd=20.0):
     """A 2x2 plate with a sparse corner (B1 never acquired) and a frozen view (deterministic pixels)."""
@@ -496,40 +497,41 @@ def _drag(ov, a, b, mods):
     ov.mouseReleaseEvent(_mouse("release", b, mods, buttons=Qt.NoButton))
 
 
-def test_marquee_asks_for_a_window_over_exactly_the_boxed_wells(qapp):
-    """A second drag reports its own box rather than accumulating with the first."""
+def test_a_shift_drag_selects_the_boxed_wells_and_opens_nothing(qapp):
+    """The wash survives the release (it feeds Export PNGs of Selected Wells), a second drag
+    REPLACES rather than accumulates, and no window opens: the open-a-window marquee unshaded
+    the plate the moment wells were boxed for bulk export (Julio, 2026-09-24)."""
     ov = _sel_overview()
-    opened, _sel = _boxed(ov)
+    seen = _selected(ov)
     ov.select(1, 1)
     _drag(ov, _pt(0, 0), _pt(1, 1), Qt.ShiftModifier)          # sweep the whole 2x2
-    assert opened == [["A1", "A2", "B2"]]                      # B1 never acquired -> excluded
-    assert ov.selected_wells() == [], "the drag left a lingering selection wash on the plate"
-    _drag(ov, *_within(0, 0), Qt.ShiftModifier)                # a fresh marquee over A1 only...
-    assert opened == [["A1", "A2", "B2"], ["A1"]]              # ...its own box, not a union
+    assert ov.selected_wells() == ["A1", "A2", "B2"]           # B1 never acquired -> excluded
+    assert seen == [["A1", "A2", "B2"]]
+    _drag(ov, *_within(0, 0), Qt.ShiftModifier)                # a fresh box over A1 only...
+    assert ov.selected_wells() == ["A1"], "a plain Shift-drag must replace, not union"
     assert ov._sel == (1, 1), "the marquee moved the red box"
+    assert not hasattr(ov, "marqueeSelected"), (
+        "the open-a-window marquee is back; a Shift-drag must select, never spawn a view")
 
 
 def test_additive_marquee_unions(qapp):
-    """Seeded with Shift+Alt since a plain Shift-drag now opens a window instead of selecting."""
+    """Shift+Alt unions into the batch selection where the plain drag replaces it."""
     ov = _sel_overview()
-    opened, _sel = _boxed(ov)
     _drag(ov, *_within(0, 0), Qt.ShiftModifier | Qt.AltModifier)         # A1
     _drag(ov, *_within(1, 1), Qt.ShiftModifier | Qt.AltModifier)         # + B2
     assert ov.selected_wells() == ["A1", "B2"]
-    assert opened == [], "Shift+Alt opened a window instead of unioning into the selection"
 
 
 def test_marquee_emits_once_on_release(qapp):
     """Emits once per gesture on release, not per mouse-move — a 1536-well plate would otherwise rebuild + emit a list per move."""
     ov = _sel_overview()
-    opened, seen = _boxed(ov)
+    seen = _selected(ov)
     ov.mousePressEvent(_mouse("press", _pt(0, 0), Qt.ShiftModifier))
     for _ in range(5):                                          # five moves mid-drag...
         ov.mouseMoveEvent(_mouse("move", _pt(1, 1), Qt.ShiftModifier))
-    assert opened == [] and seen == []                          # ...emit NOTHING
+    assert seen == []                                           # ...emit NOTHING
     ov.mouseReleaseEvent(_mouse("release", _pt(1, 1), Qt.ShiftModifier, buttons=Qt.NoButton))
-    assert opened == [["A1", "A2", "B2"]]                       # exactly one emission
-    assert seen == [], "an empty batch selection was cleared it never had"
+    assert seen == [["A1", "A2", "B2"]]                         # exactly one emission
 
 
 def test_wheel_ignored_during_marquee(qapp):
@@ -605,10 +607,9 @@ def test_double_click_selects_only_the_well_it_opens(qapp):
 
 
 def test_clear_selection_emits_empty(qapp):
-    """Seeded through Shift+Alt, since a plain Shift-drag opens a window rather than selecting."""
     ov = _sel_overview()
     seen = []
-    _drag(ov, _pt(0, 0), _pt(1, 1), Qt.ShiftModifier | Qt.AltModifier)
+    _drag(ov, _pt(0, 0), _pt(1, 1), Qt.ShiftModifier)
     assert ov.selected_wells() == ["A1", "A2", "B2"]            # there is really something to clear
     ov.selectionChanged.connect(lambda wells: seen.append(list(wells)))
     ov.clear_selection()
@@ -1275,7 +1276,8 @@ def test_reopened_plate_windows_globally_like_the_run_that_wrote_it(qapp):
         "a worker that needs colours is compositing; the widget owns compositing (IMA-206).")
 
 
-# A Shift-drag now emits marqueeSelected, and PlateWindow._on_marquee_selected turns that into ViewerManager.open(ordered) — one independent napari window with a region slider over the boxed set, not an exploration tab in a central pane.
+# A Shift-drag SELECTS the boxed wells and opens nothing (2026-09-24): views come from
+# double-click and the working layout's lazy view, never from a drag.
 
 def _freeze(ov, cd=20.0):
     """Freezes the plate view so synthetic widget coordinates hit the intended cells."""
@@ -1286,7 +1288,7 @@ def _freeze(ov, cd=20.0):
 
 def test_shift_click_refines_the_selection_without_opening_anything(qapp,
                                                                     squid_dataset):
-    """Only the drag opens a window; Shift+click refines one well without opening one per corrective click."""
+    """Shift+click refines one well; no gesture on the plate opens a window but double-click."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -2239,7 +2241,8 @@ def test_a_user_drag_of_the_timepoint_bar_does_not_raise(qapp,
 
 
 def test_a_real_plate_gesture_is_what_the_selection_payload_carries(qapp, squid_dataset):
-    """End to end through real gestures: since the marquee-drag/click split, a drag asks for a window and moves no selection scope, while a click moves selection scope and opens no window."""
+    """End to end through real gestures: a Shift-drag and a plain click both move the selection
+    scope and neither opens a window (only double-click opens; 2026-09-24)."""
     from qtpy.QtCore import QEvent, QPoint
     from qtpy.QtGui import QMouseEvent
 
@@ -2270,10 +2273,9 @@ def test_a_real_plate_gesture_is_what_the_selection_payload_carries(qapp, squid_
     send(QEvent.MouseButtonRelease, cx + box, cy + box, Qt.NoButton)
     qapp.processEvents()
 
-    assert asked == [[target]], f"the Shift-drag did not open a window over {target}: {asked}"
-    assert ov.selected_wells() == [], "the Shift-drag left a batch selection behind"
+    assert asked == [], f"the Shift-drag opened a window; it must only select: {asked}"
+    assert ov.selected_wells() == [target], "the Shift-drag did not leave the well selected"
 
-    asked.clear()
     send(QEvent.MouseButtonPress, cx, cy, Qt.LeftButton, Qt.NoModifier)
     send(QEvent.MouseButtonRelease, cx, cy, Qt.NoButton, Qt.NoModifier)
     qapp.processEvents()

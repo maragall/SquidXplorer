@@ -1608,6 +1608,28 @@ merge without a hand test; the GL look of the new widgets is a hand check owed):
   U+2200-22FF, U+2300-23FF, U+25A0-25FF, U+2600-26FF, U+2700-27BF, U+2B00-2BFF,
   U+FE00-FE0F, U+1F000-1FAFF. tools/ harness strings are outside the sweep's scope.
 
+## A Shift-drag on the plate SELECTS; no drag opens a window (2026-09-24, branch marquee-selects)
+
+Julio, testing bulk export on the installed build: "When I select, it automatically opens
+another window, so the regions in the plate don't stay shaded (selected) so I can't export
+selected regions (wells)." The open-a-window marquee (Spencer's decentralized flow,
+2026-07-23) predates the working layout; with a lazy view over every well and
+click-to-navigate, a drag that spawns a tab and clears the wash was only a trap under
+File > Export PNGs of Selected Wells.
+
+- **A plain Shift-drag REPLACES the batch selection** with the boxed wells (FOV subsets
+  included when the box lands inside a mosaic); **Shift+Alt-drag still unions**; Shift-click
+  still toggles one well; Cmd/Ctrl-click unchanged. The wash persists after release, so
+  select-then-export works. An empty box clears, consistent with the empty-space click.
+- **`marqueeSelected` is deleted whole** with `PlateWindow._on_marquee_selected`, its
+  `_ingest` connection and its `_window_contract` field. Double-click is the ONE plate
+  gesture that opens a view. Pinned in
+  `tests/test_viewer.py::test_a_shift_drag_selects_the_boxed_wells_and_opens_nothing`
+  (absence of the signal included).
+- **A whole-well replace drops cropped FOV subsets**: the plain-click replace branch resets
+  `_fov_selection` (the same rule Shift-click already stated), so a marquee's crop cannot
+  leak into a later whole-well selection's export/run payload.
+
 ## Agent skills
 
 ### Issue tracker

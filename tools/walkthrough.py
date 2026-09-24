@@ -321,25 +321,22 @@ def run_all():
             ov.mouseMoveEvent(ev("move", b, mods))
             ov.mouseReleaseEvent(ev("release", b, mods, buttons=_NONE))
 
-        # A plain Shift-drag OPENS a window and leaves no selection; Shift+Alt SELECTS.
-        # Both halves are driven because they are two different gestures.
-        opened = []
-        ov.marqueeSelected.connect(lambda wells: opened.append(list(wells)))
+        # A plain Shift-drag SELECTS (replace); Shift+Alt UNIONS. Neither opens a window
+        # (2026-09-24: the open-a-window drag unshaded the plate under the bulk PNG export).
         drag(_SHIFT)
         after_plain = ov.selected_wells()
-        drag(_SHIFT | Qt.KeyboardModifier.AltModifier)      # ...the gesture that DOES select
+        drag(_SHIFT | Qt.KeyboardModifier.AltModifier)
         wells = ov.selected_wells()
         sel = w.selected_region_fovs()
         m = w._reader.metadata
         want_wells = list(m["regions"])
         want_pairs = sum(len(f) for f in m["fovs_per_region"].values())
         w.close()
-        assert opened == [want_wells], f"Shift-drag asked to open {opened}, expected {want_wells}"
-        assert after_plain == [], f"a plain Shift-drag left a selection wash: {after_plain}"
+        assert after_plain == want_wells, f"a plain Shift-drag selected {after_plain} != {want_wells}"
         assert wells == want_wells, f"Shift+Alt-drag selected {wells} != {want_wells}"
         assert len(sel) == want_pairs, f"expected {want_pairs} (region, fov) pairs, got {len(sel)}"
-        return (f"Shift-drag over the whole plate -> opens {opened[0]} and selects nothing; "
-                f"Shift+Alt-drag -> selects {wells}, {len(sel)} (region, fov) pairs")
+        return (f"Shift-drag over the whole plate -> selects {after_plain}; "
+                f"Shift+Alt-drag -> unions to {wells}, {len(sel)} (region, fov) pairs")
 
 
 
