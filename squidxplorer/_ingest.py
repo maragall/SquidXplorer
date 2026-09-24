@@ -113,7 +113,6 @@ def ingest(win, path: str) -> None:
     win._overview.hovered.connect(win._on_hover)
     win._overview.wellActivated.connect(win.activate_well)
     win._overview.selectionChanged.connect(win._on_selection_changed)
-    win._overview.marqueeSelected.connect(win._on_marquee_selected)
     # THE OVERVIEW IS REBUILT ON EVERY INGEST, so a fresh one starts in select mode and has to
     # be re-told: views opened over the previous acquisition can still be open right now.
     win._overview.wellNavigated.connect(win._on_well_navigated)
@@ -181,8 +180,8 @@ def ingest(win, path: str) -> None:
     sources = color_sources(meta.get("channels"))
     color = (f" · color: {', '.join(sources)}" if sources else "")
     win._readout.setText(
-        f"{len(win._fov_index)} wells loaded · double-click a well, or Shift-drag to open "
-        f"several{note}{color}")
+        f"{len(win._fov_index)} wells loaded · double-click a well to open it, "
+        f"Shift-drag to select several{note}{color}")
     win._on_plate_loaded()
 
 

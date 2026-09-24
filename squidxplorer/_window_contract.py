@@ -74,7 +74,6 @@ class IngestWindow(Protocol):
     # -- bound methods passed on, not called here (signal slots and worker callbacks) ------------
     _clear_progress_if_idle: Any
     _on_hover: Any
-    _on_marquee_selected: Any
     _on_preview_failed: Any
     _on_preview_tile: Any
     _on_selection_changed: Any
