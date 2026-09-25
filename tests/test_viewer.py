@@ -3056,42 +3056,37 @@ def test_an_operator_tile_downsamples_every_channel_on_its_own(qapp, tmp_path):
 
 # --- color provenance reaches the view surfaces ---------------------------------------------------
 
-def _color_recorded_gray_acq(tmp_path):
-    """A gray-recorded color acquisition (2-D BMPs + the sidecar calling the channel RGB)."""
+def _real_rgb_acq(tmp_path):
+    """A real color acquisition: one (Y, X, 3) BMP, expanded into (R)/(G)/(B) components."""
     from PIL import Image
 
-    root = tmp_path / "acq_gray_rgb"
-    mv = root / "0" / "mosaic_view"
-    mv.mkdir(parents=True)
+    root = tmp_path / "acq_rgb"
+    (root / "0").mkdir(parents=True)
     rng = np.random.default_rng(7)
-    Image.fromarray(rng.integers(0, 255, (16, 16), dtype=np.uint8)).save(
+    Image.fromarray(rng.integers(0, 255, (16, 16, 3), dtype=np.uint8)).save(
         root / "0" / "manual_0_0_BF_LED_matrix_full.bmp")
     (root / "acquisition.yaml").write_text(
         "objective:\n  pixel_size_um: 0.418\nz_stack:\n  nz: 1\ntime_series:\n  nt: 1\n")
     (root / "acquisition_channels.yaml").write_text(
         "channels:\n- name: BF LED matrix full\n  display_color: '#FFFFFF'\n")
-    t = np.tile(np.linspace(0.2, 1.0, 200), (120, 1))
-    png = np.stack([255 * t ** 0.3, 255 * t, 255 * t ** 0.6], axis=-1).astype(np.uint8)
-    Image.fromarray(png).save(mv / "mosaic_2um_x.png")
-    (mv / "mosaic_2um.yaml").write_text(
-        "rgb_channel_names:\n- 20x BF LED matrix full\nrgb_view_files:\n- mosaic_2um_x.png\n")
     return root
 
 
 def test_a_view_says_the_color_provenance_and_pins_it_on_the_raw_group(qapp, napari_pane_stub,
                                                                        tmp_path):
-    """Once per open in the window's say line, persistently as the raw group's note."""
+    """Once per open in the window's say line, persistently as the raw group's note.
+    "file" is the one derived-color provenance left since the reconstruction shelf."""
     from squidxplorer import open_reader
     from squidxplorer._region_viewer import RegionViewer
 
-    reader = open_reader(str(_color_recorded_gray_acq(tmp_path)), pad_partial=True)
+    reader = open_reader(str(_real_rgb_acq(tmp_path)), pad_partial=True)
     meta = reader.metadata
     v = RegionViewer(reader, meta, [], window_id=71)
     try:
         pane = napari_pane_stub[-1]
         note = pane.mosaic.color_note("raw")
-        assert note is not None and "estimated colormap" in note
-        assert any("estimated colormap" in s for s in pane.said), (
+        assert note is not None and "file color" in note
+        assert any("file color" in s for s in pane.said), (
             "the provenance sentence never reached the window's say line")
     finally:
         v.close()

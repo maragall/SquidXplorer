@@ -320,8 +320,8 @@ def colormap_hue_rgb(layer: Any) -> "Optional[tuple[int, int, int]]":
 
 
 def colormap_mid_rgb(layer: Any) -> "Optional[tuple[int, int, int]]":
-    """The 8-bit RGB of a colormap's MIDDLE stop — the representative tint of a map that does
-    not reduce to black-to-hue (a measured stain LUT is white-topped, so its hue lives mid-curve).
+    """The 8-bit RGB of a colormap's MIDDLE stop — the representative tint of a map that
+    does not reduce to black-to-hue (turbo, for one).
     """
     cm = getattr(layer, "colormap", None)
     colors = getattr(cm, "colors", None)
