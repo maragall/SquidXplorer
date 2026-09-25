@@ -51,8 +51,8 @@ def per_channel_luts(win) -> "dict[str, dict]":
         try:
             from squidxplorer._napari_view import colormap_hue_rgb, colormap_mid_rgb
 
-            # A stain LUT is white-topped and does not reduce to a hue; its mid stop is the
-            # tint the plate can carry, so a paste still updates the plate's color.
+            # A colormap that does not reduce to black-to-hue (turbo, for one) still has a
+            # representative mid-stop tint the plate can carry.
             lut["rgb"] = colormap_hue_rgb(layer) or colormap_mid_rgb(layer)
         except Exception:                            # noqa: BLE001
             lut["rgb"] = None

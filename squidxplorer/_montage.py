@@ -138,38 +138,26 @@ def _hex_to_rgb01(hex_color: str) -> np.ndarray:
 
 
 def channel_tint01(channel) -> np.ndarray:
-    """A channel's composite tint in [0, 1]: the measured stain LUT's mid stop when one exists
-    (a color channel recorded gray — see ``_stain``), else its resolved ``display_color``."""
-    lut = channel.get("display_lut") if hasattr(channel, "get") else None
-    if lut:
-        return np.asarray(lut[len(lut) // 2][:3], dtype=np.float32)
+    """A channel's composite tint in [0, 1]: its resolved ``display_color``."""
     return _hex_to_rgb01(channel["display_color"])
 
 
-def composite(store: np.ndarray, colors: np.ndarray, windows, mask=None, luts=None) -> np.ndarray:
+def composite(store: np.ndarray, colors: np.ndarray, windows, mask=None) -> np.ndarray:
     """Window each channel of a ``(C, H, W)`` stack and add it into one ``(H, W, 3)`` uint8 RGB.
 
     The single home of the window-multiply-sum loop. *windows* is one ``(lo, hi)`` per
-    channel; *mask* is a per-channel bool (None = every channel on). *luts* is one optional
-    per-channel colormap (an ``(N, 3)``-shaped sequence of stops): a channel carrying one maps
-    each windowed value THROUGH it instead of tinting — the brightfield/stain mode, where the
-    background belongs at white and additive-from-black would wash the cell out.
+    channel; *mask* is a per-channel bool (None = every channel on).
     """
     n_ch, h, w = store.shape
     if h == 0 or w == 0:
         return np.zeros((h, w, 3), np.uint8)
     colors = np.ascontiguousarray(colors[:n_ch], dtype=np.float32)
-    lut_arrs = [None] * n_ch
-    for ch in range(n_ch):
-        lut = luts[ch] if luts is not None and ch < len(luts) else None
-        if lut is not None:
-            lut_arrs[ch] = np.ascontiguousarray(np.asarray(lut, dtype=np.float32)[:, :3])
     out = np.empty((h, w, 3), np.uint8)
     n_bands = max(1, min(_composite_pool()._max_workers, (h * w) // _COMPOSITE_MIN_PX_PER_BAND))
     n_bands = min(n_bands, h)
     edges = [(i * h) // n_bands for i in range(n_bands)] + [h]
     rows = [slice(edges[i], edges[i + 1]) for i in range(n_bands)]
-    work = lambda r: _composite_band(store, colors, windows, mask, lut_arrs, out, r)   # noqa: E731
+    work = lambda r: _composite_band(store, colors, windows, mask, out, r)   # noqa: E731
     if n_bands == 1:
         work(rows[0])
     else:
@@ -178,7 +166,7 @@ def composite(store: np.ndarray, colors: np.ndarray, windows, mask=None, luts=No
     return out
 
 
-def _composite_band(store, colors, windows, mask, lut_arrs, out, rows: slice) -> None:
+def _composite_band(store, colors, windows, mask, out, rows: slice) -> None:
     """Composite one horizontal band of rows into ``out[rows]``."""
     n_ch = store.shape[0]
     sub = store[:, rows]
@@ -198,15 +186,7 @@ def _composite_band(store, colors, windows, mask, lut_arrs, out, rows: slice) ->
         else:
             # table[idx] beats np.take here: take carries a bounds-check path.
             norm = table[plane.reshape(-1)]
-        lut = lut_arrs[ch]
-        if lut is None:
-            gray[ch] = norm
-        else:                                       # per-pixel colormap, not a tint
-            # nan_to_num + clip: a degenerate window (lo == hi) yields NaN norms, and a NaN
-            # cast to intp is an out-of-range index.
-            idx = np.clip(np.nan_to_num(norm) * (lut.shape[0] - 1),
-                          0, lut.shape[0] - 1).astype(np.intp)
-            rgb += lut[idx]
+        gray[ch] = norm
     # einsum, NEVER a BLAS gemm: many band threads calling OpenBLAS at once exhausted its
     # internal buffer pool on a many-core Windows machine (access violation at this line).
     rgb += np.einsum("cn,cd->nd", gray, colors)     # (n, 3) float32

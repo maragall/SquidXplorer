@@ -60,7 +60,7 @@ from squidxplorer._logpane import get_logger
 
 log = get_logger("viewer")
 
-from squidxplorer import _gallery_launch, _ingest, _measure, _qtstyle, _run_scope, _stain
+from squidxplorer import _gallery_launch, _ingest, _measure, _qtstyle, _run_scope
 from squidxplorer.contract import field_path
 from squidxplorer._engine import available_plane_operators
 from squidxplorer._montage import _hex_to_rgb01, channel_tint01
@@ -825,15 +825,6 @@ class PlateWindow(QMainWindow):
         self._gallery_act = QAction("&Gallery View…", self)
         self._gallery_act.triggered.connect(self._open_gallery_view)
         view_menu.addAction(self._gallery_act)
-        view_menu.addSeparator()
-        # Derived color is default-ON but one click to honest gray; unchecked, a gray-recorded
-        # channel keeps its yaml color and gets neither chroma channels nor a stain LUT.
-        # Connected AFTER setChecked so mirroring the current flag does not fire a re-ingest.
-        self._recon_color_act = QAction("Reconstructed &Color", self)
-        self._recon_color_act.setCheckable(True)
-        self._recon_color_act.setChecked(_stain.reconstruction_enabled())
-        self._recon_color_act.toggled.connect(self._toggle_reconstructed_color)
-        view_menu.addAction(self._recon_color_act)
 
         self.setAcceptDrops(True)
         if initial_path:
@@ -2142,7 +2133,7 @@ class PlateWindow(QMainWindow):
         # (measured ~46000 events/s through the fan-out, against a 44 ms plate repaint), so
         # the sink queues and a trailing CONTRAST_FOLLOW_MS debounce repaints once the drag
         # settles, under the plate's own 150 ms full-res pass. FOLLOW path only: never the
-        # manual latch, and no colormap travels, so a stain-LUT plate look survives. The
+        # manual latch, and no colormap travels, so a curated plate look survives. The
         # focused view only, through ViewerManager.active_view.
         def _contrast_sink(channel: str, lo: float, hi: float, _win=win):
             av = self._viewer_manager.active_view()
@@ -3238,10 +3229,8 @@ class PlateWindow(QMainWindow):
         if self._overview is None:
             return
         colors = np.stack([channel_tint01(c) for c in channels])
-        luts = [c.get("display_lut") for c in channels]
         self._overview.set_channels([c.get("display_name") or c["name"] for c in channels],
-                                    colors, dtype,
-                                    luts=luts if any(l is not None for l in luts) else None)
+                                    colors, dtype)
         # RGB components share the FILE's full range, identical across the triplet — the same
         # rule the window's seed uses (_workers._seed_window): per-channel percentile windows
         # distort the hue additive blending exists to reconstruct. Latched manual so the
@@ -3309,16 +3298,6 @@ class PlateWindow(QMainWindow):
         if self._overview is not None:
             self._overview.select_all()
 
-    def _toggle_reconstructed_color(self, checked: bool):
-        """Flip the one derived-color flag and re-ingest, so the reader rebuilds under it."""
-        _stain.set_reconstruction(bool(checked))
-        state = "on" if checked else "off (gray channels keep their yaml color)"
-        if self._acq_path is not None:
-            self.ingest(str(self._acq_path))
-        else:
-            self._readout.setText(
-                f"reconstructed color {state}; applies to the next acquisition opened")
-
     def _close_all_views(self):
         """Close every open view (the navigator's old "Close all", now a View-menu action)."""
         mgr = getattr(self, "_viewer_manager", None)
@@ -3347,7 +3326,7 @@ class PlateWindow(QMainWindow):
     # `_plate_paste_luts`, the window-side pair and the shared `_lut_clipboard.CLIPBOARD` are
     # deleted. What SURVIVES is everything that is not the clipboard: the automatic window -> plate
     # contrast tap (`_bind_window_contrast` / `follow_channel_window`), `MosaicLayers`' identity
-    # and contrast model, a window's "Match layers to raw", and the stain `display_lut` path.
+    # and contrast model, and a window's "Match layers to raw".
 
     def _on_well_navigated(self, well_id: str):
         """Plain left-click on a well -> show that region in the ACTIVE view window.

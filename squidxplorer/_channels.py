@@ -145,13 +145,11 @@ def resolve_channels(filename_channels, yaml_map: dict) -> list[dict]:
 
 
 # -- color provenance (DisplayChannel.color_source) ----------------------------------------------
-# The vocabulary is written where it is stamped: reader._expand_rgb_channels ("file"),
-# _stain.attach_stain_luts ("estimated"); "reconstructed" is reserved for the overview-chroma
-# expansion. Most derived first, so the least trustworthy source leads the sentence.
-_COLOR_SOURCE_ORDER = ("estimated", "reconstructed", "file")
+# The vocabulary is written where it is stamped: reader._expand_rgb_channels ("file").
+# ("estimated" and "reconstructed" died with the overview-chroma shelf, 2026-09-25: a color
+# channel recorded gray is a configuration error, not something to color back in.)
+_COLOR_SOURCE_ORDER = ("file",)
 _COLOR_SOURCE_NOTES = {
-    "estimated": "estimated colormap (density fit from the acquisition's overview)",
-    "reconstructed": "reconstructed from the acquisition's own overview",
     "file": "file color (the plane's own RGB components)",
 }
 

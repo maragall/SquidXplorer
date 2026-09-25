@@ -1630,6 +1630,33 @@ File > Export PNGs of Selected Wells.
   `_fov_selection` (the same rule Shift-click already stated), so a marquee's crop cannot
   leak into a later whole-well selection's export/run payload.
 
+## Color reconstruction is SHELVED whole (2026-09-25, branch shelf-chroma)
+
+Julio: "Shelf the color reconstruction logic. I meant RGB images looking in RGB, there was
+an error with configuration file. No need to reconstruct." A color channel recorded gray
+was a CONFIGURATION error on the rig, not a display problem to solve; the entire derived-
+color story built for it is deleted per the Minerva rule (reinstate from git history).
+
+- **Deleted whole**: `_stain.py` (ChromaSource, ratio maps, overview geometry, the
+  denominator floor, `stain_lut`/`attach_stain_luts`, `STAIN_WHITE_PERCENTILE`, the
+  `SQUIDXPLORER_NO_RECONSTRUCTED_COLOR` env flag and `reconstruction_enabled`/
+  `set_reconstruction`); the reader's chroma half (`_chroma`, `chroma_sources` call,
+  `_chroma_component`, `_log_chroma_coverage`, the "reconstructed"/"estimated" provenance
+  stamps); `DisplayChannel.display_lut`; the View > Reconstructed Color menu action and
+  `_toggle_reconstructed_color`; the stain-LUT arm of `_montage.composite` (the `luts=`
+  parameter through `_plate_overview.set_channels`/`_luts`), `channel_tint01`'s LUT stop,
+  `_napari_pane._colormap_for`'s LUT branch and `_workers._seed_window`'s zero-to-white
+  seed; `tests/test_stain.py` and the chroma/stain halves of `test_color_reader.py` and
+  `test_plate_simplify.py`.
+- **What SURVIVES is file-sourced color only**: a real (Y, X, 3) plane still expands into
+  (R)/(G)/(B) component channels of the FILE's own pixels (`_expand_rgb_channels`,
+  `_split_rgb_channel`, `is_rgb_component`, the full-range contrast seed, "file"
+  provenance). A 2-D file behind a component channel is refused by name. A gray-recorded
+  channel opens as ONE plain gray channel under its yaml color, overview PNG or not.
+- Pinned in `tests/test_color_reader.py::test_the_color_reconstruction_is_shelved_whole`:
+  the strongest old trigger (overview PNG + geometry + positions) expands nothing, attaches
+  nothing, and `squidxplorer._stain` does not import.
+
 ## Agent skills
 
 ### Issue tracker
