@@ -3129,3 +3129,28 @@ def test_the_layer_tree_group_tooltip_carries_the_color_note(qapp):
     assert model.data(child, _Qt.ToolTipRole) == model.data(child, _Qt.DisplayRole)
     mosaic.set_color_note("raw", None)
     assert model.data(group, _Qt.ToolTipRole) == "raw"
+
+
+def test_the_readers_open_time_warnings_reach_the_log(qapp, tmp_path, caplog):
+    """A padded timepoint axis was a Python warning on stderr, which a launched app has no one
+    reading (the 40x live test, 2026-10-05): the ingest logs what the reader warned, so the
+    log panel carries it."""
+    import tifffile
+
+    root = tmp_path / "acq"
+    (root / "0").mkdir(parents=True)
+    tifffile.imwrite(root / "0" / "B2_0_0_Fluorescence_405_nm_Ex.tiff",
+                     np.full((8, 8), 7, np.uint16))
+    (root / "acquisition.yaml").write_text(
+        "objective:\n  pixel_size_um: 0.5\nz_stack:\n  nz: 1\ntime_series:\n  nt: 3\n")
+    (root / "coordinates.csv").write_text("region,x (mm),y (mm)\nB2,1.0,1.0\n")
+    (root / ".done").write_text("")
+
+    win = V.PlateWindow(None)
+    try:
+        with caplog.at_level("WARNING", logger="squid.xplorer"):
+            win.ingest(str(root))
+        lines = [rec.getMessage() for rec in caplog.records if rec.levelname == "WARNING"]
+        assert any("t: 2 timepoint(s)" in line and "ENDED" in line for line in lines), lines
+    finally:
+        win.close()

@@ -1657,6 +1657,54 @@ color story built for it is deleted per the Minerva rule (reinstate from git his
   the strongest old trigger (overview PNG + geometry + positions) expands nothing, attaches
   nothing, and `squidxplorer._stain` does not import.
 
+## The 40x live test: one timepoint on disk, brightfield rendered black, 2x decimated (2026-10-05, branch live-test-fixes)
+
+A customer's live-imaging run (`9.25.26_CZI_004_Live_Test_B3`, 21 FOVs x 25 z x 2 ch at 40x,
+Nt 3 at dt 2 s): "very pixelated and the time frames don't seem to be changing", against
+the microscope's own BF live view. Three measured facts, three rules:
+
+- **There is ONE timepoint on disk, and that is Squid's doing, not stitching.** One timepoint
+  took 235 s against a 2 s interval, and `MultiPointWorker` skips every timepoint whose start
+  it has already passed (117 "skip time point" lines, then `.done`). The viewer padded t 1-2
+  BLACK (pad_partial) and said so only as a Python warning on stderr, which a launched app
+  has no one reading. Now: the reader's open-time warnings are LOGGED by `_ingest` (WARNING,
+  so the log panel carries them), and `reader.timepoint_shortfall_note` names the cause from
+  what is on disk: the folders against the declared Nt, the run's end marker (`.done` is
+  written on completion AND abort, so it means "nothing more will arrive"), and the executed
+  `0/coordinates.csv` `time` column's span against `dt_s_declared` (new in
+  `load_acquisition_metadata`, from `time_series.delta_t_s` / legacy `dt(s)`): "set the
+  interval above one timepoint's duration". The rig-side fix is exactly that sentence.
+- **A transmitted-light channel's window spans its OWN tonal range.** `auto_contrast` was
+  "the contrast window for fluorescence" and ran on the BF channel: floor = background mode
+  + 2 sigma put 99.3% of a BF plane (mode 3472, sigma 202) BELOW black, a dark field of bright
+  speckle, which is what "very pixelated" looked like. `_contrast.transmitted_light(channel)`
+  is the ONE spelling (`_channels.excitation_nm` is None: the same declaration decon reads for
+  its copy-through), `auto_contrast(..., transmitted=True)` is the 0.1-99.9 percentile window
+  over the LIT pixels (exact zeros are the mosaic's uncovered area and padded slots: with
+  them in, the floor was 0 and the tissue a washed-out grey), and every seed carries the
+  channel: the add_mosaic seed, napari's reset-contrast request, `_AutoContrastWorker`, the
+  gallery's `cell_window`, `_napari3d._auto_clim`. The plate's `_pct_window` was already a
+  percentile rule. Measured through the view path on the live test: BF (4800, 5216) -> (2208,
+  5248).
+- **The native rung is ALWAYS offered; the 3D swap budgets itself.** The fine rungs down to
+  native were gated on the WHOLE level's bytes x nz (8360 px x 25 z = 3.5 GB > 2 GB), for the
+  one consumer that materialises a level whole, so the finest 2D pixel on screen was a 2x
+  decimation (0.42 um displayed over 0.21 um acquired). Every rung is windowed: the native
+  rung costs nothing until a viewport asks (a 1000 px level-0 window: 0.03 s). The budget
+  moved to the consumer: `MosaicLayers._swap_layer_scale` picks the finest level that fits
+  the GL texture AND `_mosaic_source.PLANE_BUDGET_BYTES` (`_napari_view._fits_level_budget`).
+  `render_view_png` takes the finest LEVEL within `max_px` (`_level_within`) instead of
+  materialising level 0 whole and striding it, and its `step` reports the total decimation
+  against native; the `_crop_levels_to_bbox` ROI crop and `sample_plane` were level-aware
+  already. Pinned in test_contrast, test_mosaic_source, test_png_export, test_pad_partial
+  and test_viewer. NOT done: the GL look on a live canvas is a hand check owed (offscreen has
+  no OpenGL); a stray partial copy of the acquisition inside its own `0/` folder (one TIFF,
+  made the day it was reported) is the customer's, untouched. On this Windows box the
+  suite is NOT green on main either: test_viewer's thumbnail-pixels test aborts with an
+  access violation, the empty-hero drop test compares a forward-slash path to a
+  backslash one, and the stitch kwargs tests need the `stitch` extra; the dash sweep
+  read sources as cp1252 (fixed: it reads UTF-8).
+
 ## Agent skills
 
 ### Issue tracker

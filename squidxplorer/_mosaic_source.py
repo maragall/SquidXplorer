@@ -139,7 +139,7 @@ def fuse_region_mosaic(
 
 
 #: Refuse to materialise more than this in one slice request.
-_PLANE_BUDGET_BYTES = 2 * 1024 ** 3
+PLANE_BUDGET_BYTES = 2 * 1024 ** 3
 
 
 def _planned_plane(meta: dict, region: str, max_px: int):
@@ -543,10 +543,10 @@ def fuse_region_pyramid(
 
     # The plane budget guards level 0: it is still materialised at full zoom.
     per_plane = _h0 * _w0 * dtype.itemsize
-    if per_plane > _PLANE_BUDGET_BYTES:
+    if per_plane > PLANE_BUDGET_BYTES:
         raise MemoryError(
             f"{region}/{channel}: one fused plane is {per_plane / 1e9:.1f} GB "
-            f"({_h0}x{_w0} {dtype}), over the {_PLANE_BUDGET_BYTES / 1e9:.1f} GB plane budget. "
+            f"({_h0}x{_w0} {dtype}), over the {PLANE_BUDGET_BYTES / 1e9:.1f} GB plane budget. "
             "Lower max_px rather than letting this page the machine."
         )
 
@@ -602,19 +602,21 @@ def fuse_region_pyramid(
     # The well-image short-circuit lives on inside ``_WindowedLevel._whole_plane``.
     levels = [_rung(int(step), h, w, dt, _well_source) for _px, h, w, step, dt in plans]
 
-    # FINER RUNGS, ON DEMAND, down to native. Budget-gated per rung because the
-    # full-materialisation consumers (the 3-D full-res swap) still take level 0
-    # whole. ``well=None`` on purpose: a fine rung's pixels stay strided camera data, never
-    # the area-averaged well image.
+    # FINER RUNGS, ON DEMAND, down to NATIVE, always. Every rung is windowed, so a native
+    # rung costs nothing until a viewport asks for it, and then only the FOVs under it. The
+    # rungs used to be budget-gated on the WHOLE level's bytes x nz for the one consumer that
+    # materialises a level whole (the 3-D full-res swap): on the 40x live test (21 FOVs,
+    # 25 z, 8360 px mosaic, 2026-10-05) that gate dropped the native rung and the finest
+    # pixel on screen was a 2x decimation, "very pixelated" at 40x. The swap enforces the
+    # budget itself now (``_napari_view._fits_level_budget``). ``well=None`` on purpose: a
+    # fine rung's pixels stay strided camera data, never the area-averaged well image.
     native = _planned_plane(meta, region, 10 ** 9)
     fine: list = []
     if native is not None and int(step0) > 1:
         nh, nw, _s1, _dt = native
         s = 1
         while s < int(step0):
-            h_s, w_s = int(np.ceil(nh / s)), int(np.ceil(nw / s))
-            if h_s * w_s * dtype.itemsize * max(1, nz) <= _PLANE_BUDGET_BYTES:
-                fine.append((s, h_s, w_s))
+            fine.append((s, int(np.ceil(nh / s)), int(np.ceil(nw / s))))
             s *= 2
         fine.sort()                                        # ascending step = descending resolution
         levels = [_rung(s, h_s, w_s, dtype, None) for s, h_s, w_s in fine] + levels

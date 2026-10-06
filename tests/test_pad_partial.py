@@ -137,3 +137,33 @@ def test_the_padded_open_names_the_plan_preference_not_an_absent_file(tmp_path):
     assert about_positions, "the padded open must say where its positions come from"
     assert all("PLAN's positions" in t for t in about_positions)
     assert not any("is absent" in t for t in about_positions)
+
+
+def _skipped_timepoints(tmp_path):
+    """THE 40x live test (2026-10-05): Nt 3 at a 2 s interval, one timepoint whose frames span
+    10 s, the run ENDED (.done). Squid skipped the rest; one folder is all there will be."""
+    root = _partial(tmp_path)
+    (root / "acquisition.yaml").write_text(_ACQ_YAML.replace("nt: 2", "nt: 3\n  delta_t_s: 2.0"))
+    (root / ".done").write_text("")
+    (root / "0" / "coordinates.csv").write_text(
+        "region,fov,z_level,x (mm),y (mm),z (um),time\n"
+        "B2,0,0,1.0,1.0,100.0,2026-09-25_18-10-21.000000\n"
+        "B2,0,1,1.0,1.0,100.5,2026-09-25_18-10-31.000000\n")
+    return root
+
+
+def test_a_skipped_timepoint_series_names_its_cause_in_the_open_warning(tmp_path):
+    """The padded frames are black and the warning said only "stopped run"; the customer saw
+    frames that "don't change". The cause is on disk: the end marker, the declared interval,
+    the executed csv's own timestamps."""
+    root = _skipped_timepoints(tmp_path)
+    with pytest.warns(UserWarning) as caught:
+        r = open_reader(root, pad_partial=True)
+        assert r.metadata["n_t"] == 3
+    texts = [str(w.message) for w in caught if "padded to the planned final state (" in str(w.message)]
+    assert texts, [str(w.message) for w in caught]
+    text = texts[0]
+    assert "1 of the declared 3 timepoint(s) are on disk" in text, text
+    assert "ENDED" in text, text
+    assert "took 10 s against the 2 s interval" in text, text
+    assert "set the interval above one timepoint's duration" in text, text

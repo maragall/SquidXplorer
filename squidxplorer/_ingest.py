@@ -6,6 +6,7 @@ one-line forwarders (and the Qt slots), so every caller and test surface is unch
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -57,8 +58,16 @@ def ingest(win, path: str) -> None:
     try:
         # pad_partial: the VIEWER explores a stopped run at its planned final state (unwritten
         # slots read black); the engine/CLI open un-padded so their stores stay honest.
-        reader = open_reader(str(p), pad_partial=True)
-        meta = reader.metadata
+        # What the reader WARNS while opening (padded timepoints, recorded-vs-observed
+        # mismatches) is logged so it reaches the log panel: a Python warning goes to stderr,
+        # which a launched app has no one reading (measured 2026-10-05: two black timepoints
+        # padded onto a one-timepoint run, said nowhere the user could see).
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            reader = open_reader(str(p), pad_partial=True)
+            meta = reader.metadata
+        for w in caught:
+            log.warning("%s", w.message)
     except Exception as e:   # not a Squid acquisition / unreadable -> report, don't crash the app
         win._readout.setText(f"not a readable Squid acquisition: {e}")
         win._set_empty_state(True)

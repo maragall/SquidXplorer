@@ -76,3 +76,43 @@ def test_the_sample_is_the_MIDDLE_z_not_the_first():
 def test_a_plain_array_works_without_the_caller_sniffing_the_shape():
     assert sample_plane(np.ones((8, 8), np.uint16)).shape == (8, 8)
     assert sample_plane(None) is None
+
+
+def _transmitted(bg=3500.0, noise=200.0, tissue=2500.0, frac=0.3, shape=(256, 256), seed=1):
+    """A plane shaped like brightfield: a bright empty-field mode, tissue DARKER than it, and
+    the mosaic's uncovered corners at exactly 0 (the 40x live test's own histogram, 2026-10-05)."""
+    rng = np.random.default_rng(seed)
+    a = rng.normal(bg, noise, shape)
+    n = int(a.size * frac)
+    idx = rng.choice(a.size, n, replace=False)
+    a.flat[idx] = rng.normal(tissue, noise, n)
+    a[:40, :40] = 0.0
+    return np.clip(a, 0, 65535).astype(np.uint16)
+
+
+def test_a_transmitted_light_channel_spans_its_own_tonal_range_through_the_view_seed():
+    """THE 40x live test (2026-10-05): the fluorescence floor (background mode to black) sat
+    above 99.3% of a BF plane, a black field of bright speckle that read as "very pixelated".
+    The channel's declaration (no excitation line, the fact decon reads) picks the rule, and
+    the view's own seed is where it lands."""
+    from napari.components import ViewerModel
+
+    from squidxplorer._napari_view import MosaicLayers
+
+    plane = _transmitted()
+    covered = plane[plane > 0]
+    layers = MosaicLayers(ViewerModel())
+    bf = layers.add_mosaic("raw", "BF_LED_matrix_full", plane, bbox_um=(0.0, 0.0, 256.0, 256.0))
+    fl = layers.add_mosaic("raw", "Fluorescence_405_nm_Ex", plane,
+                           bbox_um=(0.0, 0.0, 256.0, 256.0))
+
+    lo, hi = (float(v) for v in bf.contrast_limits)
+    below = float((covered < lo).mean())
+    assert below < 0.01, f"BF floor {lo:.0f} sits above {below:.1%} of the lit pixels"
+    assert lo > 0.0, "the mosaic's uncovered zeros dragged the BF floor to black"
+    assert hi > float(np.percentile(covered, 99)), f"BF ceiling {hi:.0f} clips the field"
+
+    lo_fl, _ = (float(v) for v in fl.contrast_limits)
+    assert lo_fl > 3500.0, (
+        f"the same pixels under a fluorescence channel kept their floor below the mode "
+        f"({lo_fl:.0f}): the rule is no longer declaration-driven")

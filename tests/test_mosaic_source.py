@@ -253,14 +253,31 @@ def test_deep_zoom_gets_native_pixels_on_demand(fused_slicing):
     assert (win == 1).all()                       # z0 reads as 1: native pixels, no holes
 
 
-def test_fine_levels_respect_the_plane_budget(monkeypatch):
-    """A rung whose WHOLE plane would blow the budget is not offered: the 3-D full-res swap and _full_res_mip still take level 0 whole."""
-    from squidxplorer import _mosaic_source as ms
+def test_the_native_rung_is_always_offered_and_the_3d_swap_is_what_budgets_a_whole_level(
+        monkeypatch):
+    """THE 40x live test (2026-10-05, 21 FOVs x 25 z, 8360 px): the native rung was gated on
+    the WHOLE level's bytes x nz, for the one consumer that materialises a level whole (the
+    3-D swap), so the finest 2-D pixel on screen was a 2x decimation. Every rung is windowed:
+    the native rung costs nothing until a viewport asks, and the swap budgets itself."""
+    from napari.components import ViewerModel
 
-    monkeypatch.setattr(ms, "_PLANE_BUDGET_BYTES", 300_000)
+    from squidxplorer import _mosaic_source as ms
+    from squidxplorer._napari_view import MosaicLayers
+
+    monkeypatch.setattr(ms, "PLANE_BUDGET_BYTES", 300_000)
     levels, _step0, _nz = ms.fuse_region_pyramid(_StepReader(), _pyr_meta(nz=1), "A1", "488",
                                                  max_px=1024)
-    assert levels[0].shape == (64, 1024), "over budget: the capped level must still lead"
+    assert levels[0].shape == (256, 4096), "the native rung must lead, budget or not"
+
+    layers = MosaicLayers(ViewerModel())
+    layers._max_3d_texture = 1 << 14
+    raw = layers.add_mosaic("raw", "488", levels, multiscale=True,
+                            bbox_um=(0.0, 0.0, 4096.0, 256.0))
+    layers.render_max_res_3d(True)
+    assert raw.multiscale is False, "the 3D swap never ran"
+    assert tuple(raw.data.shape) == (64, 1024), (
+        f"3D took {tuple(raw.data.shape)}: the finest level within the 300 kB budget is "
+        f"(64, 1024), and a whole native level is exactly what the budget forbids")
 
 
 def test_the_raw_preview_returns_a_pyramid_of_strictly_decreasing_levels():

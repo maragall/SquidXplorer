@@ -1,4 +1,6 @@
-"""The contrast window for fluorescence: background peak to black, 99.9th percentile on top."""
+"""The contrast window: fluorescence puts the background peak at black, 99.9th percentile on
+top; TRANSMITTED light (brightfield, darkfield LEDs) spans the plane's own tonal range, because
+its structures are the pixels BELOW the background mode."""
 
 from __future__ import annotations
 
@@ -23,11 +25,34 @@ _BACKGROUND_SIGMA = 6.0
 _BACKGROUND_PCT = 99.5
 _FOREGROUND_MIN_PX = 16
 _FALLBACK_SPAN = 100.0
+#: A transmitted-light plane's window: the tonal range between these two percentiles. The mode
+#: is the empty-field background and the tissue is DARKER than it (absorption), so the
+#: fluorescence floor (background to black) would clip the whole sample. Measured on the 40x
+#: live test (2026-10-05, BF LED matrix, mode 3472, sigma 202): the fluorescence rule put the
+#: floor at 4016 with 99.3% of the pixels below it, a black field of bright speckle.
+_TRANSMITTED_PMIN = 0.1
+_TRANSMITTED_PMAX = 99.9
+
+
+def transmitted_light(channel) -> bool:
+    """Whether *channel* is transmitted light: the ONE declaration decon reads for the same
+    fact (:func:`squidxplorer._channels.excitation_nm` is None for a broadband channel)."""
+    from squidxplorer._channels import excitation_nm
+
+    if channel is None:
+        return False            # an unnamed plane keeps the fluorescence rule, the default
+    return excitation_nm(channel) is None
 
 
 def auto_contrast(data: Any, pmax: float = 99.9,
-                  rng: Optional[np.random.Generator] = None) -> Optional[tuple[float, float]]:
-    """``(lo, hi)`` for one fluorescence plane, or None when the plane carries no usable window."""
+                  rng: Optional[np.random.Generator] = None, *,
+                  transmitted: bool = False) -> Optional[tuple[float, float]]:
+    """``(lo, hi)`` for one plane, or None when the plane carries no usable window.
+
+    ``transmitted`` selects the transmitted-light rule (:func:`transmitted_light` answers it
+    for a channel): the window spans the plane's own percentiles instead of sitting above the
+    background mode.
+    """
     a = np.asarray(data)
     if a.size == 0:
         return None
@@ -40,6 +65,24 @@ def auto_contrast(data: Any, pmax: float = 99.9,
         # Seeded, so the same plane always yields the same window.
         gen = rng if rng is not None else np.random.default_rng(0)
         flat = gen.choice(flat, _SAMPLE, replace=False)
+
+    if transmitted:
+        # Exactly-zero pixels are the mosaic's UNCOVERED area (and a padded slot), not
+        # light: transmitted light never records a 0 (the camera's black level sits above
+        # it), while the fluorescence rule below ignores them through its mode. Measured on
+        # the 40x live test: with the gaps in, the floor was 0 and the tissue (mean 4100,
+        # sigma 200) rendered as a washed-out grey.
+        lit = flat[flat > 0]
+        if lit.size == 0:
+            return None
+        lo, hi = (float(v) for v in np.percentile(lit, [_TRANSMITTED_PMIN, _TRANSMITTED_PMAX]))
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            return None
+        if hi - lo < _MIN_SPAN:
+            if float(np.ptp(flat)) < _MIN_SPAN:
+                return None
+            hi = lo + _FALLBACK_SPAN
+        return lo, hi
 
     hist, edges = np.histogram(flat, bins=_BINS)
     mode_idx = int(np.argmax(hist))

@@ -276,3 +276,32 @@ def test_a_mixed_scene_exports_every_visible_channel_not_one_op(
         [tuple(float(v) for v in raw0.contrast_limits), (5.0, 99.0)])
     np.testing.assert_array_equal(_png_pixels(out), expected)
     shutdown_plate_window(qapp, win)
+
+
+class _Poison:
+    """A level-0 stand-in that refuses to be read: the export must never touch it."""
+
+    def __init__(self, shape):
+        self.shape = tuple(shape)
+        self.ndim = len(shape)
+        self.dtype = np.dtype(np.uint16)
+
+    def __getitem__(self, idx):
+        raise AssertionError(f"level 0 was materialised ({idx!r})")
+
+
+def test_a_pyramid_export_takes_the_level_at_its_decimation_not_level_0_whole():
+    """Qt-free. With the native rung always offered (2026-10-05) a region's level 0 is the
+    whole native mosaic, lazy and windowed; materialising it only to stride it decoded every
+    FOV at stride 1 and held the whole plane. The level AT the decimation is the same pixels."""
+    import dask.array as da
+
+    fine = da.from_array(_Poison((100, 40)), chunks=(100, 40), asarray=False,
+                         meta=np.empty((0, 0), dtype=np.uint16))
+    coarse = (np.arange(50 * 20, dtype=np.uint16) % 251).reshape(50, 20)
+    ch = PngChannel("DAPI", [fine, coarse], (0.0, 250.0), (0, 0, 255), z_index=0)
+
+    rgb, step = render_view_png([ch], max_px=60)
+
+    assert rgb.shape == (50, 20, 3), f"the export did not take the 50x20 level: {rgb.shape}"
+    assert step == 2, f"the level pick is a 2x decimation against native, reported {step}"

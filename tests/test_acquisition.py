@@ -28,7 +28,7 @@ def test_reads_acquisition_yaml(tmp_path):
     assert m["n_t_declared"] == 2
     assert m["wellplate_format"] == "24 well plate"
     assert set(m) == {"pixel_size_um", "n_z_declared", "dz_um", "n_t_declared",
-                      "wellplate_format"}
+                      "dt_s_declared", "wellplate_format"}
 
 
 #: Real legacy shape, from Squid's pre-yaml writer (mirrors conftest._PARAMS).
@@ -57,7 +57,7 @@ def test_a_legacy_acquisition_loads_with_a_warning(tmp_path):
     assert m["n_t_declared"] == 2
     assert m["wellplate_format"] is None
     assert set(m) == {"pixel_size_um", "n_z_declared", "dz_um", "n_t_declared",
-                      "wellplate_format"}, "both readings must produce the same keys"
+                      "dt_s_declared", "wellplate_format"}, "both readings must produce the same keys"
 
 
 def test_the_yaml_outranks_a_legacy_file_beside_it(tmp_path):

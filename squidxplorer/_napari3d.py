@@ -92,14 +92,14 @@ def widen_contrast_range(viewer: Any, lo: float, hi: float) -> int:
     return moved
 
 
-def _auto_clim(stack: np.ndarray) -> Optional[tuple]:
+def _auto_clim(stack: np.ndarray, channel=None) -> Optional[tuple]:
     """Contrast for a channel whose on-screen LUT was NOT carried in; never a raw full-range
     window, and never a DEGENERATE one (napari refuses lo == hi with ValueError, so a blank
     stack must answer None — napari autoscales — or the whole layer is refused)."""
     try:
-        from squidxplorer._contrast import auto_contrast
+        from squidxplorer._contrast import auto_contrast, transmitted_light
 
-        win = auto_contrast(stack)
+        win = auto_contrast(stack, transmitted=transmitted_light(channel))
         if win is not None and float(win[1]) > float(win[0]):
             return (float(win[0]), float(win[1]))
     except Exception:                                   # noqa: BLE001 - fall through to percentile
@@ -509,7 +509,7 @@ def open_native_3d(
         if clim is not None and not float(clim[1]) > float(clim[0]):
             clim = None                                 # napari refuses a degenerate window
         if clim is None:
-            clim = _auto_clim(stack)
+            clim = _auto_clim(stack, ch)
         if clim is not None:
             kwargs["contrast_limits"] = tuple(clim)
         _seed_range(viewer.add_image(stack, **kwargs), getattr(stack, "dtype", None), clim)
@@ -581,7 +581,7 @@ def open_native_3d_volume(
         if clim is not None and not float(clim[1]) > float(clim[0]):
             clim = None                                 # napari refuses a degenerate window
         if clim is None:
-            clim = _auto_clim(vol)                      # ONE window for the whole channel, so the
+            clim = _auto_clim(vol, name)                # ONE window for the whole channel, so the
         cmap = colormap_by_channel.get(name)            # bricks cannot step in brightness
         for b in bricks:
             kwargs = {
