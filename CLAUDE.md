@@ -1701,7 +1701,9 @@ the microscope's own BF live view. Three measured facts, three rules:
   no OpenGL); a stray partial copy of the acquisition inside its own `0/` folder (one TIFF,
   made the day it was reported) is the customer's, untouched. On this Windows box the
   suite is NOT green on main either: test_viewer's thumbnail-pixels test aborts with an
-  access violation, the empty-hero drop test compares a forward-slash path to a
+  access violation, test_time_point_playback's superseded-load test kills the interpreter
+  with no traceback (exit 127, intermittent in a full run), the empty-hero drop test
+  compares a forward-slash path to a
   backslash one, the stitch kwargs tests need the `stitch` extra and the decon tests in
   test_channel_toggle / test_decon_z_in_view need the `decon` extra (petakit); the dash
   sweep read sources as cp1252 (fixed: it reads UTF-8).
