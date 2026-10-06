@@ -225,9 +225,11 @@ def fused_slicing():
     T1, enter T2, exit T1, exit T2 ends with the global at False). Any earlier test that
     sliced a dask-backed layer can therefore poison this one: with fusion off, a 100x100
     window pulls its whole 2048 px chunk (FOVs 0-7 of the 16) and a one-chunk coarse rung
-    pulls every FOV — the order-dependent failure of 2026-09-09. The app itself is
-    unaffected in kind: napari slices our pyramids under that same context by design, and
-    the chunk grain is the documented honest fallback (the nz > 1 rule).
+    pulls every FOV — the order-dependent failure of 2026-09-09.
+
+    SUPERSEDED 2026-10-05: the raw rungs are plain array-likes (``_WindowedStack``), no
+    dask graph, so the exact-window pins no longer depend on this flag at all. The fixture
+    stays as a harmless guard that the pins hold under BOTH values of it.
     """
     import dask
 

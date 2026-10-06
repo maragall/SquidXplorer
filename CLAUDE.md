@@ -1705,6 +1705,45 @@ the microscope's own BF live view. Three measured facts, three rules:
   backslash one, and the stitch kwargs tests need the `stitch` extra; the dash sweep
   read sources as cp1252 (fixed: it reads UTF-8).
 
+## The viewport guarantee: exact windows, no silent slice, a timelapse fuses per timepoint (2026-10-05, branch live-test-fixes, commits 2-5)
+
+Julio, after the live-test fixes: "I've tried zooming in and out and it can get stuck as well
+as show only one channel on the edges ... It's complicated code that's currently not
+efficient." Measured headless through napari's OWN async slicer on the live test, then fixed:
+
+- **A failed slice was SILENT and stranded its channel.** `_LayerSlicer._on_slice_done`
+  never reads the task's exception: a raising slicing task emits no `ready` event, the
+  layer keeps its previous slice at the previous level, nothing is logged, and only a
+  camera move that changes the window asks again. Reproduced with one poisoned level-0
+  read: BF landed at level 0 (1005 px slice), 405 stayed at the coarsest rung (127 px),
+  `loaded` False. That is "stuck" and "only one channel" in one mechanism.
+  `_napari_view._bind_slicer_failure_guard` (per viewer, from `MosaicLayers.__init__`)
+  wraps the done callback: every failed task is a WARNING naming its layers and the
+  exception, and its layers are re-submitted ONCE on the main thread; a second failure is
+  logged and left. Pinned in test_napari_view (the layer lands with NO camera move).
+- **A raw rung is a plain array-like, dask-free** (`_mosaic_source._WindowedStack` /
+  `_WindowedPlane`). The dask rungs' exact window was dask's getter fusion, gated by a
+  GLOBAL key napari flips on every dask-layer slice (napari#718) that can stick to off
+  under async slicing; and the z concatenate blocked fusion for nz > 1, so the grain there
+  was a 2048 px chunk. The array-like serves napari's indexing shape (a lazy all-slice
+  view, an integer z, `np.asarray`) and the ROI crop's `lvl[..., r0:r1, c0:c1]` with no
+  graph and no global: the window IS the read, at one z. Measured on the live test (25 z):
+  a 1005 px level-0 viewport decodes 1 frame; the chunk-grained rung decoded 8 for a
+  1047 px window at the same zoom. `_FINE_CHUNK_PX` is gone; the nz > 1 chunk-grain note
+  above is superseded; `compute()` survives so the lazy-rung pins keep their name.
+- **A timelapse fuses timepoint-outer** (`_stitch.stitch_region`): the loop was z-outer
+  with every timepoint of a plane resident, (fovs, n_t, C, tile), 30 GB for one plane of
+  a 100-timepoint run of this layout. One (t, plane) is resident now; no pixel changes
+  (pinned: each timepoint's fusion equals a one-timepoint reader's).
+- **The guarantee, as a pin** (`tests/test_viewport_stress.py`): 40 random zooms and pans
+  with no settling, through napari's own slicer, then one settle: every channel loaded,
+  both at one level and window, no task raised, and the slice on screen bit-exact to the
+  rung's own window at the z on screen. What this does NOT cover: the GL look and the
+  feel of a drag on a live canvas (offscreen has no OpenGL), and napari's per-layer
+  slicing, which can show one channel ahead of another at the edges WHILE loading; a
+  one-task-per-move batching of all channels is the next commit only if a hand check
+  shows that transient still matters.
+
 ## Agent skills
 
 ### Issue tracker
