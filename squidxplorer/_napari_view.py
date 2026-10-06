@@ -382,6 +382,7 @@ class MosaicLayers:
             model.dims.events.ndisplay.connect(self._reslice_hidden_layers)
         except Exception:                        # noqa: BLE001 - a stub model with no dims events
             pass
+        _bind_slicer_failure_guard(model)
 
     def _reslice_hidden_layers(self, event=None) -> None:
         """Force-refresh hidden >2-D layers whose slice disagrees with their slice input after a 2D/3D flip.
@@ -1689,6 +1690,78 @@ class MosaicLayers:
         for peers in self._by_channel.values():
             if peers:
                 peers[0].events.contrast_limits.connect(callback)
+
+
+def _bind_slicer_failure_guard(model: Any) -> None:
+    """Per viewer: a viewport slice that FAILS is never silent, and is re-requested once.
+
+    napari's ``_LayerSlicer._on_slice_done`` never reads the task's exception: a slicing task
+    that raises (a read error, an IndexError on data the request outlived) emits no
+    ``ready`` event, so the layer keeps its PREVIOUS slice at the previous level, with no log
+    line, until the camera moves enough to request again. Measured on the 40x live test
+    (2026-10-05): one channel's level-0 read raised once; the other channel landed at level 0
+    (1005 px slice), the failed one stayed at the coarsest rung (127 px), ``loaded`` False,
+    nothing logged. That is a channel "stuck" pixelated beside a sharp one, the two symptoms
+    Julio reported in one mechanism. Every failed task is logged by name here, and its layers
+    are re-submitted ONCE (main-thread marshalled: ``submit`` is main-thread only); a second
+    failure of the same episode is logged and left, never a retry loop.
+    """
+    slicer = getattr(model, "_layer_slicer", None)
+    if slicer is None or getattr(slicer, "_sx_failure_guard", False):
+        return
+    orig_done = getattr(slicer, "_on_slice_done", None)
+    if orig_done is None:
+        return
+
+    def _resubmit(layers) -> None:
+        try:
+            slicer.submit(layers=layers, dims=model.dims, force=True)
+        except Exception as exc:                 # noqa: BLE001 - said, never raised in a callback
+            log.warning("viewport slice re-request failed: %s: %s", type(exc).__name__, exc)
+
+    try:
+        from superqt.utils import ensure_main_thread
+
+        _resubmit_on_main = ensure_main_thread(_resubmit)
+    except Exception:                            # noqa: BLE001 - no Qt: log only, no retry
+        _resubmit_on_main = None
+
+    def _done(task) -> None:
+        layers: tuple = ()
+        try:
+            with slicer._lock_layers_to_task:
+                for key, pending in slicer._layers_to_task.items():
+                    if pending is task:
+                        layers = tuple(ref() for ref in key)
+                        break
+        except Exception:                        # noqa: BLE001 - napari moved the books
+            layers = ()
+        orig_done(task)
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except Exception:                        # noqa: BLE001 - a task not yet done
+            return
+        live = [ly for ly in layers if ly is not None]
+        if exc is None:
+            for ly in live:
+                ly._sx_slice_retried = False
+            return
+        names = ", ".join(str(getattr(ly, "name", "layer")) for ly in live) or "a layer"
+        retry = [ly for ly in live if not getattr(ly, "_sx_slice_retried", False)]
+        if retry and _resubmit_on_main is not None:
+            log.warning("viewport slice failed for %s: %s: %s; re-requesting once.",
+                        names, type(exc).__name__, exc)
+            for ly in retry:
+                ly._sx_slice_retried = True
+            _resubmit_on_main(retry)
+        else:
+            log.warning("viewport slice failed for %s: %s: %s; the layer keeps its previous "
+                        "slice until the next camera move.", names, type(exc).__name__, exc)
+
+    slicer._on_slice_done = _done
+    slicer._sx_failure_guard = True
 
 
 def _fits_level_budget(level: Any) -> bool:

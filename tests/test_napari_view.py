@@ -1332,6 +1332,50 @@ def _draw(ml, y0_um, x0_um, h_um, w_um, canvas=(800, 800)) -> None:
                         shape_threshold=np.array(canvas))
 
 
+class _RaiseOnce:
+    """A level whose first window read dies in the slicing pool, as a real read can."""
+
+    def __init__(self, data):
+        self._data = data
+        self.shape, self.dtype, self.ndim = data.shape, data.dtype, data.ndim
+        self.fired = False
+
+    def __getitem__(self, idx):
+        if not self.fired:
+            self.fired = True
+            raise RuntimeError("simulated: a slice task dies in the pool")
+        return self._data[idx]
+
+
+def test_a_failed_viewport_slice_is_logged_and_re_requested_not_left_stranded(layers, caplog):
+    """THE stuck channel (Julio, 2026-10-05: zooming "can get stuck" and "show only one channel
+    on the edges"). napari's slicer never reads a task's exception: a raising slice emitted no
+    response, the layer kept its coarse slice with `loaded` False and NO log line until the
+    next camera move, while the other channel sat sharp beside it. Measured on the 40x live
+    test with one poisoned read: 127 px slice next to a 1005 px one. The guard logs it by name
+    and re-requests once, so the layer lands WITHOUT a camera move."""
+    import logging
+
+    import dask.array as da
+
+    fine = _RaiseOnce(np.full((10, 64, 64), 7, np.uint16))
+    level0 = da.from_array(fine, chunks=(1, 64, 64), asarray=False,
+                           meta=np.empty((0, 0, 0), dtype=np.uint16))
+    raw = layers.add_mosaic("raw", "405", [level0, np.full((10, 32, 32), 3, np.uint16)],
+                            multiscale=True, bbox_um=_Z_BBOX, z_scale_um=2.0)
+    _settle(layers)
+    with caplog.at_level(logging.WARNING, logger="squid.xplorer"):
+        _draw(layers, 0.0, 0.0, 10.0, 20.0)       # a deep zoom: level 0, through the poison
+        _settle(layers)
+        _settle(layers)                            # the re-request's own round trip
+    assert fine.fired, "the poisoned level was never asked: the test no longer reaches level 0"
+    assert raw.loaded, "the layer is still stranded on its previous slice"
+    assert int(raw.data_level) == 0
+    assert np.asarray(raw._slice.image.view).max() == 7, "the slice on screen is not level 0's"
+    warned = [r.getMessage() for r in caplog.records if "viewport slice failed" in r.getMessage()]
+    assert warned and "RuntimeError" in warned[0] and "re-requesting once" in warned[0], warned
+
+
 def test_relighting_raw_zoomed_in_under_a_z_reducer_shows_the_pyramid_not_the_collapsed_plane(layers):
     """Julio, live on G7 (2026-08-27): zoomed in, switch to fstack, back to raw: PIXELATED; only zooming out heals it.
 
