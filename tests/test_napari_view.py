@@ -1333,18 +1333,20 @@ def _draw(ml, y0_um, x0_um, h_um, w_um, canvas=(800, 800)) -> None:
 
 
 class _RaiseOnce:
-    """A level whose first window read dies in the slicing pool, as a real read can."""
+    """One z plane of a rung whose first window read dies in the slicing pool, as a real
+    read can. Armed AFTER add_mosaic: the contrast seed reads level 0 too."""
 
-    def __init__(self, data):
-        self._data = data
-        self.shape, self.dtype, self.ndim = data.shape, data.dtype, data.ndim
+    def __init__(self, plane):
+        self._plane = plane
+        self.shape, self.dtype = plane.shape, plane.dtype
+        self.armed = False
         self.fired = False
 
     def __getitem__(self, idx):
-        if not self.fired:
+        if self.armed and not self.fired:
             self.fired = True
             raise RuntimeError("simulated: a slice task dies in the pool")
-        return self._data[idx]
+        return self._plane[idx]
 
 
 def test_a_failed_viewport_slice_is_logged_and_re_requested_not_left_stranded(layers, caplog):
@@ -1356,19 +1358,23 @@ def test_a_failed_viewport_slice_is_logged_and_re_requested_not_left_stranded(la
     and re-requests once, so the layer lands WITHOUT a camera move."""
     import logging
 
-    import dask.array as da
+    from squidxplorer._mosaic_source import _WindowedStack
 
-    fine = _RaiseOnce(np.full((10, 64, 64), 7, np.uint16))
-    level0 = da.from_array(fine, chunks=(1, 64, 64), asarray=False,
-                           meta=np.empty((0, 0, 0), dtype=np.uint16))
+    # The production rung type, dask-free: a dask level here was served out of napari's own
+    # opportunistic dask cache (filled by the contrast seed), and the poison was never read.
+    planes = [_RaiseOnce(np.full((64, 64), 7, np.uint16)) for _ in range(10)]
+    level0 = _WindowedStack(planes)
     raw = layers.add_mosaic("raw", "405", [level0, np.full((10, 32, 32), 3, np.uint16)],
                             multiscale=True, bbox_um=_Z_BBOX, z_scale_um=2.0)
     _settle(layers)
+    for plane in planes:
+        plane.armed = True
     with caplog.at_level(logging.WARNING, logger="squid.xplorer"):
         _draw(layers, 0.0, 0.0, 10.0, 20.0)       # a deep zoom: level 0, through the poison
         _settle(layers)
         _settle(layers)                            # the re-request's own round trip
-    assert fine.fired, "the poisoned level was never asked: the test no longer reaches level 0"
+    assert any(pl.fired for pl in planes), (
+        "the poisoned level was never asked: the test no longer reaches level 0")
     assert raw.loaded, "the layer is still stranded on its previous slice"
     assert int(raw.data_level) == 0
     assert np.asarray(raw._slice.image.view).max() == 7, "the slice on screen is not level 0's"

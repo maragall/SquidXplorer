@@ -1702,8 +1702,9 @@ the microscope's own BF live view. Three measured facts, three rules:
   made the day it was reported) is the customer's, untouched. On this Windows box the
   suite is NOT green on main either: test_viewer's thumbnail-pixels test aborts with an
   access violation, the empty-hero drop test compares a forward-slash path to a
-  backslash one, and the stitch kwargs tests need the `stitch` extra; the dash sweep
-  read sources as cp1252 (fixed: it reads UTF-8).
+  backslash one, the stitch kwargs tests need the `stitch` extra and the decon tests in
+  test_channel_toggle / test_decon_z_in_view need the `decon` extra (petakit); the dash
+  sweep read sources as cp1252 (fixed: it reads UTF-8).
 
 ## The viewport guarantee: exact windows, no silent slice, a timelapse fuses per timepoint (2026-10-05, branch live-test-fixes, commits 2-5)
 
