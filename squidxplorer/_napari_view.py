@@ -382,6 +382,7 @@ class MosaicLayers:
             model.dims.events.ndisplay.connect(self._reslice_hidden_layers)
         except Exception:                        # noqa: BLE001 - a stub model with no dims events
             pass
+        _bind_slicer_failure_guard(model)
 
     def _reslice_hidden_layers(self, event=None) -> None:
         """Force-refresh hidden >2-D layers whose slice disagrees with their slice input after a 2D/3D flip.
@@ -795,10 +796,13 @@ class MosaicLayers:
                 meta["_pyramid"] = data          # stash the pyramid so 2D can restore it
                 ly.metadata = meta
                 # napari renders 3D from one GL texture; target the finest pyramid level
-                # that fits GL_MAX_3D_TEXTURE_SIZE, else the coarsest as a floor.
+                # that fits GL_MAX_3D_TEXTURE_SIZE AND the whole-level byte budget (this
+                # swap is what materialises a level WHOLE, every z: the 2D pyramid offers
+                # native rungs it never pays for, so the budget is enforced here, at the
+                # consumer), else the coarsest as a floor.
                 chosen = data[-1]
                 for lvl in data:
-                    if self._fits_texture(lvl, limit):
+                    if self._fits_texture(lvl, limit) and _fits_level_budget(lvl):
                         chosen = lvl
                         break
                 ly.multiscale = False
@@ -998,7 +1002,7 @@ class MosaicLayers:
         }
         window = contrast_limits
         if window is None:
-            window = _auto_window_for(data, bool(multiscale))
+            window = _auto_window_for(data, bool(multiscale), channel)
         if window is not None:
             lo, hi = float(window[0]), float(window[1])
             # A degenerate window is passed through, NOT widened: widening it to (lo, lo+1)
@@ -1547,9 +1551,9 @@ class MosaicLayers:
             for cb in list(self._reset_contrast_cbs):
                 cb(channel, sample)
             return
-        from squidxplorer._contrast import auto_contrast
+        from squidxplorer._contrast import auto_contrast, transmitted_light
 
-        window = auto_contrast(np.asarray(sample))
+        window = auto_contrast(np.asarray(sample), transmitted=transmitted_light(channel))
         if window is not None:
             with self.programmatic():
                 self.set_contrast(channel, *window)
@@ -1688,14 +1692,104 @@ class MosaicLayers:
                 peers[0].events.contrast_limits.connect(callback)
 
 
-def _auto_window_for(data: Any, multiscale: bool) -> Optional[tuple[float, float]]:
-    """The seed contrast window for *data*, or None to let napari autoscale."""
-    from squidxplorer._contrast import SEED_MAX_PX, auto_contrast, sample_plane
+def _bind_slicer_failure_guard(model: Any) -> None:
+    """Per viewer: a viewport slice that FAILS is never silent, and is re-requested once.
+
+    napari's ``_LayerSlicer._on_slice_done`` never reads the task's exception: a slicing task
+    that raises (a read error, an IndexError on data the request outlived) emits no
+    ``ready`` event, so the layer keeps its PREVIOUS slice at the previous level, with no log
+    line, until the camera moves enough to request again. Measured on the 40x live test
+    (2026-10-05): one channel's level-0 read raised once; the other channel landed at level 0
+    (1005 px slice), the failed one stayed at the coarsest rung (127 px), ``loaded`` False,
+    nothing logged. That is a channel "stuck" pixelated beside a sharp one, the two symptoms
+    Julio reported in one mechanism. Every failed task is logged by name here, and its layers
+    are re-submitted ONCE (main-thread marshalled: ``submit`` is main-thread only); a second
+    failure of the same episode is logged and left, never a retry loop.
+    """
+    slicer = getattr(model, "_layer_slicer", None)
+    if slicer is None or getattr(slicer, "_sx_failure_guard", False):
+        return
+    orig_done = getattr(slicer, "_on_slice_done", None)
+    if orig_done is None:
+        return
+
+    def _resubmit(layers) -> None:
+        try:
+            slicer.submit(layers=layers, dims=model.dims, force=True)
+        except Exception as exc:                 # noqa: BLE001 - said, never raised in a callback
+            log.warning("viewport slice re-request failed: %s: %s", type(exc).__name__, exc)
+
+    try:
+        from superqt.utils import ensure_main_thread
+
+        _resubmit_on_main = ensure_main_thread(_resubmit)
+    except Exception:                            # noqa: BLE001 - no Qt: log only, no retry
+        _resubmit_on_main = None
+
+    def _done(task) -> None:
+        layers: tuple = ()
+        try:
+            with slicer._lock_layers_to_task:
+                for key, pending in slicer._layers_to_task.items():
+                    if pending is task:
+                        layers = tuple(ref() for ref in key)
+                        break
+        except Exception:                        # noqa: BLE001 - napari moved the books
+            layers = ()
+        orig_done(task)
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except Exception:                        # noqa: BLE001 - a task not yet done
+            return
+        live = [ly for ly in layers if ly is not None]
+        if exc is None:
+            for ly in live:
+                ly._sx_slice_retried = False
+            return
+        names = ", ".join(str(getattr(ly, "name", "layer")) for ly in live) or "a layer"
+        retry = [ly for ly in live if not getattr(ly, "_sx_slice_retried", False)]
+        if retry and _resubmit_on_main is not None:
+            log.warning("viewport slice failed for %s: %s: %s; re-requesting once.",
+                        names, type(exc).__name__, exc)
+            for ly in retry:
+                ly._sx_slice_retried = True
+            _resubmit_on_main(retry)
+        else:
+            log.warning("viewport slice failed for %s: %s: %s; the layer keeps its previous "
+                        "slice until the next camera move.", names, type(exc).__name__, exc)
+
+    slicer._on_slice_done = _done
+    slicer._sx_failure_guard = True
+
+
+def _fits_level_budget(level: Any) -> bool:
+    """Whether materialising *level* WHOLE stays inside the plane budget (`_mosaic_source`)."""
+    from squidxplorer._mosaic_source import PLANE_BUDGET_BYTES
+
+    shp = getattr(level, "shape", None)
+    if not shp:
+        return False
+    itemsize = int(getattr(getattr(level, "dtype", None), "itemsize", 2) or 2)
+    n = 1
+    for s in shp:
+        n *= int(s)
+    return n * itemsize <= int(PLANE_BUDGET_BYTES)
+
+
+def _auto_window_for(data: Any, multiscale: bool,
+                     channel: Any = None) -> Optional[tuple[float, float]]:
+    """The seed contrast window for *data*, or None to let napari autoscale. *channel* picks
+    the rule: a transmitted-light channel spans its own tonal range (:mod:`_contrast`)."""
+    from squidxplorer._contrast import SEED_MAX_PX, auto_contrast, sample_plane, transmitted_light
 
     try:
         levels = data if multiscale else [data]
         plane = sample_plane(levels, max_px=SEED_MAX_PX)   # the finest rung the budget allows
-        return None if plane is None else auto_contrast(plane)
+        if plane is None:
+            return None
+        return auto_contrast(plane, transmitted=transmitted_light(channel))
     except Exception:                       # noqa: BLE001 - seeding is cosmetic, never fatal
         return None
 

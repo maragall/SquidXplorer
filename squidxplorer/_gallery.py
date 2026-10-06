@@ -298,7 +298,7 @@ def fuse_gallery_cell(
     if hit is not None:
         image, covered = hit
         return GalleryCell(str(region), str(channel), image, covered,
-                           cell_window(image, covered), step, full_shape, len(fovs))
+                           cell_window(image, covered, channel), step, full_shape, len(fovs))
 
     zs = _z_indices(meta, projection)
     image = np.zeros((out_h, out_w), dtype=dtype)
@@ -335,7 +335,7 @@ def fuse_gallery_cell(
         # with unreadable=() so the hole would stop being reported.
         _cache_cell(cache, token, region, fovs, channel, time_point, projection, step, image, covered)
     return GalleryCell(str(region), str(channel), image, covered,
-                       cell_window(image, covered), step, full_shape, len(fovs),
+                       cell_window(image, covered, channel), step, full_shape, len(fovs),
                        tuple(unreadable))
 
 
@@ -392,14 +392,15 @@ def _cache_cell(cache, token, region, fovs, channel, time_point, projection, ste
 # --- contrast -----------------------------------------------------------------------------------
 
 
-def cell_window(image: np.ndarray, covered: Optional[np.ndarray] = None):
-    """``(lo, hi)`` for one cell, over the COVERED pixels only, or ``None`` if there is no window."""
-    from squidxplorer._contrast import auto_contrast
+def cell_window(image: np.ndarray, covered: Optional[np.ndarray] = None, channel=None):
+    """``(lo, hi)`` for one cell, over the COVERED pixels only, or ``None`` if there is no window.
+    *channel* picks the rule (transmitted light spans its own tonal range)."""
+    from squidxplorer._contrast import auto_contrast, transmitted_light
 
     data = image if covered is None else image[covered]
     if data.size == 0:
         return None
-    return auto_contrast(data)
+    return auto_contrast(data, transmitted=transmitted_light(channel))
 
 
 def shared_windows(cells: Iterable[GalleryCell]) -> dict[str, tuple[float, float]]:

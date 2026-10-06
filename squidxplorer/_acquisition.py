@@ -69,11 +69,13 @@ def _legacy_metadata(root: Path) -> dict:
             ", and this file is missing one of those, so the pixel size is unknown.")
     )
     dz = params.get("dz(um)")
+    dt = params.get("dt(s)")
     return {
         "pixel_size_um": pixel,
         "n_z_declared": params.get("Nz"),
         "dz_um": float(dz) if dz is not None else None,
         "n_t_declared": params.get("Nt"),
+        "dt_s_declared": float(dt) if dt is not None else None,
         "wellplate_format": params.get("wellplate_format"),
     }
 
@@ -102,11 +104,13 @@ def load_acquisition_metadata(root) -> dict:
     time_series = _section("time_series")
     sample = _section("sample")
     delta_z_mm = z_stack.get("delta_z_mm")
+    delta_t_s = time_series.get("delta_t_s")
     return {
         "pixel_size_um": objective.get("pixel_size_um"),  # authoritative, binning-aware
         "n_z_declared": z_stack.get("nz"),
         "dz_um": delta_z_mm * 1000 if delta_z_mm is not None else None,
         "n_t_declared": time_series.get("nt"),
+        "dt_s_declared": float(delta_t_s) if delta_t_s is not None else None,
         "wellplate_format": sample.get("wellplate_format"),
     }
 

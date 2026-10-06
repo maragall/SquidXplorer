@@ -1332,6 +1332,56 @@ def _draw(ml, y0_um, x0_um, h_um, w_um, canvas=(800, 800)) -> None:
                         shape_threshold=np.array(canvas))
 
 
+class _RaiseOnce:
+    """One z plane of a rung whose first window read dies in the slicing pool, as a real
+    read can. Armed AFTER add_mosaic: the contrast seed reads level 0 too."""
+
+    def __init__(self, plane):
+        self._plane = plane
+        self.shape, self.dtype = plane.shape, plane.dtype
+        self.armed = False
+        self.fired = False
+
+    def __getitem__(self, idx):
+        if self.armed and not self.fired:
+            self.fired = True
+            raise RuntimeError("simulated: a slice task dies in the pool")
+        return self._plane[idx]
+
+
+def test_a_failed_viewport_slice_is_logged_and_re_requested_not_left_stranded(layers, caplog):
+    """THE stuck channel (Julio, 2026-10-05: zooming "can get stuck" and "show only one channel
+    on the edges"). napari's slicer never reads a task's exception: a raising slice emitted no
+    response, the layer kept its coarse slice with `loaded` False and NO log line until the
+    next camera move, while the other channel sat sharp beside it. Measured on the 40x live
+    test with one poisoned read: 127 px slice next to a 1005 px one. The guard logs it by name
+    and re-requests once, so the layer lands WITHOUT a camera move."""
+    import logging
+
+    from squidxplorer._mosaic_source import _WindowedStack
+
+    # The production rung type, dask-free: a dask level here was served out of napari's own
+    # opportunistic dask cache (filled by the contrast seed), and the poison was never read.
+    planes = [_RaiseOnce(np.full((64, 64), 7, np.uint16)) for _ in range(10)]
+    level0 = _WindowedStack(planes)
+    raw = layers.add_mosaic("raw", "405", [level0, np.full((10, 32, 32), 3, np.uint16)],
+                            multiscale=True, bbox_um=_Z_BBOX, z_scale_um=2.0)
+    _settle(layers)
+    for plane in planes:
+        plane.armed = True
+    with caplog.at_level(logging.WARNING, logger="squid.xplorer"):
+        _draw(layers, 0.0, 0.0, 10.0, 20.0)       # a deep zoom: level 0, through the poison
+        _settle(layers)
+        _settle(layers)                            # the re-request's own round trip
+    assert any(pl.fired for pl in planes), (
+        "the poisoned level was never asked: the test no longer reaches level 0")
+    assert raw.loaded, "the layer is still stranded on its previous slice"
+    assert int(raw.data_level) == 0
+    assert np.asarray(raw._slice.image.view).max() == 7, "the slice on screen is not level 0's"
+    warned = [r.getMessage() for r in caplog.records if "viewport slice failed" in r.getMessage()]
+    assert warned and "RuntimeError" in warned[0] and "re-requesting once" in warned[0], warned
+
+
 def test_relighting_raw_zoomed_in_under_a_z_reducer_shows_the_pyramid_not_the_collapsed_plane(layers):
     """Julio, live on G7 (2026-08-27): zoomed in, switch to fstack, back to raw: PIXELATED; only zooming out heals it.
 

@@ -225,11 +225,12 @@ def _positions_from_fov_column(reader, fovs_per_region: dict, fov_col, x_col, y_
 
 
 def _warn_recorded_mismatch(acq: dict, *, n_z: int, z_source: str,
-                            n_t=None) -> None:
+                            n_t=None, note: str = "") -> None:
     """The recorded-vs-observed cross-check, ONCE: what is on disk is ground truth.
 
     Three adapters carried private copies of this warning; the wording drifted while the rule
     did not. ``n_t=None`` skips the timepoint check for stores that have no folder axis.
+    *note* is :func:`timepoint_shortfall_note`'s sentence, appended to the Nt line.
     """
     if acq.get("n_z_declared") is not None and acq["n_z_declared"] != n_z:
         warnings.warn(
@@ -239,8 +240,71 @@ def _warn_recorded_mismatch(acq: dict, *, n_z: int, z_source: str,
     if n_t is not None and acq.get("n_t_declared") is not None and acq["n_t_declared"] != n_t:
         warnings.warn(
             f"Recorded Nt ({acq['n_t_declared']}) != timepoint folders found ({n_t}); "
-            "using the folder-derived value."
+            "using the folder-derived value." + (f" {note}" if note else "")
         )
+
+
+#: The ``time`` column of an EXECUTED per-timepoint ``coordinates.csv``, as Squid stamps it.
+_EXECUTED_TIME_FORMATS = ("%Y-%m-%d_%H-%M-%S.%f", "%Y-%m-%d_%H-%M-%S")
+
+
+def _timepoint_span_s(folder: Path) -> Optional[float]:
+    """Seconds from the first to the last frame of one timepoint folder, off its executed
+    ``coordinates.csv`` ``time`` column; None when the column is absent or unparseable."""
+    import csv
+    import io
+    from datetime import datetime
+
+    path = Path(folder) / _COORDS_NAME
+    if not path.is_file():
+        return None
+    try:
+        rows = csv.DictReader(io.StringIO(path.read_text()))
+        if not rows.fieldnames or "time" not in rows.fieldnames:
+            return None
+        stamps = []
+        for row in rows:
+            text = (row.get("time") or "").strip()
+            for fmt in _EXECUTED_TIME_FORMATS:
+                try:
+                    stamps.append(datetime.strptime(text, fmt))
+                    break
+                except ValueError:
+                    continue
+    except (OSError, ValueError):
+        return None
+    if len(stamps) < 2:
+        return None
+    return (max(stamps) - min(stamps)).total_seconds()
+
+
+def timepoint_shortfall_note(root, time_folders: list, acq: dict) -> str:
+    """ONE sentence naming WHY fewer timepoint folders than the declared Nt are on disk, or
+    ``""`` when there is no shortfall.
+
+    Measured on the 40x live test (2026-10-05): Nt 3 at a 2 s interval, one timepoint took
+    235 s, and Squid's worker skips every timepoint whose start it has already passed, so
+    timepoints 2 and 3 were never acquired and the run ended with ``.done`` written. The
+    viewer padded them black and said so only on stderr; the customer saw frames that "don't
+    change". The cause is derivable from what is on disk: the run's end marker, the declared
+    interval and the executed csv's own timestamps.
+    """
+    declared = acq.get("n_t_declared")
+    n = len(time_folders)
+    if not declared or int(declared) <= n:
+        return ""
+    parts = [f"{n} of the declared {int(declared)} timepoint(s) are on disk"]
+    if (Path(root) / ".done").exists():
+        parts.append("the run has ENDED (.done), so the missing ones will never arrive")
+    dt = acq.get("dt_s_declared")
+    span = _timepoint_span_s(time_folders[-1]) if time_folders else None
+    if span is not None and dt is not None and span > float(dt):
+        parts.append(
+            f"one timepoint took {span:.0f} s against the {float(dt):g} s interval, and Squid "
+            "skips every timepoint it cannot start on time: set the interval above one "
+            "timepoint's duration"
+        )
+    return "; ".join(parts) + "."
 
 
 def _assemble_metadata(*, regions, fovs_per_region, fov_positions_um, channels, n_z, z_levels,
@@ -415,7 +479,7 @@ NOTHING_PADDED = PaddedSlots({}, frozenset(), frozenset())
 
 
 def _pad_to_plan(fovs: dict, z_levels: list, n_t: int, *, planned: dict, acq: dict,
-                 source: str) -> tuple:
+                 source: str, note: str = "") -> tuple:
     """Pad a stopped run's grid to the acquisition PLAN, shared by every padding reader.
 
     ``fovs`` (``{region: set}``) grows to ``planned``'s per-region counts; z levels / n_t grow
@@ -450,7 +514,7 @@ def _pad_to_plan(fovs: dict, z_levels: list, n_t: int, *, planned: dict, acq: di
         warnings.warn(
             f"partial acquisition: padded to the planned final state ({'; '.join(padded)}). "
             "Unwritten fields render BLACK - this is a stopped run being explored, not a "
-            "finished one.")
+            "finished one." + (f" {note}" if note else ""))
     elif not planned and not declared_nz and not declared_nt:
         _log.info(
             "pad_partial: %s carries no acquisition plan record (no planned FOV grid, no "
@@ -816,17 +880,19 @@ class SquidReader(_PadPartialMixin):
         # the plan and `read` serves ZEROS for any planned-but-unwritten slot. Black planes, said
         # out loud, never a shrunken grid that hides how much is missing.
         padded = False
+        note = timepoint_shortfall_note(self._path, time_folders, acq)
         if self._pad_partial:
             fovs, z_sorted, n_t, padded = _pad_to_plan(
                 fovs, z_sorted, n_t, planned=_planned_grid(self._path), acq=acq,
-                source=f"{self._path} (individual TIFF)")
+                source=f"{self._path} (individual TIFF)", note=note)
             self._padded_slots = padded
             n_z = len(z_sorted)
         regions = sorted(fovs, key=_plate_key)
 
         # Filenames + timepoint folders are ground truth; the recorded Nz/Nt are cross-checks
         # (already reconciled above when the plan out-sizes the disk).
-        _warn_recorded_mismatch(acq, n_z=n_z, z_source="distinct z levels in filenames", n_t=n_t)
+        _warn_recorded_mismatch(acq, n_z=n_z, z_source="distinct z levels in filenames", n_t=n_t,
+                                note=note)
 
         # Frame shape/dtype come from a real frame; ``min`` keeps the sampled plane reproducible.
         # ONE sample PER CHANNEL, because color-ness is per channel: Squid's color camera writes
@@ -1111,7 +1177,8 @@ class SquidMultiPageTiffReader:
 
         acq = load_acquisition_metadata(self._path)
         _warn_recorded_mismatch(acq, n_z=n_z, z_source="distinct z levels in the stack pages",
-                                n_t=n_t)
+                                n_t=n_t,
+                                note=timepoint_shortfall_note(self._path, time_folders, acq))
 
         s_region, s_fov, s_z, s_channel = next(iter(index))
         sample = self.read(s_region, s_fov, s_channel, s_z)

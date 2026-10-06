@@ -74,7 +74,9 @@ def _gui_strings():
     import squidxplorer
 
     for path in sorted(Path(squidxplorer.__file__).parent.glob("*.py")):
-        tree = ast.parse(path.read_text())
+        # UTF-8 on purpose: under Windows cp1252 the bytes of the allowed U+00D7 sign decode
+        # as an em dash and the sweep fails on main (measured 2026-10-05).
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         docstrings = set()
         for node in ast.walk(tree):
             if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,

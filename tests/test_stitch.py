@@ -755,6 +755,41 @@ def test_the_registration_timepoint_actually_drives_which_PIXELS_are_solved_on(m
     assert not np.allclose(wrong["offsets_px"][3], (-6.0, 4.0), atol=1.0)
 
 
+def test_a_timelapse_is_fused_one_timepoint_at_a_time_and_each_timepoint_is_its_own_fusion(
+        master, monkeypatch):
+    """The fusion loop was z-outer with EVERY timepoint of a plane resident, (fovs, n_t, C,
+    tile): 30 GB for one plane of a 100-timepoint run of the 40x live test's layout
+    (2026-10-05). Timepoint-outer bounds it by one timepoint and changes no pixel."""
+    from squidxplorer import _stitch as st
+
+    calls = []
+    real = st.project_well
+
+    def spy(reader, region, fov, **kw):
+        calls.append(kw.get("time_point"))
+        out = real(reader, region, fov, **kw)
+        assert out.shape[0] == 1, f"a read for one timepoint came back {out.shape[0]} deep"
+        return out
+
+    monkeypatch.setattr(st, "project_well", spy)
+    three = _FakeReader(master, n_t=3, good_t=1)
+    # correct_illumination=False: the profile is estimated on the REGISTRATION timepoint
+    # (noise at t=0 here), which would make the two fusions differ for a reason that is not
+    # the loop under test.
+    fused = stitch_region(three, "A1", list(range(GRID * GRID)), channels=[0],
+                          register=False, correct_illumination=False, max_workers=2)
+    assert fused.shape[0] == 3
+    assert calls and all(isinstance(t, int) for t in calls), calls
+    assert calls == sorted(calls), "timepoints must stream in order, one resident at a time"
+    assert sum(1 for t in calls if t == 0) == GRID * GRID
+
+    one = _FakeReader(master, n_t=1, good_t=0)
+    alone = stitch_region(one, "A1", list(range(GRID * GRID)), channels=[0],
+                          register=False, correct_illumination=False, max_workers=2)
+    assert np.array_equal(fused[1], alone[0]), "timepoint 1 is not the fusion of its own tiles"
+    assert not np.array_equal(fused[0], fused[1]), "timepoints 0 and 1 came out identical"
+
+
 def test_a_registration_timepoint_outside_the_acquisition_is_refused(master):
     reader = _FakeReader(master)
     reader.metadata["n_t"] = 2

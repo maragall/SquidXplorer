@@ -395,12 +395,13 @@ class _AutoContrastWorker(QThread):
         self._samples = dict(samples)
 
     def run(self) -> None:                             # pragma: no cover - Qt thread
-        from squidxplorer._contrast import auto_contrast
+        from squidxplorer._contrast import auto_contrast, transmitted_light
 
         out = {}
         try:
             for channel, sample in self._samples.items():
-                window = auto_contrast(np.asarray(sample))
+                window = auto_contrast(np.asarray(sample),
+                                       transmitted=transmitted_light(channel))
                 if window is not None:
                     out[str(channel)] = window
         except Exception as exc:                       # noqa: BLE001 - named to the window

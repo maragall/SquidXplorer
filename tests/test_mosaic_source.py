@@ -225,9 +225,11 @@ def fused_slicing():
     T1, enter T2, exit T1, exit T2 ends with the global at False). Any earlier test that
     sliced a dask-backed layer can therefore poison this one: with fusion off, a 100x100
     window pulls its whole 2048 px chunk (FOVs 0-7 of the 16) and a one-chunk coarse rung
-    pulls every FOV — the order-dependent failure of 2026-09-09. The app itself is
-    unaffected in kind: napari slices our pyramids under that same context by design, and
-    the chunk grain is the documented honest fallback (the nz > 1 rule).
+    pulls every FOV — the order-dependent failure of 2026-09-09.
+
+    SUPERSEDED 2026-10-05: the raw rungs are plain array-likes (``_WindowedStack``), no
+    dask graph, so the exact-window pins no longer depend on this flag at all. The fixture
+    stays as a harmless guard that the pins hold under BOTH values of it.
     """
     import dask
 
@@ -253,14 +255,31 @@ def test_deep_zoom_gets_native_pixels_on_demand(fused_slicing):
     assert (win == 1).all()                       # z0 reads as 1: native pixels, no holes
 
 
-def test_fine_levels_respect_the_plane_budget(monkeypatch):
-    """A rung whose WHOLE plane would blow the budget is not offered: the 3-D full-res swap and _full_res_mip still take level 0 whole."""
-    from squidxplorer import _mosaic_source as ms
+def test_the_native_rung_is_always_offered_and_the_3d_swap_is_what_budgets_a_whole_level(
+        monkeypatch):
+    """THE 40x live test (2026-10-05, 21 FOVs x 25 z, 8360 px): the native rung was gated on
+    the WHOLE level's bytes x nz, for the one consumer that materialises a level whole (the
+    3-D swap), so the finest 2-D pixel on screen was a 2x decimation. Every rung is windowed:
+    the native rung costs nothing until a viewport asks, and the swap budgets itself."""
+    from napari.components import ViewerModel
 
-    monkeypatch.setattr(ms, "_PLANE_BUDGET_BYTES", 300_000)
+    from squidxplorer import _mosaic_source as ms
+    from squidxplorer._napari_view import MosaicLayers
+
+    monkeypatch.setattr(ms, "PLANE_BUDGET_BYTES", 300_000)
     levels, _step0, _nz = ms.fuse_region_pyramid(_StepReader(), _pyr_meta(nz=1), "A1", "488",
                                                  max_px=1024)
-    assert levels[0].shape == (64, 1024), "over budget: the capped level must still lead"
+    assert levels[0].shape == (256, 4096), "the native rung must lead, budget or not"
+
+    layers = MosaicLayers(ViewerModel())
+    layers._max_3d_texture = 1 << 14
+    raw = layers.add_mosaic("raw", "488", levels, multiscale=True,
+                            bbox_um=(0.0, 0.0, 4096.0, 256.0))
+    layers.render_max_res_3d(True)
+    assert raw.multiscale is False, "the 3D swap never ran"
+    assert tuple(raw.data.shape) == (64, 1024), (
+        f"3D took {tuple(raw.data.shape)}: the finest level within the 300 kB budget is "
+        f"(64, 1024), and a whole native level is exactly what the budget forbids")
 
 
 def test_the_raw_preview_returns_a_pyramid_of_strictly_decreasing_levels():
@@ -300,11 +319,13 @@ def test_a_viewport_window_at_a_COARSE_rung_reads_only_the_fovs_under_it(fused_s
     assert win.shape == (64, 100) and (win == 1).all()
 
 
-def test_a_coarse_rung_window_at_a_deeper_z_reads_one_z_one_chunks_fovs(monkeypatch):
-    """nz > 1: the z-stacked coarse rung stays windowed per plane."""
+def test_a_coarse_rung_window_at_a_deeper_z_reads_exactly_the_fovs_under_it_at_that_z():
+    """nz > 1: the z-stacked rung reads EXACTLY its window at ONE z. It used to be a dask
+    concatenate whose honest grain was a 2048 px chunk (every FOV under the chunk), and whose
+    exact-window behaviour at nz == 1 depended on dask's global fusion flag (napari#718);
+    the rung is a plain array-like now (2026-10-05)."""
     from squidxplorer import _mosaic_source as ms
 
-    monkeypatch.setattr(ms, "_FINE_CHUNK_PX", 256)   # several chunks per rung at test scale
     reader = _StepReader(frame=(256, 256))
     levels, step0, nz = ms.fuse_region_pyramid(reader, _pyr_meta(nz=6), "A1", "488",
                                                max_px=1024)
@@ -313,11 +334,16 @@ def test_a_coarse_rung_window_at_a_deeper_z_reads_one_z_one_chunks_fovs(monkeypa
     assert coarse.shape == (6, 64, 1024)
 
     n_before = len(reader.reads)
-    win = np.asarray(coarse[2, 0:64, 0:100])         # inside the first 256-col chunk: FOVs 0-3
+    win = np.asarray(coarse[2, 0:64, 0:100])         # cols 0-100 at step 4: FOVs 0 and 1
     hit = {(f, z) for (_r, f, _c, z, _t) in reader.reads[n_before:]}
-    assert hit == {(f, 2) for f in range(4)}, (
-        f"a one-chunk window at z=2 must read that chunk's FOVs at that z; read {sorted(hit)}")
+    assert hit == {(0, 2), (1, 2)}, (
+        f"a 100-col window at z=2 must read the two FOVs under it at that z; read {sorted(hit)}")
     assert win.shape == (64, 100) and (win == 3).all()   # z=2 reads as 3 in _StepReader
+
+    # napari's own shape of indexing: a lazy all-slice view, then an integer z, materialised.
+    view = coarse[:, 0:64, 0:100]
+    assert view.shape == (6, 64, 100) and hasattr(view, "compute")
+    assert np.array_equal(np.asarray(view[2]), win)
 
 
 def test_fusing_a_level_also_yields_the_coarser_levels_from_the_same_decode():

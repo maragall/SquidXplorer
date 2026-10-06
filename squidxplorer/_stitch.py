@@ -662,23 +662,27 @@ def stitch_region(
     out = allocate((n_t, len(channels), len(z_sources), h, w), dtype,
                    what=f"region {region!r}'s fused {len(z_sources)}-plane mosaic")
 
-    # z-outer streaming loop: the geometry was solved once above, so every plane lands on the
-    # same grid; one acquisition plane's tiles are resident at a time.
+    # TIMEPOINT-OUTER, z-inner streaming loop: the geometry was solved once above, so every
+    # plane of every timepoint lands on the same grid, and ONE (timepoint, plane) worth of
+    # tiles is resident at a time. The loop used to be z-outer with every timepoint of a
+    # plane resident together, (fovs, n_t, C, tile): on the 40x live test's layout (21 FOVs x
+    # 2 ch x 7.2 MB) a 100-timepoint run would have held 30 GB for one plane. Memory is now
+    # bounded by one timepoint, whatever nt is (2026-10-05).
     tiles = None
-    for z_i, z_src in enumerate(z_sources):
-        with timer.stage("project"):
-            tiles = None
-            tiles = np.empty((len(fovs), n_t, len(channels), *tile_shape), dtype=dtype)
-            for i, fov in enumerate(fovs):
-                tiles[i] = project_well(reader, region, fov, reduce=_op.fn,
-                                        consumes=_op.consumes, z_level=z_src)[:, channels, 0]
+    for t in range(n_t):
+        for z_i, z_src in enumerate(z_sources):
+            with timer.stage("project"):
+                tiles = None
+                tiles = np.empty((len(fovs), len(channels), *tile_shape), dtype=dtype)
+                for i, fov in enumerate(fovs):
+                    tiles[i] = project_well(reader, region, fov, reduce=_op.fn,
+                                            consumes=_op.consumes, time_point=t,
+                                            z_level=z_src)[0, channels, 0]
 
-        with timer.stage("fuse"):
-            def read_tile(idx: int, z_level: int, time_idx: int, _tiles=tiles) -> np.ndarray:
-                # _tiles holds exactly this iteration's plane, so fuse_plane's z_level is ignored.
-                return _tiles[idx][time_idx].astype(np.float32, copy=False)
-
-            for t in range(n_t):
+            with timer.stage("fuse"):
+                def read_tile(idx: int, z_level: int, time_idx: int, _tiles=tiles) -> np.ndarray:
+                    # _tiles holds exactly this (t, plane), so z_level and time_idx are ignored.
+                    return _tiles[idx].astype(np.float32, copy=False)
 
                 def write_block(y0, y1, x0, x1, arr, _t=t, _z=z_i):
                     # Round back to the acquisition dtype, never truncate.
@@ -699,11 +703,11 @@ def stitch_region(
                     get_field=get_field,
                 )
 
-        tiles = None          # this plane's tiles go before the next plane's are read
-        release(out)          # ...and its written pages leave the resident set (spilled case)
-        if len(z_sources) > 1:
-            _log.info("Fusion: region %s plane %d of %d fused (same solved offsets as plane 0).",
-                      region, z_i + 1, len(z_sources))
+            tiles = None      # this plane's tiles go before the next plane's are read
+            release(out)      # ...and its written pages leave the resident set (spilled case)
+            if len(z_sources) > 1 or n_t > 1:
+                _log.info("Fusion: region %s t %d of %d, plane %d of %d fused (same solved "
+                          "offsets as plane 0).", region, t + 1, n_t, z_i + 1, len(z_sources))
 
     return PlacedArray(out, placement)
 
