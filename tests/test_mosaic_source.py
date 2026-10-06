@@ -317,11 +317,13 @@ def test_a_viewport_window_at_a_COARSE_rung_reads_only_the_fovs_under_it(fused_s
     assert win.shape == (64, 100) and (win == 1).all()
 
 
-def test_a_coarse_rung_window_at_a_deeper_z_reads_one_z_one_chunks_fovs(monkeypatch):
-    """nz > 1: the z-stacked coarse rung stays windowed per plane."""
+def test_a_coarse_rung_window_at_a_deeper_z_reads_exactly_the_fovs_under_it_at_that_z():
+    """nz > 1: the z-stacked rung reads EXACTLY its window at ONE z. It used to be a dask
+    concatenate whose honest grain was a 2048 px chunk (every FOV under the chunk), and whose
+    exact-window behaviour at nz == 1 depended on dask's global fusion flag (napari#718);
+    the rung is a plain array-like now (2026-10-05)."""
     from squidxplorer import _mosaic_source as ms
 
-    monkeypatch.setattr(ms, "_FINE_CHUNK_PX", 256)   # several chunks per rung at test scale
     reader = _StepReader(frame=(256, 256))
     levels, step0, nz = ms.fuse_region_pyramid(reader, _pyr_meta(nz=6), "A1", "488",
                                                max_px=1024)
@@ -330,11 +332,16 @@ def test_a_coarse_rung_window_at_a_deeper_z_reads_one_z_one_chunks_fovs(monkeypa
     assert coarse.shape == (6, 64, 1024)
 
     n_before = len(reader.reads)
-    win = np.asarray(coarse[2, 0:64, 0:100])         # inside the first 256-col chunk: FOVs 0-3
+    win = np.asarray(coarse[2, 0:64, 0:100])         # cols 0-100 at step 4: FOVs 0 and 1
     hit = {(f, z) for (_r, f, _c, z, _t) in reader.reads[n_before:]}
-    assert hit == {(f, 2) for f in range(4)}, (
-        f"a one-chunk window at z=2 must read that chunk's FOVs at that z; read {sorted(hit)}")
+    assert hit == {(0, 2), (1, 2)}, (
+        f"a 100-col window at z=2 must read the two FOVs under it at that z; read {sorted(hit)}")
     assert win.shape == (64, 100) and (win == 3).all()   # z=2 reads as 3 in _StepReader
+
+    # napari's own shape of indexing: a lazy all-slice view, then an integer z, materialised.
+    view = coarse[:, 0:64, 0:100]
+    assert view.shape == (6, 64, 100) and hasattr(view, "compute")
+    assert np.array_equal(np.asarray(view[2]), win)
 
 
 def test_fusing_a_level_also_yields_the_coarser_levels_from_the_same_decode():

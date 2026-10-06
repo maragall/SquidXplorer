@@ -173,8 +173,136 @@ _MAX_PREVIEW_LEVELS = 12
 #: Below this the level is smaller than a thumbnail and buys nothing.
 _MIN_LEVEL_PX = 128
 
-#: Chunk edge of the on-demand fine rungs: what one deep-zoom slice materialises.
-_FINE_CHUNK_PX = 2048
+
+
+def _norm_part(part, n: int, offset: int) -> "tuple[int, int, bool]":
+    """One index part over an axis of length *n* whose origin sits at *offset* in the parent:
+    ``(start, stop, is_int)`` in PARENT coordinates. Unit step only, like every rung."""
+    if isinstance(part, slice):
+        if part.step not in (None, 1):
+            raise ValueError(f"a mosaic rung slices at unit step only, got {part!r}")
+        a, b = part.indices(n)[:2]
+        return offset + a, offset + max(a, b), False
+    i = int(part)
+    if i < 0:
+        i += n
+    if not 0 <= i < n:
+        raise IndexError(f"index {part!r} out of range for an axis of length {n}")
+    return offset + i, offset + i + 1, True
+
+
+class _WindowedStack:
+    """A rung as a plain array-like, dask-free: ``(z, y, x)`` (or ``(y, x)`` for a single
+    plane) whose EVERY index reads exactly its window at the z asked for.
+
+    napari slices a level lazily with all-slice indexing, then indexes z with an integer and
+    materialises; an ROI child crops with ``lvl[..., r0:r1, c0:c1]``. Both are served here:
+    an index with no integer part is a lazy VIEW (a sub-window of the same planes), an
+    integer z computes that one plane's window, ``np.asarray`` / ``compute`` materialise.
+
+    The rungs used to be dask arrays: ``from_array(_WindowedLevel, chunks=2048)`` stacked
+    with ``concatenate`` over z. Two costs: dask's getter fusion is what turned a viewport
+    slice into the exact window, and it is gated by a GLOBAL config key napari flips on
+    every dask-layer slice (napari#718), which under async slicing can stick to off and
+    hand every slice whole 2048 px chunks (every FOV under them); and the z concatenate
+    blocked fusion for nz > 1 anyway, so the honest grain there was the chunk, one z.
+    A plain array-like has no graph to optimise and no global to race: the window IS the
+    read, at every z, on every dataset size (2026-10-05).
+    """
+
+    def __init__(self, planes: list, window=None):
+        if not planes:
+            raise ValueError("a rung needs at least one z plane")
+        self._planes = list(planes)
+        h, w = (int(v) for v in planes[0].shape)
+        r0, r1, c0, c1 = window if window is not None else (0, h, 0, w)
+        self._win = (int(r0), int(r1), int(c0), int(c1))
+        self.dtype = np.dtype(planes[0].dtype)
+        self.shape = (len(self._planes), r1 - r0, c1 - c0)
+        self.ndim = 3
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    @property
+    def size(self) -> int:
+        """napari's ``LayerDataProtocol`` asks for it beside ``shape`` and ``dtype``."""
+        n = 1
+        for v in self.shape:
+            n *= int(v)
+        return n
+
+    @property
+    def nbytes(self) -> int:
+        return self.size * int(self.dtype.itemsize)
+
+    def _parts(self, idx) -> list:
+        if not isinstance(idx, tuple):
+            idx = (idx,)
+        if any(part is Ellipsis for part in idx):
+            k = idx.index(Ellipsis)
+            idx = idx[:k] + (slice(None),) * (self.ndim - len(idx) + 1) + idx[k + 1:]
+        if len(idx) > self.ndim:
+            raise IndexError(f"too many indices for a {self.ndim}-D rung: {idx!r}")
+        return list(idx) + [slice(None)] * (self.ndim - len(idx))
+
+    def __getitem__(self, idx):
+        zp, yp, xp = self._parts(idx)
+        r0, _r1, c0, _c1 = self._win
+        z0, z1, z_int = _norm_part(zp, self.shape[0], 0)
+        y0, y1, y_int = _norm_part(yp, self.shape[1], r0)
+        x0, x1, x_int = _norm_part(xp, self.shape[2], c0)
+        if not (z_int or y_int or x_int):
+            return _WindowedStack(self._planes[z0:z1], window=(y0, y1, x0, x1))
+        planes = self._planes[z0:z1]
+        if planes:
+            out = np.stack([pl[y0:y1, x0:x1] for pl in planes])
+        else:
+            out = np.zeros((0, y1 - y0, x1 - x0), self.dtype)
+        if z_int:
+            out = out[0]
+        if y_int:
+            out = out[0] if z_int else out[:, 0]
+        if x_int:
+            out = out[..., 0]
+        return out
+
+    def __array__(self, dtype=None, copy=None):
+        r0, r1, c0, c1 = self._win
+        arr = np.stack([pl[r0:r1, c0:c1] for pl in self._planes])
+        return arr if dtype is None else arr.astype(dtype, copy=False)
+
+    def compute(self) -> np.ndarray:
+        """Materialise, the name the lazy-rung pins ask for."""
+        return np.asarray(self)
+
+
+class _WindowedPlane(_WindowedStack):
+    """The single-plane rung: ``(y, x)``, the shape a 2-D acquisition's layer has always had."""
+
+    def __init__(self, plane, window=None):
+        super().__init__([plane], window=window)
+        self.shape = self.shape[1:]
+        self.ndim = 2
+
+    def __getitem__(self, idx):
+        yp, xp = self._parts(idx)
+        r0, _r1, c0, _c1 = self._win
+        y0, y1, y_int = _norm_part(yp, self.shape[0], r0)
+        x0, x1, x_int = _norm_part(xp, self.shape[1], c0)
+        if not (y_int or x_int):
+            return _WindowedPlane(self._planes[0], window=(y0, y1, x0, x1))
+        out = self._planes[0][y0:y1, x0:x1]
+        if y_int:
+            out = out[0]
+        if x_int:
+            out = out[..., 0]
+        return out
+
+    def __array__(self, dtype=None, copy=None):
+        r0, r1, c0, c1 = self._win
+        arr = self._planes[0][r0:r1, c0:c1]
+        return arr if dtype is None else arr.astype(dtype, copy=False)
 
 
 class MemoryBoundedLRUCache:
@@ -534,8 +662,6 @@ def fuse_region_pyramid(
     paint then costs one small file read. Finer rungs are fused exactly as before; an absent,
     corrupt or multi-z well image falls back to fusing, with the reason logged.
     """
-    import dask.array as da
-
     base = _planned_plane(meta, region, max_px)
     if base is None:
         return None
@@ -584,16 +710,13 @@ def fuse_region_pyramid(
             return _well[0]
 
     def _rung(s: int, h: int, w: int, dt, well):
-        """One windowed dask rung: a viewport slice pastes only the FOVs under it."""
-        def one_z(z: int):
-            src = _WindowedLevel(reader, meta, region, channel, z, time_point,
-                                 s, (h, w), dt, cache, token, well=well)
-            return da.from_array(src, chunks=_FINE_CHUNK_PX, asarray=False,
-                                 meta=np.empty((0, 0), dtype=dt),
-                                 name=f"raw-win-{token}-{region}-{channel}-s{s}-z{z}")
+        """One windowed rung, dask-free: a viewport slice pastes only the FOVs under it, at
+        the one z asked for (:class:`_WindowedStack`)."""
+        planes = [_WindowedLevel(reader, meta, region, channel, z, time_point,
+                                 s, (h, w), dt, cache, token, well=well) for z in range(nz)]
         if nz <= 1:
-            return one_z(0)
-        return da.concatenate([one_z(z)[None, ...] for z in range(nz)], axis=0)
+            return _WindowedPlane(planes[0])
+        return _WindowedStack(planes)
 
     # EVERY planned rung is windowed (2026-08-19). They used to be one whole-region
     # ``delayed`` fuse each, and napari's draw blocks synchronously on the slice it asks for:
