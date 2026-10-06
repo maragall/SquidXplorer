@@ -298,7 +298,11 @@ class _MosaicWorker(QThread):
                 return (float(info.min), float(info.max))
             except (TypeError, ValueError, KeyError):
                 pass
-        return auto_window(levels, True)
+        # The CHANNEL picks the rule (transmitted light spans its own tonal range): this
+        # seed is what paints the window first, before napari's "once" ever runs. Julio,
+        # 2026-10-06: the brightfield opened wrong until "once" was clicked, because this
+        # call named no channel and fell to the fluorescence rule.
+        return auto_window(levels, True, channel)
 
     def run(self):
         from squidxplorer._mosaic_source import fuse_region_pyramid, mosaic_bbox_um

@@ -116,3 +116,25 @@ def test_a_transmitted_light_channel_spans_its_own_tonal_range_through_the_view_
     assert lo_fl > 3500.0, (
         f"the same pixels under a fluorescence channel kept their floor below the mode "
         f"({lo_fl:.0f}): the rule is no longer declaration-driven")
+
+
+def test_the_mosaic_worker_seeds_a_transmitted_channel_on_its_own_range_too():
+    """Julio (2026-10-06): the brightfield opened wrong until napari's "once" was clicked. The
+    worker's seed, which paints the window FIRST, named no channel and fell to the
+    fluorescence rule; only the reset path carried the channel."""
+    from squidxplorer._napari_view import _auto_window_for
+    from squidxplorer._workers import _MosaicWorker
+
+    plane = _transmitted()
+    covered = plane[plane > 0]
+    levels = [np.stack([plane, plane]), np.stack([plane[::2, ::2], plane[::2, ::2]])]
+    meta = {"dtype": "uint16", "channels": [{"name": "BF_LED_matrix_full"}]}
+    worker = _MosaicWorker(reader=None, meta=meta, region="A1", channels=["BF_LED_matrix_full"])
+
+    lo, hi = worker._seed_window("BF_LED_matrix_full", levels, _auto_window_for)
+    assert float((covered < lo).mean()) < 0.01, f"the worker's BF floor {lo:.0f} clips the tissue"
+    assert lo > 0.0
+
+    lo_fl, _ = worker._seed_window("Fluorescence_405_nm_Ex", levels, _auto_window_for)
+    assert lo_fl > 3500.0, "the worker's fluorescence seed lost its floor"
+
