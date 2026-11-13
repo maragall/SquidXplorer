@@ -493,9 +493,12 @@ class _VideoWorker(QThread):
     cancelled = Signal()
 
     def __init__(self, reader, meta, region, out_path, *, axis, fps,
-                 channels=None, windows=None, rgb_by_channel=None, z_level=0, time_point=0, parent=None):
+                 channels=None, windows=None, rgb_by_channel=None, z_level=0, time_point=0,
+                 bbox_um=None, measurements=False, parent=None):
         super().__init__(parent)
         self._reader, self._meta, self._region = reader, meta, region
+        self._bbox_um = tuple(bbox_um) if bbox_um is not None else None
+        self._measurements = bool(measurements)
         self._out_path = str(out_path)
         self._axis, self._fps = str(axis), int(fps)
         self._channels = list(channels) if channels is not None else None
@@ -517,6 +520,7 @@ class _VideoWorker(QThread):
                 axis=self._axis, fps=self._fps, channels=self._channels,
                 windows=self._windows, rgb_by_channel=self._rgb_by_channel,
                 z_level=self._z, time_point=self._t,
+                bbox_um=self._bbox_um, measurements=self._measurements,
                 on_frame=lambda d, total: self.progress.emit(int(d), int(total)),
                 should_stop=self._stop.is_set,
             )

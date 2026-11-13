@@ -1095,8 +1095,9 @@ class RegionViewer(QMainWindow):
         btn.setToolTip(
             f"Export what this window is showing as an .mp4: {n} frames along the "
             f"{'time' if axis == 't' else 'z'} axis of the region on screen, with the channels "
-            f"that are visible and the contrast that is set. Runs off the UI thread; click again "
-            f"to cancel.")
+            f"that are visible and the contrast that is set. The raw intensity statistics and "
+            f"x/y profiles of every frame land beside it as .csv. Runs off the UI thread; click "
+            f"again to cancel.")
 
     def _visible_channels(self) -> "list[str]":
         """The channels the user can actually SEE, in acquisition order."""
@@ -1157,7 +1158,8 @@ class RegionViewer(QMainWindow):
         n = axis_length(self._meta, axis)
         w = _VideoWorker(self._reader, self._meta, region, path, axis=axis, fps=DEFAULT_FPS,
                          channels=channels, windows=windows, rgb_by_channel=rgb,
-                         z_level=self._z_slider_index(), time_point=self.time_point, parent=self)
+                         z_level=self._z_slider_index(), time_point=self.time_point,
+                         bbox_um=self._roi_bbox, measurements=True, parent=self)
         self._show_progress(0, f"movie: 0 of {n} frames")
         self._say(f"exporting {n} {axis}-axis frames of {region} to {path}…")
         _launch_worker(
@@ -1249,7 +1251,11 @@ class RegionViewer(QMainWindow):
             size_mb = Path(path).stat().st_size / 1e6
         except OSError:
             pass
-        self._say(f"movie: {frames} frames -> {path} ({size_mb:.1f} MB) in {seconds:.1f}s.")
+        from squidxplorer._measurements import measurement_paths
+
+        stats_csv, _profile_csv = measurement_paths(path)
+        numbers = f", measurements -> {stats_csv.name}" if stats_csv.is_file() else ""
+        self._say(f"movie: {frames} frames -> {path} ({size_mb:.1f} MB) in {seconds:.1f}s{numbers}.")
 
     def _on_movie_failed(self, reason: str) -> None:
         self._hide_progress()
