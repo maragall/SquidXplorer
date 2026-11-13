@@ -60,7 +60,8 @@ Developers working from this checkout: `pip install -e .[gui]` into your own ven
 - Launch SquidXplorer. A small console opens beside it; that is normal and shows progress.
 - **File, then Open acquisition folder**, and pick the acquisition (the folder holding the `0`
   folder and/or the `ome_tiff` folder).
-- It reads both Squid formats (individual TIFFs and OME-TIFF), on 384 and 1536 plates.
+- It reads both Squid formats (individual TIFFs and OME-TIFF), on 6, 12, 24, 96, 384 and 1536
+  well plates and on slides.
 - The first open downsamples every well to build the plate view; **opening the same acquisition
   again is a cache read** (measured: 15.2 s to 0.08 s on a 1536-well plate). Those thumbnails go
   in your own cache folder, never into the acquisition: `~/Library/Caches/squidxplorer` on macOS,
@@ -76,3 +77,19 @@ Developers working from this checkout: `pip install -e .[gui]` into your own ven
   **operator** on that view.
 - The **Window navigator** lists every open view; select rows to highlight their wells on the
   plate, and **Collapse all** when the desktop gets busy.
+
+## Movies and measurements
+
+- The **movie** chip exports the view's time series (or its z sweep) as an `.mp4`, in the
+  channels and contrast on screen. In an ROI view it records the ROI.
+- Two `.csv` files land beside every movie, measured from the raw camera counts of the same
+  pixels each frame shows, never from the coloured movie:
+  - `<name>.csv`: per frame and channel, the mean, median, standard deviation, minimum and
+    maximum intensity;
+  - `<name>_profile.csv`: per frame and channel, the intensity profile along x and along y,
+    in micrometres.
+- `time_s_declared` is the timepoint times the interval the acquisition was set up with. It is
+  not a per-frame clock.
+- For a z-stack time series, run **Stitch** with the z handling set to **Focus stack** or
+  **Maximum Intensity Projection**, save it, and open the saved result: its movie is the
+  projected, stitched time-lapse. No model is fitted; the tables open in Fiji, Excel or Prism.
