@@ -283,6 +283,15 @@ def test_too_few_planes_is_a_named_refusal():
         fuse_stack([plane] * 2)
 
 
+def test_the_operator_reduces_a_too_shallow_stack_by_maximum_projection():
+    """A single-plane acquisition stitched with z_operator='fstack' skipped every region."""
+    rng = np.random.default_rng(0)
+    planes = [rng.integers(0, 4000, (8, 8)).astype(np.uint16) for _ in range(4)]
+    op = fstack_op()
+    np.testing.assert_array_equal(op(iter(planes[:1])), planes[0])
+    np.testing.assert_array_equal(op(iter(planes)), np.max(planes, axis=0))
+
+
 def test_the_factory_refuses_bad_knobs_by_name():
     with pytest.raises(ValueError, match="alpha"):
         fstack_op(alpha=0.0)

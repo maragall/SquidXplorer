@@ -29,8 +29,9 @@ Three deliberate divergences, decided with Julio (2026-08-25):
 
 Two interpretations where the MATLAB is degenerate rather than defined:
 
-- a stack of fewer than ``2*STEP + 1 = 5`` planes is refused BY NAME (the MATLAB indexes
-  out of bounds there);
+- a stack of fewer than ``2*STEP + 1 = 5`` planes (the MATLAB indexes out of bounds there)
+  is refused BY NAME by :func:`fuse_stack`; the registered OPERATOR reduces it by maximum
+  projection instead, said once (:func:`_too_shallow`);
 - a pixel with zero focus measure in every frame (or a selectivity with no finite value)
   fuses as the plain mean of its planes, where the MATLAB casts NaN to uint8 0.
 
@@ -61,7 +62,7 @@ from scipy.ndimage import convolve1d, median_filter
 
 from squidxplorer._engine import Param, add_operator
 from squidxplorer._logpane import get_logger
-from squidxplorer.projection import Z_REDUCER, cast_like
+from squidxplorer.projection import Z_REDUCER, cast_like, project
 
 log = get_logger("fstack")
 
@@ -242,6 +243,19 @@ def fuse_stack(planes, nhsize: int = DEFAULT_NHSIZE, alpha: float = DEFAULT_ALPH
     return cast_like(fused, dtype, copy=False)
 
 
+_said_too_shallow = False
+
+
+def _too_shallow(planes: list) -> np.ndarray:
+    """Under MIN_PLANES the focus fit cannot run: maximum projection instead, said once."""
+    global _said_too_shallow
+    emit = log.debug if _said_too_shallow else log.info
+    _said_too_shallow = True
+    emit("fstack: %d z plane(s), fewer than the %d its focus fit needs: reduced by maximum "
+         "projection instead", len(planes), MIN_PLANES)
+    return project(planes)
+
+
 def fstack_op(nhsize: int = DEFAULT_NHSIZE, alpha: float = DEFAULT_ALPHA,
               sth: float = DEFAULT_STH) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
     """Build THE fstack operator: all z planes of one (FOV, channel, t) -> one fused plane."""
@@ -253,7 +267,10 @@ def fstack_op(nhsize: int = DEFAULT_NHSIZE, alpha: float = DEFAULT_ALPHA,
         raise ValueError(f"sth must be a finite threshold in dB; got {sth!r}")
 
     def _fstack(planes: Iterable[np.ndarray]) -> np.ndarray:
-        return fuse_stack(list(planes), int(nhsize), float(alpha), float(sth))
+        planes = list(planes)
+        if len(planes) < MIN_PLANES:
+            return _too_shallow(planes)
+        return fuse_stack(planes, int(nhsize), float(alpha), float(sth))
 
     _fstack.__name__ = f"fstack(nhsize={int(nhsize)},alpha={alpha},sth={sth})"
     _fstack.consumes = Z_REDUCER
