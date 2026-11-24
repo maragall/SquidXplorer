@@ -266,3 +266,20 @@ def test_project_well_refuses_a_single_plane_for_a_z_reducer(master):
     reader = _ZReader(master)
     with pytest.raises(ValueError, match="only meaningful for a plane-op"):
         project_well(reader, "A1", 0, reduce=project, z_level=1)
+
+
+def test_a_stop_request_abandons_the_region_within_one_tile(master):
+    """Closing the window mid-stitch left the fuse running: 132 s on a 64-field, 7-plane region."""
+    from squidxplorer import run_plate
+
+    reader = _ZReader(master)
+    errors: list = []
+    stream = run_plate(reader, operator="stitch", regions=["A1"], on_error=lambda *a: errors.append(a),
+                       operator_kwargs={"z_operator": None, "register": False,
+                                        "correct_illumination": False},
+                       stop=lambda: len(reader.read_z) >= 2)
+
+    assert list(stream) == [], "a stopped region still delivered a mosaic"
+    assert not errors, f"a stop was filed as a skipped well: {errors}"
+    assert len(reader.read_z) < GRID * GRID * len(CHANNELS) * N_Z, (
+        f"the region read all {len(reader.read_z)} planes after the stop")

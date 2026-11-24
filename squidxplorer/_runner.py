@@ -86,7 +86,7 @@ class InProcessRunner:
         stream = squidxplorer.run_plate(
             reader, operator=spec.operator, workers=workers, n_fovs=spec.n_fovs,
             on_error=on_error, regions=spec.regions, operator_kwargs=spec.operator_kwargs,
-            windows=windows)
+            windows=windows, stop=stop)
         landed, stopped = 0, False
         try:
             for region, fov, image in stream:

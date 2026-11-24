@@ -179,7 +179,7 @@ def write_fused_acquisition(reader, operator: str, dst, *, regions=None,
     n_written = 0
     stopped = False
     stream = run_plate(reader, operator=operator, regions=regions, n_fovs=None, workers=workers,
-                       on_error=_on_error, operator_kwargs=operator_kwargs)
+                       on_error=_on_error, operator_kwargs=operator_kwargs, stop=stop)
     try:
         for region, fov, image in stream:
             if stop is not None and stop():

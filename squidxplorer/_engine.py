@@ -119,6 +119,11 @@ class Operator:
 # MACHINE's refusal, the same for every well, never a corrupt-well skip.
 _NOT_A_WELL_FAULT = (ImportError, MissingDependency, MemoryError)
 
+
+class RunStopped(Exception):
+    """A region operator saw its run's stop request and abandoned the region."""
+
+
 # THE operator table — name -> Operator. `consumes` is the dispatch; nothing branches on a name.
 # (Shelved 2026-08-24: `keepz` — keeping every z plane is spelled `z_operator=None` on stitch
 # now — and `reference`, the Tenengrad z-selecting reducer. Git history reinstates.)
@@ -447,8 +452,12 @@ def run_plate(
     on_error=None,
     operator_kwargs: Optional[dict] = None,
     windows: Optional[dict] = None,
+    stop: Optional[Callable[[], bool]] = None,
 ) -> Iterator[tuple[str, int, np.ndarray]]:
     """Run *operator* over every selected well, streaming ``(region, fov, image)`` results.
+
+    ``stop`` is polled INSIDE a region operator that accepts it, so a stopped run ends within
+    one tile, not one region.
 
     Dispatches off the operator's ``consumes``: ``{"fov"}`` runs the region loop (one fused
     result per well, every FOV, one well in flight unless *workers* says otherwise), anything
@@ -477,7 +486,7 @@ def run_plate(
                 "spelling of a FOV subset - or pass n_fovs=None for every FOV.")
         return _stitch_plate(reader, n_fovs=None, workers=1 if workers is None else workers,
                              operator=operator, on_error=on_error, regions=regions,
-                             **(operator_kwargs or {}))
+                             stop=stop, **(operator_kwargs or {}))
     return _project_plate(reader,
                           n_fovs=1 if n_fovs is N_FOVS_LOOP_DEFAULT else n_fovs,
                           workers=workers, operator=operator,

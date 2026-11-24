@@ -16,6 +16,7 @@ import numpy as np
 from squidxplorer.projection import cast_like
 from squidxplorer._engine import (
     _NOT_A_WELL_FAULT,
+    RunStopped,
     MissingOperatorDependency,
     Operator,
     Param,
@@ -473,8 +474,13 @@ def stitch_region(
     abs_thresh: float = _ABS_THRESH,
     geometry: Optional[dict] = None,
     timer=None,
+    stop: Optional[Callable[[], bool]] = None,
 ) -> np.ndarray:
     """Apply an operator to every FOV of one well, register them, and fuse a seamless mosaic."""
+    def _check_stop() -> None:
+        if stop is not None and stop():
+            raise RunStopped(f"region {region!r}: the run was stopped")
+
     from tilefusion.fusion import fuse_plane
     from tilefusion.utils import make_1d_profile
 
@@ -565,6 +571,7 @@ def stitch_region(
         with timer.stage("read_reg"):
             reg_planes = np.empty((len(fovs), 1, *tile_shape), dtype=dtype)
             for i, fov in enumerate(fovs):
+                _check_stop()
                 reg_planes[i, 0] = reader.read(
                     region=region, fov=fov, channel=all_channels[reg_c_global],
                     z_level=registration_z, time_point=registration_t,
@@ -675,6 +682,7 @@ def stitch_region(
                 tiles = None
                 tiles = np.empty((len(fovs), len(channels), *tile_shape), dtype=dtype)
                 for i, fov in enumerate(fovs):
+                    _check_stop()
                     tiles[i] = project_well(reader, region, fov, reduce=_op.fn,
                                             consumes=_op.consumes, time_point=t,
                                             z_level=z_src)[0, channels, 0]
@@ -685,6 +693,7 @@ def stitch_region(
                     return _tiles[idx].astype(np.float32, copy=False)
 
                 def write_block(y0, y1, x0, x1, arr, _t=t, _z=z_i):
+                    _check_stop()
                     # Round back to the acquisition dtype, never truncate.
                     out[_t, :, _z, y0:y1, x0:x1] = cast_like(arr, out.dtype)
 
@@ -801,6 +810,7 @@ def _stitch_plate(
     operator: str = "stitch",
     on_error=None,
     regions=None,
+    stop: Optional[Callable[[], bool]] = None,
     **operator_kwargs,
 ) -> Iterator[tuple[str, int, np.ndarray]]:
     """Stitch every selected well of a plate, streaming ONE fused mosaic per well."""
@@ -886,6 +896,7 @@ def _stitch_plate(
                 "Flatfield: plate-wide estimate failed (%s); each well will estimate from its "
                 "own tiles instead, so wells are not photometrically comparable.", exc)
 
+    stop_kwarg = {"stop": stop} if stop is not None and _accepts_kwarg(op, "stop") else {}
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         in_flight: dict = {}
 
@@ -895,7 +906,7 @@ def _stitch_plate(
                 region, fovs = next(tasks)
             except StopIteration:
                 return False
-            future = pool.submit(op, reader, region, fovs, **operator_kwargs)
+            future = pool.submit(op, reader, region, fovs, **operator_kwargs, **stop_kwarg)
             in_flight[future] = (region, fovs[0])
             return True
 
@@ -912,6 +923,8 @@ def _stitch_plate(
                     image = future.result()
                 except _NOT_A_WELL_FAULT:
                     raise  # a missing package is not a corrupt well
+                except RunStopped:
+                    return  # the caller's own stop poll reports it; never a skipped well
                 except Exception as exc:
                     if on_error is None:
                         raise  # default: fail-fast (the per-FOV loop's contract)
