@@ -160,9 +160,13 @@ class GenericOperatorPanel(_Panel):
             from qtpy.QtWidgets import QComboBox
 
             from squidxplorer import available_plane_operators
+            from squidxplorer._engine import Z_REDUCER, operator_consumes, operator_reduces_depth
 
             widget = QComboBox()
             for name in available_plane_operators():
+                # A z-consumer that keeps its depth (a whole-stack solve) is not a z projection.
+                if operator_consumes(name) & Z_REDUCER and not operator_reduces_depth(name):
+                    continue
                 widget.addItem(name)
             widget.addItem(KEEP_EVERY_PLANE)
             i = widget.findText(str(param.default))

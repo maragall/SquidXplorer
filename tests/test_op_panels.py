@@ -79,6 +79,8 @@ def test_stitchs_panel_is_generated_and_its_z_handling_is_a_combo(qapp):
     assert isinstance(widget, QComboBox), "the inner operator must be a choice, not free text"
     labels = [widget.itemText(i) for i in range(widget.count())]
     assert KEEP_EVERY_PLANE in labels, "keep-every-plane fell out of the z-handling combo"
+    assert sorted(labels) == sorted(["mip", "fstack", KEEP_EVERY_PLANE]), (
+        f"the z-handling combo offers a whole-stack solve as a z projection: {labels}")
     i = widget.findText(KEEP_EVERY_PLANE)
     widget.setCurrentIndex(i)
     assert panel.kwargs()["z_operator"] is None, (
